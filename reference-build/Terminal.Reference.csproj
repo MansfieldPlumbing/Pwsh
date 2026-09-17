@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0-android37.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <RuntimeIdentifier>android-arm64</RuntimeIdentifier>
+    <Configurations>Slim;R2R</Configurations>
+    <ApplicationId>dev.mansfieldplumbing.terminal.reference</ApplicationId>
+    <SupportedOSPlatformVersion>26</SupportedOSPlatformVersion>
+    <PowerShellPackageVersion>7.7.0-preview.4</PowerShellPackageVersion>
+    <RunAOTCompilation>false</RunAOTCompilation>
+    <AndroidUseAssemblyStore>true</AndroidUseAssemblyStore>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Slim'">
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <Optimize>true</Optimize>
+    <DebugSymbols>false</DebugSymbols>
+    <EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
+    <AndroidUseSharedRuntime>false</AndroidUseSharedRuntime>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'R2R'">
+    <PublishReadyToRun>true</PublishReadyToRun>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="ReferenceActivity.cs" />
+    <PackageReference Include="System.Management.Automation" Version="$(PowerShellPackageVersion)" />
+    <PackageReference Include="Microsoft.PowerShell.Commands.Management" Version="$(PowerShellPackageVersion)" />
+    <PackageReference Include="Microsoft.PowerShell.Commands.Utility" Version="$(PowerShellPackageVersion)" />
+    <PackageReference Include="Microsoft.PowerShell.Security" Version="$(PowerShellPackageVersion)" />
+    <PackageReference Include="System.Formats.Nrbf" Version="11.0.0-preview.6.26359.118" />
+    <TrimmerRootAssembly Include="System.Management.Automation" />
+    <TrimmerRootAssembly Include="Microsoft.PowerShell.Commands.Management" />
+    <TrimmerRootAssembly Include="Microsoft.PowerShell.Commands.Utility" />
+    <TrimmerRootAssembly Include="Microsoft.PowerShell.Security" />
+  </ItemGroup>
+</Project>

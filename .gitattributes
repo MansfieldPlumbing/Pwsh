@@ -1,0 +1,9 @@
+*.cs       text eol=lf
+*.ps1      text eol=lf
+*.ps1xml   text eol=lf
+*.xml      text eol=lf
+*.csproj   text eol=lf
+*.h        text eol=lf
+*.md       text eol=lf
+*.txt      text eol=lf
+.gitignore text eol=lf
