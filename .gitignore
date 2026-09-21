@@ -1,0 +1,20 @@
+# Package cache and build output
+.temp/
+build/
+build-*/
+*.nupkg
+*.download
+
+# Built packages and signing material
+*.apk
+*.pfx
+*.keystore
+*.jks
+*.idsig
+
+# Run logs
+setup.txt
+*.log
+
+# Local audit notes
+audit.md

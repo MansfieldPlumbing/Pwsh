@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "producer": {
+    "name": "dotnet/android",
+    "version": "37.0.0-preview.7.2131",
+    "commit": "d76473e37910077edea90389f8a0ce71d11a5651"
+  },
+  "provenance": [
+    {
+      "id": "xamarin-app",
+      "url": "https://raw.githubusercontent.com/dotnet/android/d76473e37910077edea90389f8a0ce71d11a5651/src/native/clr/include/xamarin-app.hh",
+      "sha256": "1E93734AD8515175EF4F43C9D9C0AF606033DA1449906F0DF335C0A9030C1556"
+    },
+    {
+      "id": "llvm-elf",
+      "url": "https://raw.githubusercontent.com/llvm/llvm-project/llvmorg-18.1.6/llvm/include/llvm/BinaryFormat/ELF.h",
+      "sha256": "1D13DB5EAFC26A46794DD13221CAD1A4762ACDCD09A04DB82F0A6E57BC914BFB"
+    }
+  ],
+  "xaba": {
+    "magic": 1094861144,
+    "formatVersion": 4,
+    "bit64Flag": 2147483648,
+    "arm64AbiFlag": 65536,
+    "structures": {
+      "AssemblyStoreHeader": [
+        {
+          "type": "uint32_t",
+          "name": "magic"
+        },
+        {
+          "type": "uint32_t",
+          "name": "version"
+        },
+        {
+          "type": "uint32_t",
+          "name": "entry_count"
+        },
+        {
+          "type": "uint32_t",
+          "name": "index_entry_count"
+        },
+        {
+          "type": "uint32_t",
+          "name": "index_size"
+        },
+        {
+          "type": "uint64_t",
+          "name": "content_id"
+        }
+      ],
+      "AssemblyStoreIndexEntry": [
+        {
+          "type": "xamarin::android::hash_t",
+          "name": "name_hash"
+        },
+        {
+          "type": "uint32_t",
+          "name": "descriptor_index"
+        },
+        {
+          "type": "uint8_t",
+          "name": "ignore"
+        }
+      ],
+      "AssemblyStoreEntryDescriptor": [
+        {
+          "type": "uint32_t",
+          "name": "mapping_index"
+        },
+        {
+          "type": "uint32_t",
+          "name": "data_offset"
+        },
+        {
+          "type": "uint32_t",
+          "name": "data_size"
+        },
+        {
+          "type": "uint32_t",
+          "name": "debug_data_offset"
+        },
+        {
+          "type": "uint32_t",
+          "name": "debug_data_size"
+        },
+        {
+          "type": "uint32_t",
+          "name": "config_data_offset"
+        },
+        {
+          "type": "uint32_t",
+          "name": "config_data_size"
+        }
+      ]
+    }
+  },
+  "elf": {
+    "machineName": "EM_AARCH64",
+    "machine": 183,
+    "maxPageSize": 16384,
+    "storeLibraryName": "libassembly-store.so",
+    "payloadSymbol": "_assembly_store"
+  }
+}
