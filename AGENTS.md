@@ -110,7 +110,36 @@ only when that group's evidence exists. Name the source for every new fact.
   assemblies. It does not produce native code.
 ## Rules for specific changes
 
-- Before modifying `Read-ElfImage`, the SysV ELF hash implementation, or the
+- `scripts/CanvasDemo.ps1` is frozen (SHA-256
+  `8E96992365A72E81B1A1EEB518AE9052020519EA175EC5465BAC4A989928F3B9`). Xamarin
+  is removable implementation; the frozen script is evidence. Remove
+  dependencies beneath it. Do not edit it, and do not replace it with a new
+  application API as part of removing Xamarin.
+- Leaving Xamarin proceeds by gates, each proved alone: 2a CoreCLR runs one
+  managed log line from `ANativeActivity_onCreate`; 2b the owned host serves
+  assemblies from the existing store; 2c a runspace opens with
+  `UseCurrentThread` and `DefaultRunspace` stays set on the main thread; 2d
+  `Profile.ps1` runs through the same path as today; 2e an owned compatibility
+  assembly satisfies the CanvasDemo contract; 2f the frozen bytes run with
+  Mono.Android, Mono.Android.Runtime, Java.Interop, libmonodroid,
+  libxamarin-app, Xamarin DEX and type maps absent.
+- Compatibility is scoped by the frozen workload, not by namespace. Defining
+  `Android.Graphics.Bitmap` obliges exactly the constructors, members, return
+  values, lifetime and interactions the frozen script reaches, taken from its
+  AST resolved against the pinned Mono.Android metadata and from a traced run
+  on the Xamarin baseline. Do not build Java peer tracking, arbitrary Java
+  subclassing, type maps or the Java.Interop object model.
+- The script keeps running on the Android main thread, as in the baseline.
+  JNI calls use `activity->env` only on that thread; any other thread attaches
+  through `activity->vm`. Android's own `Canvas`, `Bitmap`, `Paint` and AGSL
+  `RuntimeShader` stay the implementation, reached through JNI on the
+  `Surface` from `ANativeWindow_toSurface`; the real `setContentView` is never
+  called over `NativeActivity`'s content view.
+- QuickPS supplies literal Android mechanisms (JNI through its function-table
+  call, NDK exports, pull-based input and looper waits) and never runs
+  PowerShell from a native callback. Only the Pwsh compatibility assembly uses
+  `Android.*` and `Java.*` names, and only it invokes script delegates, which
+  it does on the main thread as the baseline does.- Before modifying `Read-ElfImage`, the SysV ELF hash implementation, or the
   emitted ELF hash-table structure, add and pass a permanent multi-bucket hash
   self-test that covers successful chained lookups and missing-symbol lookups.
 
