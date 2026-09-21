@@ -83,6 +83,10 @@ only when that group's evidence exists. Name the source for every new fact.
 - `System.Linq` in the pinned runtime references `System.Numerics.Vectors`
   from `Enumerable.Sum`, `Average` and `FillIncrementing` (metadata read from
   the built store), so that assembly must ship.
+- `Read-ElfImage` resolves all 36 symbols of the predecessor arm32
+  `libxamarin-app.so` through its LLD 18 SysV hash table: 37 buckets, 25 in
+  use, six collision chains, the longest four entries. That exercises the
+  reader's own hash function and chain walk against an independent writer.
 - `-Debug` compares the emitted type-map name and `classes.dex` against a .NET
   SDK reference build.
 
@@ -115,6 +119,6 @@ Verify each on hardware before relying on it.
 - How the host resolves the per-install native library directory.
 - Whether the ELF32 store library should reserve eight dynamic entries like
   ELF64. Changing it alters proven arm32 bytes, so it needs its own device run.
-- `Read-ElfImage` resolves symbols through the SysV hash table with its own
-  hash function, but every emitted table has one bucket, so that function is
-  not yet exercised. A self-test with a multi-bucket table would cover it.
+- A permanent self-test for `Read-ElfImage` hash lookups, including missing
+  names that hash into occupied and empty buckets. Every emitted table has one
+  bucket, so the build itself never exercises bucket selection.
