@@ -108,6 +108,12 @@ only when that group's evidence exists. Name the source for every new fact.
   shim owns every call. It does not produce ARM64 or Android code.
 - PSPersistence persists selected SMA expression trees as reloadable
   assemblies. It does not produce native code.
+## Rules for specific changes
+
+- Before modifying `Read-ElfImage`, the SysV ELF hash implementation, or the
+  emitted ELF hash-table structure, add and pass a permanent multi-bucket hash
+  self-test that covers successful chained lookups and missing-symbol lookups.
+
 ## Open questions
 
 Verify each on hardware before relying on it.
