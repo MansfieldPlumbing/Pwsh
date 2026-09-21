@@ -80,8 +80,8 @@ only when that group's evidence exists. Name the source for every new fact.
   `external_assembly_probe` that walks a table read back from the store; then
   `coreclr_create_delegate` for `NativeHost.Admit`. Its code passes the
   per-ISA decoder, a control-flow ABI checker (SysV AMD64 or AAPCS64) and the
-  emitter controls in Step 6. On x86-64 it requires `Admit` to return
-  0x50575348, then calls `NativeHost.RunPowerShell` through a second delegate
+  emitter controls in Step 6. It requires `Admit` to return 0x50575348,
+  then calls `NativeHost.RunPowerShell` through a second delegate
   and logs what it returns. `-TraceAssemblyProbe` (x86-64, diagnostic) logs each
   probe request exactly as CoreCLR spells it, and whether the store has it.
 - The NativeActivity store starts every image on a 16-byte boundary with zero
@@ -153,6 +153,12 @@ only when that group's evidence exists. Name the source for every new fact.
   `Admit` held in the same process. The process was alive 40 seconds later and
   the crash buffer was empty, with and without `-TraceAssemblyProbe`. The
   Xamarin x86_64 build stayed byte-identical.
+- Gates 2b and 2c, arm64 physical device (Samsung Galaxy S23): the same
+  sequence, with the A64 host and the aligned arm64 store, logged every marker
+  on the main thread (thread id equal to process id) and `RunPowerShell
+  returned 0x50575348` about half a second after `Admit`; the process was
+  alive 40 seconds later and the crash buffer held nothing for it. The Xamarin
+  arm64 build stayed byte-identical.
 - During those runs SMA also asked the probe for
   `System.Management.Automation.dll` by its full path under the app's files
   directory. The probe has no entry by path, so it declined; execution
@@ -228,7 +234,7 @@ only when that group's evidence exists. Name the source for every new fact.
 
 Verify each on hardware before relying on it.
 
-- Not yet proven: gates 2b and 2c on arm64 and arm32; gate 2a on arm32; the 40
+- Not yet proven: gates 2a, 2b and 2c on arm32; the 40
   store assemblies the tested startup path did not request, served in place.
 - To prove at gate 2c, then promote: QuickPS's function-table call performs
   JNI on Android, shown by `GetVersion`, `FindClass`, `GetMethodID` and one

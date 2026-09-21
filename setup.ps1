@@ -6375,8 +6375,8 @@ function New-NativeHostLibrary {
         $data['fmtProbeHit'] = & $ascii 'PROBE hit:     %s'
         $data['fmtProbeMiss'] = & $ascii 'PROBE miss:    %s'
     }
-    if ($Architecture -eq 'x64') {
-        # Gates 2b/2c run on x86_64 first; the arm64 host stays the gate 2a host.
+    if ($Architecture -in 'x64', 'arm64') {
+        # Gates 2b/2c: after Admit holds, the host calls RunPowerShell.
         $data['runMethodName'] = & $ascii 'RunPowerShell'
         $data['fmtAdmitWrong'] = & $ascii 'GATE2A Admit returned 0x%08x, expected 0x50575348'
         $data['fmtRunDelegate'] = & $ascii 'GATE2B coreclr_create_delegate RunPowerShell failed 0x%08x'
@@ -6410,7 +6410,12 @@ function New-NativeHostLibrary {
         contract      = @{ Bytes = $contract; Pointers = @(@{ At = $probeOffset; Target = 'pwsh_assembly_probe' }) }
         probeTable    = @{ Bytes = $table; Pointers = @($tablePointers) }
     }
-    if ($Architecture -eq 'x64') { $writable['runPowerShell'] = [byte[]]::new(8) }
+    if ($Architecture -in 'x64', 'arm64') { $writable['runPowerShell'] = [byte[]]::new(8) }
+    if ($Architecture -eq 'arm64') {
+        # 2^32 - 0x50575348. CMP (immediate) holds 12 bits, so the A64 host adds
+        # this to Admit's result and tests the low word for zero instead.
+        $writable['admitComplement'] = [BitConverter]::GetBytes([uint64]([uint64]0x100000000 - 0x50575348))
+    }
 
     if ($Architecture -eq 'arm64') {
     # AAPCS64: arguments x0-x7 (all seven coreclr_initialize arguments fit),
@@ -6466,13 +6471,39 @@ function New-NativeHostLibrary {
         @{ Op = 'cbnz'; Rt = 0; Is64 = $false; Label = 'delegateFailed' },
         # Admit(); __android_log_print(INFO, "Pwsh", "GATE2A Admit returned 0x%08x", result)
         @{ Op = 'call-data'; Data = 'admit'; Args = 0 },
+        # w1 = w0 + (2^32 - magic): zero exactly when Admit returned the magic.
+        @{ Op = 'load32-data'; Rd = 1; Data = 'admitComplement' },
+        @{ Op = 'add-reg'; Rd = 1; Rn = 0; Rm = 1 },
+        @{ Op = 'cbnz'; Rt = 1; Is64 = $false; Label = 'admitWrong' },
         @{ Op = 'mov'; Rd = 3; Rm = 0; Is64 = $false },
         @{ Op = 'movz'; Rd = 0; Imm = $info; Is64 = $false },
         @{ Op = 'lea-data'; Rd = 1; Data = 'tag' },
         @{ Op = 'lea-data'; Rd = 2; Data = 'fmtAdmit' },
         @{ Op = 'call-import'; Import = '__android_log_print'; Args = 4; Variadic = $true },
+        # Gates 2b/2c, only after gate 2a held in this process:
+        # coreclr_create_delegate(hostHandle, domainId, "Pwsh", type, "RunPowerShell", &runPowerShell)
+        @{ Op = 'load64-data'; Rd = 0; Data = 'hostHandle' },
+        @{ Op = 'load32-data'; Rd = 1; Data = 'domainId' },
+        @{ Op = 'lea-data'; Rd = 2; Data = 'assemblyName' },
+        @{ Op = 'lea-data'; Rd = 3; Data = 'typeName' },
+        @{ Op = 'lea-data'; Rd = 4; Data = 'runMethodName' },
+        @{ Op = 'lea-data'; Rd = 5; Data = 'runPowerShell' },
+        @{ Op = 'call-import'; Import = 'coreclr_create_delegate'; Args = 6 },
+        @{ Op = 'cbnz'; Rt = 0; Is64 = $false; Label = 'runDelegateFailed' },
+        # __android_log_print(INFO, "Pwsh", "GATE2B begin"); RunPowerShell(); log its result
+        @{ Op = 'movz'; Rd = 0; Imm = $info; Is64 = $false },
+        @{ Op = 'lea-data'; Rd = 1; Data = 'tag' },
+        @{ Op = 'lea-data'; Rd = 2; Data = 'fmtBegin' },
+        @{ Op = 'call-import'; Import = '__android_log_print'; Args = 3; Variadic = $true },
+        @{ Op = 'call-data'; Data = 'runPowerShell'; Args = 0 },
+        @{ Op = 'mov'; Rd = 3; Rm = 0; Is64 = $false },
+        @{ Op = 'movz'; Rd = 0; Imm = $info; Is64 = $false },
+        @{ Op = 'lea-data'; Rd = 1; Data = 'tag' },
+        @{ Op = 'lea-data'; Rd = 2; Data = 'fmtRun' },
+        @{ Op = 'call-import'; Import = '__android_log_print'; Args = 4; Variadic = $true },
         @{ Op = 'b'; Label = 'done' }
-    ) + (& $logFailure 'directoryFailed' 'fmtDirectory2') + (& $logFailure 'contractFailed' 'fmtContract') + (& $logFailure 'initFailed' 'fmtInit') + (& $logFailure 'delegateFailed' 'fmtDelegate') + @(
+    ) + (& $logFailure 'directoryFailed' 'fmtDirectory2') + (& $logFailure 'contractFailed' 'fmtContract') + (& $logFailure 'initFailed' 'fmtInit') + (& $logFailure 'delegateFailed' 'fmtDelegate') +
+        (& $logFailure 'admitWrong' 'fmtAdmitWrong') + (& $logFailure 'runDelegateFailed' 'fmtRunDelegate') + @(
         @{ Op = 'label'; Name = 'done' },
         @{ Op = 'ldp'; Rt = 19; Rt2 = 20; Offset = 16 },
         @{ Op = 'ldp-post'; Rt = 29; Rt2 = 30; Offset = 32 },

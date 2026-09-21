@@ -124,7 +124,8 @@ payload are the next gates.
 
 ## Gates 2b and 2c result
 
-Passed on the x86_64 emulator with `-Admission NativeActivity`. The owned
+Passed on the x86_64 emulator and on an arm64 physical device (Samsung Galaxy
+S23) with `-Admission NativeActivity`. The owned
 host calls `NativeHost.Admit`, requires 0x50575348, then calls
 `NativeHost.RunPowerShell`, which opens a `UseCurrentThread` runspace with
 `CreateDefault2`, sets `DefaultRunspace` and runs `0x50575348`. Two things
@@ -132,7 +133,7 @@ stood in the way, and neither was Xamarin: the store placed images at
 unaligned offsets, which CoreCLR tolerates only because the .NET for Android
 host copies every assembly, and the NativeActivity APK lacked
 `libpsl-native.so`. The NativeActivity store now aligns every image to 16
-bytes and the APK carries `libpsl-native.so`. arm64 and arm32 are next.
+bytes and the APK carries `libpsl-native.so`. arm32 is next.
 
 ## Open questions
 
