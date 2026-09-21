@@ -37,9 +37,10 @@ Every artifact the script emits has been exercised by the device:
 
 Not yet done, stated plainly:
 
-- **PowerShell does not execute yet.** `System.Management.Automation` ships in
-  the store and loads, but the activity only draws a placeholder. Constructing a
-  host and running a script is the next feature, not a finished one.
+- **The host is minimal.** The activity opens a runspace and runs
+  `Profile.ps1` in-process; on the x86_64 emulator that runs CanvasDemo. The
+  payload carries no cmdlet modules, so commands such as `Get-ChildItem` and
+  `Get-Process` (`Microsoft.PowerShell.Commands.Management`) are not present.
 - **The type map covers only the emitted assembly.** `Mono.Android` needs its
   own module entry, so type registration still logs failures. It is derivable
   from the `Register` attributes those types already carry.
@@ -48,7 +49,7 @@ Not yet done, stated plainly:
 ## Design
 
 **The build script is inside the thing it builds.** The assemblies `setup.ps1`
-relies on are all among the 95 it ships, because a PowerShell host and an APK
+relies on are all among the 96 it ships, because a PowerShell host and an APK
 builder need the same things:
 
 ```
@@ -64,7 +65,7 @@ run.
 
 **Scripts are meant to be the application layer.** The planned host starts a
 runspace and runs a start script; a `.ps1` is a feature, not a configuration
-file. Today the activity draws a placeholder and no script runs (see Status).
+file. Today the activity runs `Profile.ps1` in a runspace it opens at startup (see Status).
 
 ## What this actually is
 
@@ -119,9 +120,9 @@ Each step runs its dependencies first, so `-Step 11` is a full build.
 | 1 | Verify pinned specifications against their upstream addresses |
 | 2 | Acquire and hash the pinned NuGet packages |
 | 3 | Inspect and classify every payload in those packages |
-| 4 | Select the 95-assembly lean payload |
+| 4 | Select the 96-assembly lean payload |
 | 5 | Emit and verify the XABA assembly store |
-| 6 | Wrap the store in an AArch64 ELF64 shared library |
+| 6 | Wrap the store in an ELF shared library for the target; emit `libpsl-native.so` |
 | 7 | Emit the binary `AndroidManifest.xml` |
 | 8 | Emit the Java peer class as Dalvik bytecode |
 | 9 | Emit `libxamarin-app.so`, the application data library |

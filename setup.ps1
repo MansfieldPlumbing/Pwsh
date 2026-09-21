@@ -34,7 +34,7 @@ param(
     [switch] $Interactive,
 
     # arm64: phones. x64: the x86_64 emulator, which runs it natively.
-    # arm32: 32-bit devices (ELF32 store writer built; libpsl-native and libxamarin-app are not).
+    # arm32: 32-bit ARMv7 devices.
     [ValidateSet('arm64', 'x64', 'arm32')]
     [string] $Architecture = 'arm64',
 
@@ -128,9 +128,6 @@ $script:Targets = @{
     arm32 = [pscustomobject]@{ Rid = 'android-arm';   Abi = 'armeabi-v7a'; ElfClass = 32; Machine = 'EM_ARM';     CompilerDefine = '__arm__' }
 }
 $script:Target = $script:Targets[$Architecture]
-if ($script:Target.ElfClass -ne 64) {
-    throw "$Architecture ($($script:Target.Abi)) has its ELF32 store writer but not yet its ARM32 libpsl-native or ELF32 libxamarin-app. Use arm64 or x64."
-}
 
 $script:StepSelection = [System.Collections.Generic.List[int]]::new()
 foreach ($part in $Step -split ',') {
@@ -203,7 +200,7 @@ OPTIONS
   nothing.
   -Architecture <arm64|x64|arm32>
                             Target. arm64 for phones, x64 for the x86_64
-                            emulator. arm32 is declared but not built yet.
+                            emulator. arm32 for 32-bit ARMv7 devices.
   -Debug                    Write the intermediates and cross-check against a
                             .NET for Android reference build (needs the .NET
                             SDK with the Android workload; built in a temp
@@ -3356,7 +3353,7 @@ function New-AssemblyStoreBytes {
 
     $magic = [uint32]$Contract.xaba.magic
     $version = [uint32]([uint32]$Contract.xaba.formatVersion -bor
-        [uint32]$Contract.xaba.bit64Flag -bor
+        (Get-Store64BitFlag -Contract $Contract) -bor
         (Get-StoreAbiFlag))
 
     $entryCount = [uint32]$SelectedAssemblies.Count
@@ -3484,7 +3481,7 @@ function Test-AssemblyStoreBytes {
         throw ('The emitted store carries magic 0x{0:X8}.' -f $magic)
     }
     $expectedVersion = [uint32]([uint32]$Contract.xaba.formatVersion -bor
-        [uint32]$Contract.xaba.bit64Flag -bor
+        (Get-Store64BitFlag -Contract $Contract) -bor
         (Get-StoreAbiFlag))
     $version = [BitConverter]::ToUInt32($StoreBytes, 4)
     if ($version -ne $expectedVersion) {
@@ -3676,7 +3673,7 @@ function Get-ElfConstants {
     }
 
     $tagText = Import-LibSourceText -Path 'DynamicTags.def'
-    foreach ($tag in @('NULL', 'NEEDED', 'HASH', 'STRTAB', 'SYMTAB', 'RELA', 'RELASZ', 'RELAENT', 'STRSZ', 'SYMENT', 'SONAME', 'FLAGS')) {
+    foreach ($tag in @('NULL', 'NEEDED', 'HASH', 'STRTAB', 'SYMTAB', 'RELA', 'RELASZ', 'RELAENT', 'REL', 'RELSZ', 'RELENT', 'STRSZ', 'SYMENT', 'SONAME', 'FLAGS')) {
         $match = [regex]::Match($tagText, "DYNAMIC_TAG\($tag,\s*(0x[0-9a-fA-F]+|\d+)\)")
         if (-not $match.Success) {
             throw "DynamicTags.def does not declare 'DT_$tag'."
@@ -3700,6 +3697,15 @@ function Get-ElfConstants {
 
     $script:ElfConstants = $constants
     return $script:ElfConstants
+}
+
+function Get-Store64BitFlag {
+    # xamarin-app.hh sets ASSEMBLY_STORE_64BIT_FLAG only when
+    # INTPTR_MAX == INT64_MAX, and 0 otherwise. The contract records the 64-bit
+    # value; a 32-bit target's store carries no flag, or the host rejects it.
+    param([Parameter(Mandatory)][pscustomobject] $Contract)
+    if ($script:Target.ElfClass -eq 64) { return [uint32]$Contract.xaba.bit64Flag }
+    [uint32]0
 }
 
 function Get-StoreAbiFlag {
@@ -4754,6 +4760,453 @@ function New-PslNativeLibraryX64 {
     [pscustomobject]@{ Library = $library; Report = $report }
 }
 
+# ==============================================================================
+# ARM32 machine code
+#
+# The ARM32 section, kept separate from the AArch64 and x86-64 ones. A32
+# (ARM-state) encodings for the few instructions the shims use, an independent
+# decoder, an ELF32 EM_ARM code-library writer and its check. Every instruction
+# carries condition AL (0xE). Field layouts follow the Arm A-profile
+# architecture reference (A32 data-processing, load/store and branch). The
+# working predecessor libpsl-native, built by NDK clang, uses the same
+# encodings for bx lr (E12FFF1E) and for loads into pc.
+#
+# Calling convention: AAPCS with soft-float argument passing (lib/ARM.cpp,
+# arm::getDefaultFloatABI returns SoftFP for Android). Arguments r0-r3, return
+# in r0, lr holds the return address, ip (r12) is free to clobber in a veneer.
+# Variadic calls such as syslog take no extra setup.
+# ==============================================================================
+
+function Get-A32ModifiedImmediate {
+    # An A32 data-processing immediate is imm8 rotated right by 2 * rot. Returns
+    # the 12-bit field (rot << 8 | imm8), or throws if the value has no encoding.
+    param([Parameter(Mandatory)][uint32] $Value)
+    for ($rot = 0; $rot -lt 16; $rot++) {
+        $shift = 2 * $rot
+        $rolled = if ($shift -eq 0) { [uint64]$Value } else { (([uint64]$Value -shl $shift) -bor ([uint64]$Value -shr (32 - $shift))) -band 0xFFFFFFFFL }
+        if ($rolled -le 0xFF) { return [uint32](($rot -shl 8) -bor $rolled) }
+    }
+    throw ('0x{0:X8} has no A32 modified-immediate encoding.' -f $Value)
+}
+
+function Get-A32ImmediateValue {
+    param([Parameter(Mandatory)][uint32] $Field)
+    $imm8 = [uint64]($Field -band 0xFF)
+    $shift = 2 * (($Field -shr 8) -band 0xF)
+    if ($shift -eq 0) { return [uint32]$imm8 }
+    [uint32]((($imm8 -shr $shift) -bor ($imm8 -shl (32 - $shift))) -band 0xFFFFFFFFL)
+}
+
+function New-A32Instruction {
+    # Returns the words for one step. 'tail' is a four-word position-independent
+    # jump through a GOT slot: ldr ip, [pc, #4]; add ip, pc, ip; ldr pc, [ip];
+    # then a literal holding the slot's distance from the add's pc (add + 8).
+    # A load into pc interworks on ARMv7, so the import may be Thumb code.
+    # PcRelative is the target minus the value pc reads as for the step.
+    param([Parameter(Mandatory)] $Step, [long] $PcRelative = 0)
+    $al = 0xE0000000u
+    switch ($Step.Op) {
+        'mov'     { return [uint32[]]@($al -bor 0x01A00000 -bor ($Step.Rd -shl 12) -bor $Step.Rm) }
+        'movimm'  { return [uint32[]]@($al -bor 0x03A00000 -bor ($Step.Rd -shl 12) -bor (Get-A32ModifiedImmediate $Step.Imm)) }
+        'mvnimm'  { return [uint32[]]@($al -bor 0x03E00000 -bor ($Step.Rd -shl 12) -bor (Get-A32ModifiedImmediate $Step.Imm)) }
+        'adr-data' {
+            if ($PcRelative -ge 0) { return [uint32[]]@($al -bor 0x028F0000 -bor ($Step.Rd -shl 12) -bor (Get-A32ModifiedImmediate ([uint32]$PcRelative))) }
+            return [uint32[]]@($al -bor 0x024F0000 -bor ($Step.Rd -shl 12) -bor (Get-A32ModifiedImmediate ([uint32](-$PcRelative))))
+        }
+        'bx'      { return [uint32[]]@($al -bor 0x012FFF10 -bor $Step.Rm) }
+        'tail'    {
+            if ($PcRelative -lt [int32]::MinValue -or $PcRelative -gt [int32]::MaxValue) { throw 'GOT slot out of 32-bit range.' }
+            return [uint32[]]@(
+                ($al -bor 0x059FC004),                         # ldr ip, [pc, #4]
+                ($al -bor 0x008FC00C),                         # add ip, pc, ip
+                ($al -bor 0x059CF000),                         # ldr pc, [ip]
+                [uint32]([int32]$PcRelative -band 0xFFFFFFFFL)) # literal
+        }
+        default   { throw "Unknown ARM32 step '$($Step.Op)'." }
+    }
+}
+
+function Get-A32StepLength {
+    param([Parameter(Mandatory)] $Step)
+    switch ($Step.Op) {
+        'tail' { 16 }
+        { $_ -in 'mov', 'movimm', 'mvnimm', 'adr-data', 'bx' } { 4 }
+        default { throw "Unknown ARM32 step '$($Step.Op)'." }
+    }
+}
+
+function Get-A32PcBias {
+    # Where the pc-relative distance is measured from, relative to the step's
+    # first word: pc reads as the instruction address plus 8. For 'tail' the
+    # pc-relative instruction is the add, the second word.
+    param([Parameter(Mandatory)] $Step)
+    if ($Step.Op -eq 'tail') { return 12 }
+    8
+}
+
+function Read-A32Instruction {
+    # Independent decode of the forms above, from the fixed opcode bits.
+    param([Parameter(Mandatory)][uint32] $Word)
+    if (($Word -shr 28) -ne 0xE) { throw ('A32 word 0x{0:X8} is not condition AL.' -f $Word) }
+    $rd = ($Word -shr 12) -band 0xF
+    if (($Word -band 0x0FFF0FF0) -eq 0x01A00000) { return [pscustomobject]@{ Op = 'mov'; Rd = $rd; Rm = $Word -band 0xF } }
+    if (($Word -band 0x0FFF0000) -eq 0x03A00000) { return [pscustomobject]@{ Op = 'movimm'; Rd = $rd; Imm = (Get-A32ImmediateValue ($Word -band 0xFFF)) } }
+    if (($Word -band 0x0FFF0000) -eq 0x03E00000) { return [pscustomobject]@{ Op = 'mvnimm'; Rd = $rd; Imm = (Get-A32ImmediateValue ($Word -band 0xFFF)) } }
+    if (($Word -band 0x0FFF0000) -eq 0x028F0000) { return [pscustomobject]@{ Op = 'adr'; Rd = $rd; Offset = [long](Get-A32ImmediateValue ($Word -band 0xFFF)) } }
+    if (($Word -band 0x0FFF0000) -eq 0x024F0000) { return [pscustomobject]@{ Op = 'adr'; Rd = $rd; Offset = -[long](Get-A32ImmediateValue ($Word -band 0xFFF)) } }
+    if (($Word -band 0x0FFFFFF0) -eq 0x012FFF10) { return [pscustomobject]@{ Op = 'bx'; Rm = $Word -band 0xF } }
+    if (($Word -band 0x0FF00FF0) -eq 0x00800000) { return [pscustomobject]@{ Op = 'add'; Rd = $rd; Rn = ($Word -shr 16) -band 0xF; Rm = $Word -band 0xF } }
+    if (($Word -band 0x0FF00000) -eq 0x05900000) { return [pscustomobject]@{ Op = 'ldr'; Rt = $rd; Rn = ($Word -shr 16) -band 0xF; Offset = $Word -band 0xFFF } }
+    throw ('Unrecognized A32 instruction 0x{0:X8}.' -f $Word)
+}
+
+function New-ElfCodeLibraryArm32 {
+    <#
+        The ARM32 counterpart of New-ElfCodeLibrary: an ELF32 EM_ARM ET_DYN
+        library with exported functions and imports reached through a GOT.
+        ARM32 relocates with REL (addend in place): each GOT slot is relocated
+        with R_ARM_GLOB_DAT under DT_FLAGS BIND_NOW and starts at 0. Segments:
+        R (metadata), RX (code, data), RW (GOT), non-executable stack.
+    #>
+    param(
+        [Parameter(Mandatory)][string] $Soname,
+        [Parameter(Mandatory)][string[]] $Needed,
+        [Parameter(Mandatory)][System.Collections.IDictionary] $Functions,
+        [System.Collections.IDictionary] $Data = @{},
+        [int] $PageSize = 16384
+    )
+
+    $elf = Get-ElfConstants
+    $align = { param([long] $v, [long] $a) [long](($v + $a - 1) -band (-bnot ($a - 1))) }
+
+    $imports = [System.Collections.Generic.List[string]]::new()
+    foreach ($name in $Functions.Keys) {
+        foreach ($step in $Functions[$name]) {
+            if ($step.Op -eq 'tail' -and -not $imports.Contains($step.Import)) { $imports.Add($step.Import) }
+        }
+    }
+    $exports = @($Functions.Keys)
+    $symbols = @($imports) + $exports
+
+    $dynstr = [System.IO.MemoryStream]::new()
+    $dynstr.WriteByte(0)
+    $nameOffset = @{}
+    foreach ($text in @($Soname) + @($Needed) + $symbols) {
+        if ($nameOffset.ContainsKey($text)) { continue }
+        $nameOffset[$text] = [uint32]$dynstr.Position
+        $bytes = [System.Text.Encoding]::ASCII.GetBytes($text)
+        $dynstr.Write($bytes, 0, $bytes.Length)
+        $dynstr.WriteByte(0)
+    }
+    $dynstrBytes = $dynstr.ToArray()
+    $dynstr.Dispose()
+    $hashBytes = Get-ElfHashTableBytes -Symbols $symbols
+
+    $phCount = 6
+    $dynstrOffset = 52 + 32 * $phCount
+    $dynsymOffset = & $align ($dynstrOffset + $dynstrBytes.Length) 4
+    $dynsymSize = 16 * ($symbols.Count + 1)
+    $hashOffset = & $align ($dynsymOffset + $dynsymSize) 4
+    $relOffset = & $align ($hashOffset + $hashBytes.Length) 4
+    $relSize = 8 * $imports.Count
+    $dynamicOffset = & $align ($relOffset + $relSize) 4
+    $dynamicSize = 8 * (11 + $Needed.Count)
+    $metaEnd = $dynamicOffset + $dynamicSize
+
+    $textOffset = & $align $metaEnd $PageSize
+    $functionOffset = [ordered]@{}
+    $functionSize = @{}
+    $cursor = $textOffset
+    foreach ($name in $exports) {
+        $functionOffset[$name] = $cursor
+        $size = 0
+        foreach ($step in $Functions[$name]) { $size += Get-A32StepLength -Step $step }
+        $functionSize[$name] = $size
+        $cursor += $size
+    }
+    $dataOffset = [ordered]@{}
+    foreach ($label in $Data.Keys) {
+        $dataOffset[$label] = $cursor
+        $cursor += $Data[$label].Length
+    }
+    $textEnd = $cursor
+    $gotOffset = & $align $textEnd $PageSize
+    $gotSize = 4 * [Math]::Max(1, $imports.Count)
+    $imageSize = $gotOffset + $gotSize
+
+    $image = New-Object byte[] $imageSize
+    $put32 = { param([long] $at, [uint32] $v) [System.Array]::Copy([BitConverter]::GetBytes($v), 0, $image, $at, 4) }
+    $put16 = { param([long] $at, [uint16] $v) [System.Array]::Copy([BitConverter]::GetBytes($v), 0, $image, $at, 2) }
+
+    [System.Array]::Copy([byte[]]@(0x7F, 0x45, 0x4C, 0x46, $elf['ELFCLASS32'], $elf['ELFDATA2LSB'], $elf['EV_CURRENT']), 0, $image, 0, 7)
+    & $put16 16 $elf['ET_DYN']
+    & $put16 18 $elf['EM_ARM']
+    & $put32 20 $elf['EV_CURRENT']
+    & $put32 28 52                      # e_phoff
+    & $put32 36 (Get-ElfArmFlags)       # e_flags
+    & $put16 40 52                      # e_ehsize
+    & $put16 42 32                      # e_phentsize
+    & $put16 44 $phCount
+    & $put16 46 40                      # e_shentsize
+
+    $ph = 52
+    foreach ($s in @(
+            @($elf['PT_PHDR'], $elf['PF_R'], 52, (32 * $phCount), 4),
+            @($elf['PT_LOAD'], $elf['PF_R'], 0, $metaEnd, $PageSize),
+            @($elf['PT_LOAD'], ($elf['PF_R'] -bor $elf['PF_X']), $textOffset, ($textEnd - $textOffset), $PageSize),
+            @($elf['PT_LOAD'], ($elf['PF_R'] -bor $elf['PF_W']), $gotOffset, $gotSize, $PageSize),
+            @($elf['PT_DYNAMIC'], $elf['PF_R'], $dynamicOffset, $dynamicSize, 4),
+            @($elf['PT_GNU_STACK'], ($elf['PF_R'] -bor $elf['PF_W']), 0, 0, 16))) {
+        & $put32 $ph ([uint32]$s[0])
+        foreach ($field in 4, 8, 12) { & $put32 ($ph + $field) ([uint32]$s[2]) }   # p_offset, p_vaddr, p_paddr
+        foreach ($field in 16, 20) { & $put32 ($ph + $field) ([uint32]$s[3]) }     # p_filesz, p_memsz
+        & $put32 ($ph + 24) ([uint32]$s[1])                                         # p_flags
+        & $put32 ($ph + 28) ([uint32]$s[4])                                         # p_align
+        $ph += 32
+    }
+
+    [System.Array]::Copy($dynstrBytes, 0, $image, $dynstrOffset, $dynstrBytes.Length)
+
+    $symbolIndex = @{}
+    $at = $dynsymOffset + 16
+    $index = 1
+    foreach ($name in $imports) {
+        & $put32 $at $nameOffset[$name]
+        $image[$at + 12] = [byte](([uint32]$elf['STB_GLOBAL'] -shl 4) -bor $elf['STT_FUNC'])
+        $symbolIndex[$name] = $index++
+        $at += 16
+    }
+    foreach ($name in $exports) {
+        & $put32 $at $nameOffset[$name]
+        & $put32 ($at + 4) $functionOffset[$name]
+        & $put32 ($at + 8) $functionSize[$name]
+        $image[$at + 12] = [byte](([uint32]$elf['STB_GLOBAL'] -shl 4) -bor $elf['STT_FUNC'])
+        & $put16 ($at + 14) 1
+        $symbolIndex[$name] = $index++
+        $at += 16
+    }
+    [System.Array]::Copy($hashBytes, 0, $image, $hashOffset, $hashBytes.Length)
+
+    $gotSlot = @{}
+    $at = $relOffset
+    for ($i = 0; $i -lt $imports.Count; $i++) {
+        $slot = $gotOffset + 4 * $i
+        $gotSlot[$imports[$i]] = $slot
+        & $put32 $at $slot
+        & $put32 ($at + 4) (([uint32]$symbolIndex[$imports[$i]] -shl 8) -bor $elf['R_ARM_GLOB_DAT'])
+        $at += 8
+    }
+
+    $at = $dynamicOffset
+    $entries = [System.Collections.Generic.List[object]]::new()
+    foreach ($lib in $Needed) { $entries.Add(@($elf['DT_NEEDED'], $nameOffset[$lib])) }
+    foreach ($e in @(
+            @($elf['DT_SONAME'], $nameOffset[$Soname]),
+            @($elf['DT_HASH'], $hashOffset),
+            @($elf['DT_STRTAB'], $dynstrOffset),
+            @($elf['DT_SYMTAB'], $dynsymOffset),
+            @($elf['DT_STRSZ'], $dynstrBytes.Length),
+            @($elf['DT_SYMENT'], 16),
+            @($elf['DT_REL'], $relOffset),
+            @($elf['DT_RELSZ'], $relSize),
+            @($elf['DT_RELENT'], 8),
+            @($elf['DT_FLAGS'], $elf['DF_BIND_NOW']),
+            @($elf['DT_NULL'], 0))) { $entries.Add($e) }
+    foreach ($e in $entries) {
+        & $put32 $at ([uint32]$e[0])
+        & $put32 ($at + 4) ([uint32]$e[1])
+        $at += 8
+    }
+
+    foreach ($name in $exports) {
+        $pc = $functionOffset[$name]
+        foreach ($step in $Functions[$name]) {
+            $length = Get-A32StepLength -Step $step
+            $reads = $pc + (Get-A32PcBias -Step $step)
+            $target = switch ($step.Op) {
+                'tail' { $gotSlot[$step.Import] }
+                'adr-data' { $dataOffset[$step.Data] }
+                default { $reads }
+            }
+            $words = [uint32[]]@(New-A32Instruction -Step $step -PcRelative ($target - $reads))
+            if (4 * $words.Length -ne $length) { throw "ARM32 step '$($step.Op)' encoded to $(4 * $words.Length) bytes, expected $length." }
+            for ($w = 0; $w -lt $words.Length; $w++) { & $put32 ($pc + 4 * $w) $words[$w] }
+            $pc += $length
+        }
+    }
+    foreach ($label in $Data.Keys) {
+        [System.Array]::Copy([byte[]]$Data[$label], 0, $image, $dataOffset[$label], $Data[$label].Length)
+    }
+
+    $image = Add-ElfSectionTable32 -Image $image -DynstrOffset $dynstrOffset -DynstrSize $dynstrBytes.Length -DynamicOffset $dynamicOffset -DynamicSize $dynamicSize
+
+    [pscustomobject]@{
+        Bytes     = $image
+        Soname    = $Soname
+        Exports   = $functionOffset
+        Imports   = @($imports)
+        DataAt    = $dataOffset
+        Functions = $Functions
+    }
+}
+
+function Test-ElfCodeLibraryArm32 {
+    # Reads the ARM32 image back: header fields bionic checks, every export
+    # resolves through the hash table, every word decodes to the intended
+    # instruction, and every GOT jump lands on a slot whose REL entry names the
+    # intended import.
+    param([Parameter(Mandatory)] $Library)
+
+    $image = [byte[]]$Library.Bytes
+    $elf = Get-ElfConstants
+    $u16 = { param($at) [BitConverter]::ToUInt16($image, $at) }
+    $u32 = { param($at) [BitConverter]::ToUInt32($image, $at) }
+
+    if ((& $u32 0) -ne 0x464C457F -or $image[4] -ne $elf['ELFCLASS32'] -or $image[5] -ne $elf['ELFDATA2LSB'] -or
+        (& $u16 18) -ne $elf['EM_ARM'] -or (& $u16 16) -ne $elf['ET_DYN'] -or (& $u32 20) -ne $elf['EV_CURRENT']) {
+        throw "$($Library.Soname) is not a little-endian ELF32 EM_ARM ET_DYN image."
+    }
+    if ((& $u32 36) -ne (Get-ElfArmFlags)) { throw "$($Library.Soname) e_flags is not EABI version 5, soft-float." }
+    if ((& $u16 46) -ne 40 -or (& $u16 50) -eq 0) { throw "$($Library.Soname) has an invalid section header table." }
+
+    $dynamic = @{}
+    $phoff = & $u32 28
+    $dynamicAt = $null
+    $executable = 0
+    for ($i = 0; $i -lt (& $u16 44); $i++) {
+        $p = $phoff + 32 * $i
+        $flags = & $u32 ($p + 24)
+        if ((& $u32 $p) -eq $elf['PT_DYNAMIC']) { $dynamicAt = & $u32 ($p + 4) }
+        if ((& $u32 $p) -eq $elf['PT_LOAD'] -and ($flags -band $elf['PF_X'])) {
+            $executable++
+            if ($flags -band $elf['PF_W']) { throw "$($Library.Soname) has a writable and executable segment." }
+        }
+    }
+    if ($executable -ne 1) { throw "$($Library.Soname) must have exactly one executable segment." }
+    for ($at = $dynamicAt; ; $at += 8) {
+        $tag = & $u32 $at
+        if ($tag -eq 0) { break }
+        if ($tag -ne $elf['DT_NEEDED']) { $dynamic[[uint64]$tag] = & $u32 ($at + 4) }
+    }
+    $strtab = $dynamic[[uint64]$elf['DT_STRTAB']]
+    $symtab = $dynamic[[uint64]$elf['DT_SYMTAB']]
+    $readString = {
+        param([uint64] $offset)
+        $start = [int]($strtab + $offset); $end = $start
+        while ($image[$end] -ne 0) { $end++ }
+        [System.Text.Encoding]::ASCII.GetString($image, $start, $end - $start)
+    }
+    if (-not ($dynamic[[uint64]$elf['DT_FLAGS']] -band $elf['DF_BIND_NOW'])) { throw 'DT_FLAGS lacks BIND_NOW.' }
+    if ($dynamic[[uint64]$elf['DT_RELENT']] -ne 8) { throw 'DT_RELENT is not sizeof(Elf32_Rel).' }
+    if ($dynamic.ContainsKey([uint64]$elf['DT_RELA'])) { throw 'ARM32 uses REL; the image declares DT_RELA.' }
+
+    $hash = $dynamic[[uint64]$elf['DT_HASH']]
+    $nbucket = & $u32 $hash
+    $lookup = {
+        param([string] $name)
+        $index = & $u32 ($hash + 8)
+        while ($index -ne 0) {
+            $sym = $symtab + 16 * $index
+            if ((& $readString (& $u32 $sym)) -ceq $name) {
+                return [pscustomobject]@{ Value = & $u32 ($sym + 4); Shndx = & $u16 ($sym + 14) }
+            }
+            $index = & $u32 ($hash + 8 + 4 * $nbucket + 4 * $index)
+        }
+        return $null
+    }
+
+    $relocBySlot = @{}
+    $rel = $dynamic[[uint64]$elf['DT_REL']]
+    for ($at = $rel; $at -lt $rel + $dynamic[[uint64]$elf['DT_RELSZ']]; $at += 8) {
+        $info = & $u32 ($at + 4)
+        if (($info -band 0xFF) -ne $elf['R_ARM_GLOB_DAT']) { throw 'Unexpected relocation type.' }
+        $slot = [long](& $u32 $at)
+        if ((& $u32 $slot) -ne 0) { throw "GOT slot $slot carries a nonzero in-place addend." }
+        $relocBySlot[$slot] = & $readString (& $u32 ($symtab + 16 * ($info -shr 8)))
+    }
+
+    $count = 0
+    foreach ($name in $Library.Exports.Keys) {
+        $symbol = & $lookup $name
+        if (-not $symbol -or $symbol.Shndx -eq 0) { throw "Export '$name' does not resolve." }
+        if ($symbol.Value -ne $Library.Exports[$name]) { throw "Export '$name' resolves to $($symbol.Value), expected $($Library.Exports[$name])." }
+        if ($symbol.Value -band 3) { throw "Export '$name' is not a word-aligned ARM-state address." }
+        $pc = [long]$symbol.Value
+        foreach ($step in $Library.Functions[$name]) {
+            $d = Read-A32Instruction -Word (& $u32 $pc)
+            $ok = switch ($step.Op) {
+                'mov'      { $d.Op -eq 'mov' -and $d.Rd -eq $step.Rd -and $d.Rm -eq $step.Rm }
+                'movimm'   { $d.Op -eq 'movimm' -and $d.Rd -eq $step.Rd -and $d.Imm -eq [uint32]$step.Imm }
+                'mvnimm'   { $d.Op -eq 'mvnimm' -and $d.Rd -eq $step.Rd -and $d.Imm -eq [uint32]$step.Imm }
+                'adr-data' { $d.Op -eq 'adr' -and $d.Rd -eq $step.Rd -and ($pc + 8 + $d.Offset) -eq $Library.DataAt[$step.Data] }
+                'bx'       { $d.Op -eq 'bx' -and $d.Rm -eq $step.Rm }
+                'tail'     {
+                    $load = $d
+                    $add = Read-A32Instruction -Word (& $u32 ($pc + 4))
+                    $jump = Read-A32Instruction -Word (& $u32 ($pc + 8))
+                    $literalAt = $pc + 8 + $load.Offset
+                    $slot = ($pc + 4 + 8) + [long][BitConverter]::ToInt32($image, [int]$literalAt)
+                    $load.Op -eq 'ldr' -and $load.Rt -eq 12 -and $load.Rn -eq 15 -and $literalAt -eq ($pc + 12) -and
+                    $add.Op -eq 'add' -and $add.Rd -eq 12 -and $add.Rn -eq 15 -and $add.Rm -eq 12 -and
+                    $jump.Op -eq 'ldr' -and $jump.Rt -eq 15 -and $jump.Rn -eq 12 -and $jump.Offset -eq 0 -and
+                    $relocBySlot[[long]$slot] -ceq $step.Import
+                }
+            }
+            if (-not $ok) { throw "$name at ${pc}: expected $($step.Op), decoded $($d.Op)." }
+            $pc += Get-A32StepLength -Step $step
+            $count++
+        }
+    }
+
+    [pscustomobject]@{
+        ImageSize = $image.Length
+        Exports   = $Library.Exports.Count
+        Imports   = $Library.Imports.Count
+        Steps     = $count
+    }
+}
+
+function New-PslNativeLibraryArm32 {
+    # The ARM32 libpsl-native. Same export set and behavior as the AArch64 and
+    # x86-64 ones. Native_SysLog passes a fixed "%s" so '%' in messages is data.
+    param([int] $PageSize = 16384)
+
+    $r0 = 0; $r1 = 1; $r2 = 2; $lr = 14
+    $ret0 = @(@{ Op = 'movimm'; Rd = $r0; Imm = 0 }, @{ Op = 'bx'; Rm = $lr })
+    $retMinus1 = @(@{ Op = 'mvnimm'; Rd = $r0; Imm = 0 }, @{ Op = 'bx'; Rm = $lr })
+
+    $functions = [ordered]@{
+        # openlog(ident, LOG_NDELAY | LOG_PID, facility): r0 stays, r2 = facility, r1 = 0x9.
+        'Native_OpenLog'  = @(@{ Op = 'mov'; Rd = $r2; Rm = $r1 }, @{ Op = 'movimm'; Rd = $r1; Imm = 0x9 }, @{ Op = 'tail'; Import = 'openlog' })
+        # syslog(priority, "%s", message): r0 stays, r2 = message, r1 = &"%s".
+        'Native_SysLog'   = @(@{ Op = 'mov'; Rd = $r2; Rm = $r1 }, @{ Op = 'adr-data'; Rd = $r1; Data = 'format' }, @{ Op = 'tail'; Import = 'syslog' })
+        'Native_CloseLog' = @(@{ Op = 'tail'; Import = 'closelog' })
+        'GetCurrentThreadId' = @(@{ Op = 'tail'; Import = 'gettid' })
+        'GetErrorCategory'   = $ret0
+        'GetPPid'            = $ret0
+        'GetLinkCount'       = $retMinus1
+        'IsExecutable'       = $ret0
+        'KillProcess'        = $ret0
+        'WaitPid'            = $retMinus1
+        'SetDate'            = $retMinus1
+        'CreateSymLink'      = $retMinus1
+        'CreateHardLink'     = $retMinus1
+        'GetUserFromPid'     = $ret0
+        'IsSameFileSystemItem' = $ret0
+        'GetInodeData'       = $retMinus1
+        'GetCommonLStat'     = $retMinus1
+        'GetCommonStat'      = $retMinus1
+        'GetPwUid'           = $ret0
+        'GetGrGid'           = $ret0
+        'ForkAndExecProcess' = $retMinus1
+    }
+    $data = [ordered]@{ format = [System.Text.Encoding]::ASCII.GetBytes("%s`0") }
+
+    $library = New-ElfCodeLibraryArm32 -Soname 'libpsl-native.so' -Needed @('libc.so') -Functions $functions -Data $data -PageSize $PageSize
+    $report = Test-ElfCodeLibraryArm32 -Library $library
+    [pscustomobject]@{ Library = $library; Report = $report }
+}
+
 function Test-ElfPayloadLibrary {
     param(
         [Parameter(Mandatory)][pscustomobject] $Library,
@@ -5236,6 +5689,7 @@ function Invoke-NativeStep {
     $psl = switch ($Architecture) {
         'arm64' { New-PslNativeLibrary -PageSize $pageSize }
         'x64'   { New-PslNativeLibraryX64 -PageSize $pageSize }
+        'arm32' { New-PslNativeLibraryArm32 -PageSize $pageSize }
         default { throw "No libpsl-native section for $Architecture." }
     }
     $pslPath = Join-Path $outputDirectory 'libpsl-native.so'
@@ -6695,7 +7149,7 @@ function New-ElfDataLibrary {
         & $writeDynamic $elf['DT_NULL'] 0
 
         $stream.Position = $codeOffset
-        Write-ByteSpan -Writer $writer -Bytes ([byte[]]@(0xC0, 0x03, 0x5F, 0xD6))
+        Write-ByteSpan -Writer $writer -Bytes (Get-ReturnStubBytes)
 
         $stream.Position = $payloadOffset
         Write-ByteSpan -Writer $writer -Bytes $Payload
@@ -6925,6 +7379,288 @@ function Get-TypeMapModules {
     if ($modules.Count -eq 0) { throw 'No assembly in the payload declares a Java peer type.' }
     return $modules
 }
+
+function Get-ReturnStubBytes {
+    # Four bytes holding one return instruction for the target, from that
+    # target's encoder. x86-64's ret is one byte; int3 (0xCC) pads the rest.
+    switch ($Architecture) {
+        'arm64' { return [BitConverter]::GetBytes([uint32](New-A64BranchRegister -Op 'ret')) }
+        'x64'   { return [byte[]](@(New-X64Instruction -Step @{ Op = 'ret' }) + @(0xCC, 0xCC, 0xCC)) }
+        'arm32' { return [BitConverter]::GetBytes([uint32](New-A32Instruction -Step @{ Op = 'bx'; Rm = 14 })[0]) }
+        default { throw "No return stub for $Architecture." }
+    }
+}
+
+function New-ElfDataLibrary32 {
+    # ELF32 counterpart of New-ElfDataLibrary: the same two loadable segments,
+    # the same symbols and .bss tail. ARM32 relocates with REL, whose addend is
+    # the word already at the target, so each pointer slot is written with its
+    # link-time address and relocated with R_ARM_RELATIVE (load base added).
+    param(
+        [Parameter(Mandatory)][string] $Soname,
+        [Parameter(Mandatory)][byte[]] $Payload,
+        [Parameter(Mandatory)][System.Collections.Generic.List[object]] $Symbols,
+        [Parameter(Mandatory)][System.Collections.Generic.List[object]] $Relocations,
+        [Parameter(Mandatory)][string] $BssSymbolName,
+        [int] $BssSize = 8,
+        [int] $PageSize = 16384
+    )
+
+    $elf = Get-ElfConstants
+    $headerSize = 52
+    $programHeaderSize = 32
+    $programHeaderCount = 3
+    $metadataStart = $headerSize + ($programHeaderSize * $programHeaderCount)
+
+    $exported = [System.Collections.Generic.List[object]]::new()
+    foreach ($symbol in $Symbols) { $exported.Add($symbol) }
+    $exported.Add([pscustomobject]@{ Name = $BssSymbolName; Offset = $Payload.Length; Size = $BssSize; Kind = 'OBJECT' })
+
+    $dynstr = [System.IO.MemoryStream]::new()
+    $dynstr.WriteByte(0)
+    $sonameOffset = [uint32]$dynstr.Position
+    $sonameBytes = [System.Text.Encoding]::ASCII.GetBytes($Soname)
+    $dynstr.Write($sonameBytes, 0, $sonameBytes.Length)
+    $dynstr.WriteByte(0)
+    $nameOffsets = @{}
+    foreach ($symbol in $exported) {
+        $nameOffsets[$symbol.Name] = [uint32]$dynstr.Position
+        $bytes = [System.Text.Encoding]::ASCII.GetBytes([string]$symbol.Name)
+        $dynstr.Write($bytes, 0, $bytes.Length)
+        $dynstr.WriteByte(0)
+    }
+    $dynstrBytes = $dynstr.ToArray()
+    $dynstr.Dispose()
+
+    $hashBytes = Get-ElfHashTableBytes -Symbols @($exported | ForEach-Object { [string]$_.Name })
+
+    $dynstrOffset = [int]$metadataStart
+    $dynsymOffset = [int]((($dynstrOffset + $dynstrBytes.Length + 3) -band (-bnot 3)))
+    $dynsymSize = 16 * ($exported.Count + 1)
+    $hashOffset = [int]($dynsymOffset + $dynsymSize)
+    $relOffset = [int]((($hashOffset + $hashBytes.Length + 3) -band (-bnot 3)))
+    $relSize = 8 * $Relocations.Count
+    $dynamicOffset = [int]((($relOffset + $relSize + 3) -band (-bnot 3)))
+    $dynamicSize = 8 * 11
+    $codeOffset = [int]((($dynamicOffset + $dynamicSize + 3) -band (-bnot 3)))
+    $codeSize = 4
+    $readExecEnd = $codeOffset + $codeSize
+
+    $payloadOffset = [int]([Math]::Ceiling(($readExecEnd + 1) / $PageSize) * $PageSize)
+    $imageSize = $payloadOffset + $Payload.Length
+
+    $symbolAddress = {
+        param([object] $Symbol)
+        if ([string]$Symbol.Kind -ceq 'FUNC') { return $codeOffset }
+        return $payloadOffset + [int]$Symbol.Offset
+    }
+
+    # The in-place addends: each pointer slot holds its target's link-time address.
+    $data = [byte[]]$Payload.Clone()
+    foreach ($relocation in $Relocations) {
+        [System.Array]::Copy([BitConverter]::GetBytes([uint32]($payloadOffset + [int]$relocation.Target)), 0, $data, [int]$relocation.Offset, 4)
+    }
+
+    $image = New-Object byte[] $imageSize
+    $stream = [System.IO.MemoryStream]::new($image, 0, $image.Length, $true)
+    $writer = [System.IO.BinaryWriter]::new($stream)
+    try {
+        Write-ByteSpan -Writer $writer -Bytes ([byte[]]@(0x7F, 0x45, 0x4C, 0x46))
+        $writer.Write([byte]$elf['ELFCLASS32'])
+        $writer.Write([byte]$elf['ELFDATA2LSB'])
+        $writer.Write([byte]$elf['EV_CURRENT'])
+        Write-ByteSpan -Writer $writer -Bytes (New-Object byte[] 9)
+        $writer.Write([uint16]$elf['ET_DYN'])
+        $writer.Write([uint16]$elf[$script:Target.Machine])
+        $writer.Write([uint32]$elf['EV_CURRENT'])
+        $writer.Write([uint32]0)                      # e_entry
+        $writer.Write([uint32]$headerSize)            # e_phoff
+        $writer.Write([uint32]0)                      # e_shoff
+        $writer.Write([uint32](Get-ElfArmFlags))      # e_flags
+        $writer.Write([uint16]$headerSize)
+        $writer.Write([uint16]$programHeaderSize)
+        $writer.Write([uint16]$programHeaderCount)
+        $writer.Write([uint16]40)
+        $writer.Write([uint16]0)
+        $writer.Write([uint16]0)
+
+        $writeSegment = {
+            param($type, $flags, $offset, $fileSize, $memorySize, $align)
+            $writer.Write([uint32]$type)
+            $writer.Write([uint32]$offset)
+            $writer.Write([uint32]$offset)
+            $writer.Write([uint32]$offset)
+            $writer.Write([uint32]$fileSize)
+            $writer.Write([uint32]$memorySize)
+            $writer.Write([uint32]$flags)
+            $writer.Write([uint32]$align)
+        }
+        $readExecute = [uint32]($elf['PF_R'] -bor $elf['PF_X'])
+        $readWrite = [uint32]($elf['PF_R'] -bor $elf['PF_W'])
+        & $writeSegment $elf['PT_LOAD'] $readExecute 0 $readExecEnd $readExecEnd $PageSize
+        & $writeSegment $elf['PT_LOAD'] $readWrite $payloadOffset $Payload.Length ($Payload.Length + $BssSize) $PageSize
+        & $writeSegment $elf['PT_DYNAMIC'] $readWrite $dynamicOffset $dynamicSize $dynamicSize 4
+
+        $stream.Position = $dynstrOffset
+        Write-ByteSpan -Writer $writer -Bytes $dynstrBytes
+
+        $stream.Position = $dynsymOffset
+        Write-ByteSpan -Writer $writer -Bytes (New-Object byte[] 16)
+        foreach ($symbol in $exported) {
+            $type = if ([string]$symbol.Kind -ceq 'FUNC') { [uint32]$elf['STT_FUNC'] } else { [uint32]$elf['STT_OBJECT'] }
+            $writer.Write([uint32]$nameOffsets[$symbol.Name])
+            $writer.Write([uint32](& $symbolAddress $symbol))
+            $writer.Write([uint32][int]$symbol.Size)
+            $writer.Write([byte](([uint32]$elf['STB_GLOBAL'] -shl 4) -bor $type))
+            $writer.Write([byte]0)
+            $writer.Write([uint16]1)
+        }
+
+        $stream.Position = $hashOffset
+        Write-ByteSpan -Writer $writer -Bytes $hashBytes
+
+        $stream.Position = $relOffset
+        foreach ($relocation in $Relocations) {
+            $writer.Write([uint32]($payloadOffset + [int]$relocation.Offset))
+            $writer.Write([uint32]$elf['R_ARM_RELATIVE'])
+        }
+
+        $stream.Position = $dynamicOffset
+        $writeDynamic = {
+            param($tag, $value)
+            $writer.Write([int32]$tag)
+            $writer.Write([uint32]$value)
+        }
+        & $writeDynamic $elf['DT_SONAME'] $sonameOffset
+        & $writeDynamic $elf['DT_HASH'] $hashOffset
+        & $writeDynamic $elf['DT_STRTAB'] $dynstrOffset
+        & $writeDynamic $elf['DT_SYMTAB'] $dynsymOffset
+        & $writeDynamic $elf['DT_STRSZ'] $dynstrBytes.Length
+        & $writeDynamic $elf['DT_SYMENT'] 16
+        & $writeDynamic $elf['DT_REL'] $relOffset
+        & $writeDynamic $elf['DT_RELSZ'] $relSize
+        & $writeDynamic $elf['DT_RELENT'] 8
+        & $writeDynamic $elf['DT_NULL'] 0
+        & $writeDynamic $elf['DT_NULL'] 0
+
+        $stream.Position = $codeOffset
+        Write-ByteSpan -Writer $writer -Bytes (Get-ReturnStubBytes)
+
+        $stream.Position = $payloadOffset
+        Write-ByteSpan -Writer $writer -Bytes $data
+        $writer.Flush()
+    }
+    finally {
+        $writer.Dispose()
+        $stream.Dispose()
+    }
+
+    $image = Add-ElfSectionTable32 -Image $image -DynstrOffset $dynstrOffset -DynstrSize $dynstrBytes.Length -DynamicOffset $dynamicOffset -DynamicSize $dynamicSize
+
+    return [pscustomobject]@{
+        Bytes           = $image
+        PayloadOffset   = $payloadOffset
+        SymbolCount     = $exported.Count
+        RelocationCount = $Relocations.Count
+        BssSize         = $BssSize
+    }
+}
+
+function Test-XamarinAppLibrary32 {
+    # ELF32 counterpart of Test-XamarinAppLibrary: header fields bionic checks,
+    # a .bss tail, REL R_ARM_RELATIVE relocations whose in-place addends land
+    # inside the image, every required symbol through the hash table, and the
+    # 32-bit application_config layout.
+    param(
+        [Parameter(Mandatory)][pscustomobject] $Library,
+        [Parameter(Mandatory)][string[]] $RequiredSymbols,
+        [Parameter(Mandatory)][string] $PackageName
+    )
+
+    $bytes = $Library.Bytes
+    $elf = Get-ElfConstants
+    $u16 = { param($at) [BitConverter]::ToUInt16($bytes, $at) }
+    $u32 = { param($at) [BitConverter]::ToUInt32($bytes, $at) }
+    if ($bytes[4] -ne $elf['ELFCLASS32'] -or $bytes[5] -ne $elf['ELFDATA2LSB']) { throw 'The emitted library is not little-endian ELF32.' }
+    if ((& $u16 16) -ne $elf['ET_DYN']) { throw 'The emitted library is not ET_DYN.' }
+    if ((& $u16 18) -ne $elf[$script:Target.Machine]) { throw "The emitted library is not $($script:Target.Machine)." }
+    if ((& $u32 36) -ne (Get-ElfArmFlags)) { throw 'e_flags is not EABI version 5, soft-float.' }
+    if ((& $u16 46) -ne 40 -or (& $u16 50) -eq 0) { throw 'The section header table is invalid.' }
+
+    $phoff = [int](& $u32 28)
+    $dynamicOffset = -1
+    $sawBss = $false
+    for ($i = 0; $i -lt (& $u16 44); $i++) {
+        $o = $phoff + 32 * $i
+        $type = & $u32 $o
+        $filesz = & $u32 ($o + 16)
+        $memsz = & $u32 ($o + 20)
+        $flags = & $u32 ($o + 24)
+        if ($type -eq $elf['PT_LOAD']) {
+            if (($flags -band $elf['PF_W']) -and ($flags -band $elf['PF_X'])) { throw 'A loadable segment is both writable and executable.' }
+            if ($memsz -gt $filesz) { $sawBss = $true }
+        }
+        elseif ($type -eq $elf['PT_DYNAMIC']) { $dynamicOffset = [int](& $u32 ($o + 4)) }
+    }
+    if (-not $sawBss) { throw 'No segment reserves memory past the end of the file for the assemblies buffer.' }
+    if ($dynamicOffset -lt 0) { throw 'The emitted library declares no PT_DYNAMIC segment.' }
+
+    $dynamic = @{}
+    for ($cursor = $dynamicOffset; ; $cursor += 8) {
+        $tag = & $u32 $cursor
+        if ($tag -eq 0) { break }
+        $dynamic[[uint64]$tag] = & $u32 ($cursor + 4)
+    }
+    foreach ($required in 'DT_HASH', 'DT_STRTAB', 'DT_SYMTAB', 'DT_REL', 'DT_RELSZ', 'DT_RELENT') {
+        if (-not $dynamic.ContainsKey([uint64]$elf[$required])) { throw "The dynamic table is missing $required." }
+    }
+    if ($dynamic[[uint64]$elf['DT_RELENT']] -ne 8) { throw 'DT_RELENT is not sizeof(Elf32_Rel).' }
+
+    $rel = [int]$dynamic[[uint64]$elf['DT_REL']]
+    $count = [int]$dynamic[[uint64]$elf['DT_RELSZ']] / 8
+    for ($i = 0; $i -lt $count; $i++) {
+        $o = $rel + 8 * $i
+        $target = [long](& $u32 $o)
+        if ((& $u32 ($o + 4)) -ne $elf['R_ARM_RELATIVE']) { throw "Relocation $i is not R_ARM_RELATIVE." }
+        if ($target + 4 -gt $bytes.Length) { throw "Relocation $i writes outside the image." }
+        if ((& $u32 $target) -ge $bytes.Length) { throw "Relocation $i points outside the image." }
+    }
+
+    $strtab = [int]$dynamic[[uint64]$elf['DT_STRTAB']]
+    $symtab = [int]$dynamic[[uint64]$elf['DT_SYMTAB']]
+    $hash = [int]$dynamic[[uint64]$elf['DT_HASH']]
+    $chainCount = [int](& $u32 ($hash + 4))
+    $found = @{}
+    for ($i = 1; $i -lt $chainCount; $i++) {
+        $entry = $symtab + 16 * $i
+        $nameOffset = [int](& $u32 $entry)
+        $end = $strtab + $nameOffset
+        while ($bytes[$end] -ne 0) { $end++ }
+        $found[[System.Text.Encoding]::ASCII.GetString($bytes, $strtab + $nameOffset, $end - ($strtab + $nameOffset))] = [int](& $u32 ($entry + 4))
+    }
+    $missing = @($RequiredSymbols | Where-Object { -not $found.ContainsKey($_) })
+    if ($missing.Count -ne 0) { throw "The emitted library does not export: $($missing -join ', ')" }
+
+    # 32-bit ApplicationConfig: 4 bools, 13 uint32_t, the package-name pointer
+    # at 56, have_assembly_store at 60.
+    $config = $found['application_config']
+    if ((& $u32 ($config + 20)) -ne 96) { throw 'application_config does not declare 96 assemblies.' }
+    if ($bytes[$config + 60] -ne 1) { throw 'application_config does not set have_assembly_store.' }
+    $name = [int](& $u32 ($config + 56))
+    $end = $name
+    while ($bytes[$end] -ne 0) { $end++ }
+    if ([System.Text.Encoding]::UTF8.GetString($bytes, $name, $end - $name) -cne $PackageName) {
+        throw 'application_config.android_package_name does not address the package name.'
+    }
+
+    return [pscustomobject]@{
+        Size            = $bytes.Length
+        SymbolCount     = $Library.SymbolCount
+        RelocationCount = $Library.RelocationCount
+        Verified        = $RequiredSymbols.Count
+    }
+}
+
 function New-XamarinAppLibrary {
     # libxamarin-app.so carries the data the Android host reads at startup. The
     # symbol list is the one ApplicationConfigNativeAssemblyGeneratorCLR.cs
@@ -6978,6 +7714,11 @@ function New-XamarinAppLibrary {
         $runtimeProperties = $hostFilled
     }
 
+    # Pointer width from the target's ELF class. Only pointer-typed fields
+    # change size; the fixed-width fields (uint32_t, uint64_t) do not.
+    $pointerSize = $script:Target.ElfClass / 8
+    $writePointer = { if ($pointerSize -eq 4) { $writer.Write([uint32]0) } else { $writer.Write([uint64]0) } }
+
     $data = [System.IO.MemoryStream]::new()
     $writer = [System.IO.BinaryWriter]::new($data, [System.Text.Encoding]::UTF8, $true)
     $symbols = [System.Collections.Generic.List[object]]::new()
@@ -7027,10 +7768,14 @@ function New-XamarinAppLibrary {
     & $define 'format_tag' 8
     $writer.Write([uint64]0x00045E6972616D58)
 
-    # application_config. Field order is ApplicationConfigCLR.cs exactly.
+    # application_config. Field order is ApplicationConfigCLR.cs exactly. The
+    # pointer after the 13 uint32_t fields lands at 56 on both widths; the two
+    # trailing bools follow it, and the struct pads to its pointer alignment.
+    $applicationConfigSize = 56 + $pointerSize + 2
+    $applicationConfigSize += ($pointerSize - ($applicationConfigSize % $pointerSize)) % $pointerSize
     & $align 8
     $applicationConfigOffset = [int]$data.Position
-    & $define 'application_config' 72
+    & $define 'application_config' $applicationConfigSize
     $writer.Write([byte]0)      # uses_assembly_preload
     $writer.Write([byte]0)      # jni_add_native_method_registration_attribute_present
     $writer.Write([byte]0)      # marshal_methods_enabled
@@ -7049,32 +7794,35 @@ function New-XamarinAppLibrary {
     $writer.Write([uint32]0)    # jni_remapping_replacement_type_count
     $writer.Write([uint32]0)    # jni_remapping_replacement_method_index_entry_count
     $packageNamePointerOffset = [int]$data.Position
-    $writer.Write([uint64]0)    # android_package_name, supplied by relocation
+    & $writePointer             # android_package_name, supplied by relocation
     $writer.Write([byte]1)      # have_assembly_store
-    Write-ByteSpan -Writer $writer -Bytes (New-Object byte[] 7)   # tail padding to 72
+    $writer.Write([byte]0)      # assembly_store_decompression_cache_enabled
+    Write-ByteSpan -Writer $writer -Bytes (New-Object byte[] ($applicationConfigSize - 56 - $pointerSize - 2))
 
     $relocations.Add([pscustomobject]@{ Offset = $packageNamePointerOffset; Target = $packageNameOffset })
 
     # Property name and value tables. The values are filled in by the host.
     & $align 8
-    & $define 'init_runtime_property_names' ($runtimeProperties.Count * 8)
+    & $define 'init_runtime_property_names' ($runtimeProperties.Count * $pointerSize)
     foreach ($offset in $propertyNameOffsets) {
         $relocations.Add([pscustomobject]@{ Offset = [int]$data.Position; Target = $offset })
-        $writer.Write([uint64]0)
+        & $writePointer
     }
 
     & $align 8
-    & $define 'init_runtime_property_values' ($runtimeProperties.Count * 8)
+    & $define 'init_runtime_property_values' ($runtimeProperties.Count * $pointerSize)
     foreach ($offset in $propertyValueOffsets) {
         if ($offset -ge 0) {
             $relocations.Add([pscustomobject]@{ Offset = [int]$data.Position; Target = $offset })
         }
-        $writer.Write([uint64]0)
+        & $writePointer
     }
 
     # Assembly store runtime state. The host populates both.
-    & $zeros 'assembly_store' 24
-    & $zeros 'assembly_store_bundled_assemblies' ($AssemblyCount * 32)
+    # AssemblyStoreRuntimeData: pointer, uint32_t, uint32_t, pointer.
+    # AssemblyStoreSingleAssemblyRuntimeData: four pointers.
+    & $zeros 'assembly_store' (8 + 2 * $pointerSize)
+    & $zeros 'assembly_store_bundled_assemblies' ($AssemblyCount * 4 * $pointerSize)
 
     # Everything else is declared and empty: the counts beside them are zero,
     # so the runtime never walks into these.
@@ -7261,10 +8009,10 @@ function New-XamarinAppLibrary {
     & $zeros 'jni_remapping_type_replacements' 0
 
     # xamarin_app_init: the host calls it to hand over a function pointer
-    # resolver. With marshal methods disabled there is nothing to record.
-    & $align 4
+    # resolver. With marshal methods disabled there is nothing to record. The
+    # symbol points at the return stub the ELF writer places in the executable
+    # segment; nothing is written into the data here.
     & $define 'xamarin_app_init' 4 'FUNC'
-    Write-ByteSpan -Writer $writer -Bytes ([byte[]]@(0xC0, 0x03, 0x5F, 0xD6))   # ret
 
     $writer.Flush()
     $payload = $data.ToArray()
@@ -7274,7 +8022,8 @@ function New-XamarinAppLibrary {
     # uncompressed_assemblies_data_buffer lives past the end of the file image.
     $bssSize = 8
 
-    return New-ElfDataLibrary `
+    $dataLibrary = if ($script:Target.ElfClass -eq 32) { 'New-ElfDataLibrary32' } else { 'New-ElfDataLibrary' }
+    return & $dataLibrary `
         -Soname 'libxamarin-app.so' `
         -Payload $payload `
         -Symbols $symbols `
@@ -7398,7 +8147,12 @@ function Invoke-AppDataStep {
         'jni_remapping_method_replacement_index', 'jni_remapping_type_replacements',
         'xamarin_app_init'
     )
-    $report = Test-XamarinAppLibrary -Library $library -RequiredSymbols $required -PackageName $script:PackageName
+    $report = if ($script:Target.ElfClass -eq 32) {
+        Test-XamarinAppLibrary32 -Library $library -RequiredSymbols $required -PackageName $script:PackageName
+    }
+    else {
+        Test-XamarinAppLibrary -Library $library -RequiredSymbols $required -PackageName $script:PackageName
+    }
 
     $outputDirectory = Join-Path $OutputDirectory $script:Target.Abi
     $libraryPath = Join-Path $outputDirectory 'libxamarin-app.so'
@@ -8098,7 +8852,7 @@ function Get-NavigationItems {
            Caption = switch ($Architecture) {
                'arm64' { 'arm64-v8a, phones' }
                'x64'   { 'x86_64, emulator' }
-               'arm32' { 'armeabi-v7a (not built yet)' }
+               'arm32' { 'armeabi-v7a (32-bit devices)' }
            } }
         @{ Id = 'Debug'; Kind = 'Option'; Label = 'Debug'; Value = $(if ($Debug) { 'On' } else { 'Off' })
            Caption = if ($Debug) { 'Intermediates + reference check' } else { 'APK only' } }

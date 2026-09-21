@@ -74,8 +74,8 @@ Versions are exact and pinned in `lib/manifest.json` under `packageVersions`
 PowerShell `7.7.0-preview.4`). There is no floating "newest" resolution.
 `-DotNet`, `-Android` and `-PowerShell` accept exact versions only.
 
-Status: `arm64` and `x64` build and run. `arm32` is declared and stops early:
-it needs its own ELF32 writer and ARM32 encoders.
+Status: `arm64` and `x64` build and run. `arm32` has ELF32 writers for the store,
+`libpsl-native` (A32 encoders) and `libxamarin-app`; it has not run on hardware yet.
 
 Test devices: an x86_64 emulator (API 36), an arm64 phone (API 36) and an
 arm32 streaming device (API 34).
