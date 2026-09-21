@@ -123,9 +123,9 @@ for ($i = 0; $i -lt $LongArguments.Count; $i++) {
 # One literal record per target. The facade name is never used as a path; it
 # resolves here into the separate naming domains the platform uses.
 $script:Targets = @{
-    arm64 = [pscustomobject]@{ Rid = 'android-arm64'; Abi = 'arm64-v8a';   ElfClass = 64; Machine = 'EM_AARCH64'; CompilerDefine = '__aarch64__' }
-    x64   = [pscustomobject]@{ Rid = 'android-x64';   Abi = 'x86_64';      ElfClass = 64; Machine = 'EM_X86_64';  CompilerDefine = '__x86_64__' }
-    arm32 = [pscustomobject]@{ Rid = 'android-arm';   Abi = 'armeabi-v7a'; ElfClass = 32; Machine = 'EM_ARM';     CompilerDefine = '__arm__' }
+    arm64 = [pscustomobject]@{ Rid = 'android-arm64'; Abi = 'arm64-v8a';   ElfClass = 64; Machine = 'EM_AARCH64'; CompilerDefine = '__aarch64__'; RelativeRelocation = 'R_AARCH64_RELATIVE' }
+    x64   = [pscustomobject]@{ Rid = 'android-x64';   Abi = 'x86_64';      ElfClass = 64; Machine = 'EM_X86_64';  CompilerDefine = '__x86_64__';  RelativeRelocation = 'R_X86_64_RELATIVE' }
+    arm32 = [pscustomobject]@{ Rid = 'android-arm';   Abi = 'armeabi-v7a'; ElfClass = 32; Machine = 'EM_ARM';     CompilerDefine = '__arm__';     RelativeRelocation = 'R_ARM_RELATIVE' }
 }
 $script:Target = $script:Targets[$Architecture]
 
@@ -904,8 +904,10 @@ function Get-LeanAssemblyManifest {
         $names.Add($trimmed)
     }
 
-    if ($names.Count -ne 96) {
-        throw "The lean assembly order must contain exactly 96 entries; it contains $($names.Count)."
+    # The list is pinned by digest in lib/manifest.json, so its length is the
+    # authoritative assembly count; every later check compares against it.
+    if ($names.Count -eq 0) {
+        throw 'The lean assembly order is empty.'
     }
     if (@($names | Group-Object | Where-Object Count -ne 1).Count -ne 0) {
         throw 'The lean assembly order contains duplicate entries.'
@@ -3271,12 +3273,12 @@ function Invoke-SelectionStep {
             $missing.Count,
             ($missing -join ', '))
     }
-    if ($selected.Count -ne 96) {
-        throw "Lean assembly selection produced $($selected.Count) entries; exactly 96 are required."
+    if ($selected.Count -ne $manifest.Count) {
+        throw "Lean assembly selection produced $($selected.Count) entries; the pinned list names $($manifest.Count)."
     }
 
     $script:BuildContext.SelectedAssemblies = $selected
-    Write-Host '[PASS] Step 4 complete: 96 ordered runtime assemblies selected in memory; reference-only images and Probe.r2r.dll rejected.' -ForegroundColor Green
+    Write-Host "[PASS] Step 4 complete: $($selected.Count) ordered runtime assemblies selected in memory; reference-only images and Probe.r2r.dll rejected." -ForegroundColor Green
 }
 
 $script:Crc32Table = $null
@@ -3673,7 +3675,7 @@ function Get-ElfConstants {
     }
 
     $tagText = Import-LibSourceText -Path 'DynamicTags.def'
-    foreach ($tag in @('NULL', 'NEEDED', 'HASH', 'STRTAB', 'SYMTAB', 'RELA', 'RELASZ', 'RELAENT', 'REL', 'RELSZ', 'RELENT', 'STRSZ', 'SYMENT', 'SONAME', 'FLAGS')) {
+    foreach ($tag in @('NULL', 'NEEDED', 'HASH', 'STRTAB', 'SYMTAB', 'RELA', 'RELASZ', 'RELAENT', 'RELACOUNT', 'REL', 'RELSZ', 'RELENT', 'STRSZ', 'SYMENT', 'SONAME', 'FLAGS')) {
         $match = [regex]::Match($tagText, "DYNAMIC_TAG\($tag,\s*(0x[0-9a-fA-F]+|\d+)\)")
         if (-not $match.Success) {
             throw "DynamicTags.def does not declare 'DT_$tag'."
@@ -7011,7 +7013,7 @@ function New-ElfDataLibrary {
 
     $elf = Get-ElfConstants
     # Read from the pinned relocation definitions for the target machine.
-    $relativeType = (Get-ElfConstants)[$(if ($Architecture -eq 'x64') { 'R_X86_64_RELATIVE' } else { 'R_AARCH64_RELATIVE' })]
+    $relativeType = $elf[$script:Target.RelativeRelocation]
 
     $headerSize = 64
     $programHeaderSize = 56
@@ -7098,7 +7100,7 @@ function New-ElfDataLibrary {
             $writer.Write([uint64]$memorySize)
             $writer.Write([uint64]$align)
         }
-        $readExecute = [uint32]($elf['PF_R'] -bor 1)
+        $readExecute = [uint32]($elf['PF_R'] -bor $elf['PF_X'])
         $readWrite = [uint32]($elf['PF_R'] -bor $elf['PF_W'])
         & $writeSegment $elf['PT_LOAD'] $readExecute 0 $readExecEnd $readExecEnd $PageSize
         & $writeSegment $elf['PT_LOAD'] $readWrite $payloadOffset $Payload.Length ($Payload.Length + $BssSize) $PageSize
@@ -7111,7 +7113,7 @@ function New-ElfDataLibrary {
         Write-ByteSpan -Writer $writer -Bytes (New-Object byte[] 24)
         foreach ($symbol in $exported) {
             $writer.Write([uint32]$nameOffsets[$symbol.Name])
-            $type = if ([string]$symbol.Kind -ceq 'FUNC') { 2 } else { [uint32]$elf['STT_OBJECT'] }
+            $type = if ([string]$symbol.Kind -ceq 'FUNC') { [uint32]$elf['STT_FUNC'] } else { [uint32]$elf['STT_OBJECT'] }
             $writer.Write([byte](([uint32]$elf['STB_GLOBAL'] -shl 4) -bor $type))
             $writer.Write([byte]0)
             $writer.Write([uint16]1)
@@ -7141,10 +7143,10 @@ function New-ElfDataLibrary {
         & $writeDynamic $elf['DT_SYMTAB'] $dynsymOffset
         & $writeDynamic $elf['DT_STRSZ'] $dynstrBytes.Length
         & $writeDynamic $elf['DT_SYMENT'] 24
-        & $writeDynamic 7 $relaOffset        # DT_RELA
-        & $writeDynamic 8 $relaSize          # DT_RELASZ
-        & $writeDynamic 9 24                 # DT_RELAENT
-        & $writeDynamic 0x6FFFFFF9 $Relocations.Count   # DT_RELACOUNT
+        & $writeDynamic $elf['DT_RELA'] $relaOffset
+        & $writeDynamic $elf['DT_RELASZ'] $relaSize
+        & $writeDynamic $elf['DT_RELAENT'] 24
+        & $writeDynamic $elf['DT_RELACOUNT'] $Relocations.Count
         & $writeDynamic $elf['DT_NULL'] 0
         & $writeDynamic $elf['DT_NULL'] 0
 
@@ -7175,7 +7177,8 @@ function Test-XamarinAppLibrary {
     param(
         [Parameter(Mandatory)][pscustomobject] $Library,
         [Parameter(Mandatory)][string[]] $RequiredSymbols,
-        [Parameter(Mandatory)][string] $PackageName
+        [Parameter(Mandatory)][string] $PackageName,
+        [Parameter(Mandatory)][int] $AssemblyCount
     )
 
     $bytes = $Library.Bytes
@@ -7195,7 +7198,7 @@ function Test-XamarinAppLibrary {
         $filesz = [int][BitConverter]::ToUInt64($bytes, $o + 32)
         $memsz = [int][BitConverter]::ToUInt64($bytes, $o + 40)
         if ($type -eq $elf['PT_LOAD']) {
-            if (($flags -band $elf['PF_W']) -ne 0 -and ($flags -band 1) -ne 0) {
+            if (($flags -band $elf['PF_W']) -ne 0 -and ($flags -band $elf['PF_X']) -ne 0) {
                 throw 'A loadable segment is both writable and executable.'
             }
             if ($memsz -gt $filesz) { $sawBss = $true }
@@ -7214,20 +7217,20 @@ function Test-XamarinAppLibrary {
         $dynamic[[uint64]$tag] = $value
         $cursor += 16
     }
-    foreach ($required in @(4, 5, 6, 7, 8, 9)) {
-        if (-not $dynamic.ContainsKey([uint64]$required)) { throw "The dynamic table is missing tag $required." }
+    foreach ($required in 'DT_HASH', 'DT_STRTAB', 'DT_SYMTAB', 'DT_RELA', 'DT_RELASZ', 'DT_RELAENT') {
+        if (-not $dynamic.ContainsKey([uint64]$elf[$required])) { throw "The dynamic table is missing $required." }
     }
 
     # Every relocation must be R_AARCH64_RELATIVE and land inside the image.
-    $relaOffset = [int]$dynamic[[uint64]7]
-    $relaSize = [int]$dynamic[[uint64]8]
+    $relaOffset = [int]$dynamic[[uint64]$elf['DT_RELA']]
+    $relaSize = [int]$dynamic[[uint64]$elf['DT_RELASZ']]
     $count = $relaSize / 24
     for ($i = 0; $i -lt $count; $i++) {
         $o = $relaOffset + ($i * 24)
         $target = [int][BitConverter]::ToUInt64($bytes, $o)
         $info = [BitConverter]::ToUInt64($bytes, $o + 8)
         $addend = [int][BitConverter]::ToInt64($bytes, $o + 16)
-        $relativeType = (Get-ElfConstants)[$(if ($Architecture -eq 'x64') { 'R_X86_64_RELATIVE' } else { 'R_AARCH64_RELATIVE' })]
+        $relativeType = $elf[$script:Target.RelativeRelocation]
         if ($info -ne $relativeType) { throw "Relocation $i is type $info, not the target's RELATIVE ($relativeType)." }
         if ($target -lt 0 -or $target + 8 -gt $bytes.Length) { throw "Relocation $i writes outside the image." }
         if ($addend -lt 0 -or $addend -ge $bytes.Length) { throw "Relocation $i points outside the image." }
@@ -7235,9 +7238,9 @@ function Test-XamarinAppLibrary {
 
     # Resolve every required symbol through the hash table, the way the loader
     # will, and confirm the package name relocation points at the right string.
-    $strtab = [int]$dynamic[[uint64]5]
-    $symtab = [int]$dynamic[[uint64]6]
-    $hash = [int]$dynamic[[uint64]4]
+    $strtab = [int]$dynamic[[uint64]$elf['DT_STRTAB']]
+    $symtab = [int]$dynamic[[uint64]$elf['DT_SYMTAB']]
+    $hash = [int]$dynamic[[uint64]$elf['DT_HASH']]
     $chainCount = [int][BitConverter]::ToUInt32($bytes, $hash + 4)
     $found = @{}
     for ($i = 1; $i -lt $chainCount; $i++) {
@@ -7254,8 +7257,8 @@ function Test-XamarinAppLibrary {
     }
 
     $configAddress = $found['application_config']
-    if ([BitConverter]::ToUInt32($bytes, $configAddress + 20) -ne 96) {
-        throw 'application_config does not declare 96 assemblies.'
+    if ([BitConverter]::ToUInt32($bytes, $configAddress + 20) -ne $AssemblyCount) {
+        throw "application_config does not declare $AssemblyCount assemblies."
     }
     if ($bytes[$configAddress + 64] -ne 1) { throw 'application_config does not set have_assembly_store.' }
 
@@ -7574,7 +7577,8 @@ function Test-XamarinAppLibrary32 {
     param(
         [Parameter(Mandatory)][pscustomobject] $Library,
         [Parameter(Mandatory)][string[]] $RequiredSymbols,
-        [Parameter(Mandatory)][string] $PackageName
+        [Parameter(Mandatory)][string] $PackageName,
+        [Parameter(Mandatory)][int] $AssemblyCount
     )
 
     $bytes = $Library.Bytes
@@ -7644,7 +7648,7 @@ function Test-XamarinAppLibrary32 {
     # 32-bit ApplicationConfig: 4 bools, 13 uint32_t, the package-name pointer
     # at 56, have_assembly_store at 60.
     $config = $found['application_config']
-    if ((& $u32 ($config + 20)) -ne 96) { throw 'application_config does not declare 96 assemblies.' }
+    if ((& $u32 ($config + 20)) -ne $AssemblyCount) { throw "application_config does not declare $AssemblyCount assemblies." }
     if ($bytes[$config + 60] -ne 1) { throw 'application_config does not set have_assembly_store.' }
     $name = [int](& $u32 ($config + 56))
     $end = $name
@@ -8148,10 +8152,10 @@ function Invoke-AppDataStep {
         'xamarin_app_init'
     )
     $report = if ($script:Target.ElfClass -eq 32) {
-        Test-XamarinAppLibrary32 -Library $library -RequiredSymbols $required -PackageName $script:PackageName
+        Test-XamarinAppLibrary32 -Library $library -RequiredSymbols $required -PackageName $script:PackageName -AssemblyCount $assemblyCount
     }
     else {
-        Test-XamarinAppLibrary -Library $library -RequiredSymbols $required -PackageName $script:PackageName
+        Test-XamarinAppLibrary -Library $library -RequiredSymbols $required -PackageName $script:PackageName -AssemblyCount $assemblyCount
     }
 
     $outputDirectory = Join-Path $OutputDirectory $script:Target.Abi

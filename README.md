@@ -19,7 +19,7 @@ addresses.
 ## Status
 
 Steps 1 through 11 pass. `-Step 11` produces a signed `dev.mansfieldplumbing.pwsh.apk` that installs
-on a OnePlus 11, launches, initializes CoreCLR, loads its assemblies out of the
+on a Samsung Galaxy S23, launches, initializes CoreCLR, loads its assemblies out of the
 emitted assembly store, resolves its activity through the emitted type map, and
 runs emitted IL to draw its first screen. Verified on hardware.
 

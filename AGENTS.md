@@ -36,18 +36,39 @@ Keep this repository narrow and evidence-led.
 
 Each fact names where it was checked.
 
-- `setup.ps1` emits AArch64 `ET_DYN` ELF64 libraries with `.dynsym`, a hash
-  table, a dynamic section, section headers and `R_AARCH64_RELATIVE`
-  relocations (`New-*` ELF functions and `Add-ElfSectionTable` in `setup.ps1`).
-  It does not yet emit executable code sections or `DT_NEEDED` entries.
-- Terminal's `libpsl-native.so` was eight exported functions: seven empty and
-  one returning 1 (`src/libpsl/libpsl-native.c` in the predecessor Terminal
-  project). It was built with the Android NDK.
-- `setup.ps1` does not package `libpsl-native.so`.
+- `setup.ps1` emits `ET_DYN` shared libraries for three targets: ELF64
+  `EM_AARCH64` and `EM_X86_64`, and ELF32 `EM_ARM`. The target table
+  (`$script:Targets`) holds each target's machine, ELF class, relocation type,
+  RID and ABI. Constants come from the pinned `ELF.h`, `DynamicTags.def` and
+  relocation `.def` files (`Get-ElfConstants`).
+- `setup.ps1` emits executable code: `libpsl-native.so` with 21 exports for
+  every target, through a GOT with `DT_NEEDED libc.so` and `DT_FLAGS BIND_NOW`.
+  Every instruction is decoded back by an independent decoder
+  (`New-PslNativeLibrary*`, `Test-ElfCodeLibrary*`).
+- SMA calls `libpsl-native` during startup (`Native_OpenLog` and
+  `Native_SysLog`), so the library must ship. The .NET for Android host waits
+  for a Java-side load of it, so the activity calls
+  `JavaSystem.LoadLibrary("psl-native")` (checked on the x86_64 emulator).
+- ARM32 is ARM-state A32, EABI version 5, soft-float, with REL relocations
+  (`lib/ARM.cpp`, `lib/ARM.def`). bionic never reads `e_flags`
+  (`lib/linker_phdr.cpp`, android-14.0.0_r1). A 32-bit assembly store carries
+  no 64-bit flag in its version word (`lib/xamarin-app.hh` lines 14-19).
+- All three targets reach the PowerShell host: CanvasDemo runs on the x86_64
+  emulator; the arm64 phone and the arm32 device stop at `START_MISSING`
+  because no `Profile.ps1` is placed.
+- The payload is the 96 names in `lib/arm64-v8a.lean-assembly-order.txt`,
+  pinned by digest; its length is the assembly count every step checks.
+  `System.Numerics.Vectors` is required: `System.Linq` references it from
+  `Enumerable.Sum`, `Average` and `FillIncrementing`.
+- The payload has no cmdlet modules (`Microsoft.PowerShell.Commands.*`), so
+  `Get-ChildItem` and `Get-Process` are not present.
 - The shipped payload has no Roslyn (`Microsoft.CodeAnalysis.*`), so
   `Add-Type -TypeDefinition` and `-MemberDefinition` cannot work on device.
   `Add-Type -LiteralPath` loads precompiled .NET assemblies only, not native
   libraries (`lib/arm64-v8a.lean-assembly-order.txt`).
+- The predecessor `libpsl-native.so` (arm32, NDK clang 17) exported eight
+  functions, all stubs; `GetCurrentThreadId` returned 1 (read from the
+  installed predecessor APK).
 - RyuJitDetach lifts leaf-only RyuJIT bodies into AMD64 Windows PE files; its
   shim owns every call. It does not produce ARM64 or Android code (its README).
 - PSPersistence persists selected SMA expression trees as reloadable
@@ -57,8 +78,6 @@ Each fact names where it was checked.
 
 Verify each on hardware before relying on it.
 
-- Whether System.Management.Automation calls `libpsl-native` during runspace
-  creation on Android, now that `setup.ps1` does not ship it.
 - The exact runtime properties `coreclr_initialize` needs without the .NET for
   Android host.
 - Whether `libSystem.Security.Cryptography.Native.Android.so` must be
