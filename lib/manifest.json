@@ -86,6 +86,26 @@
       "role": "Upstream reference only. bionic at android-14.0.0_r1. ElfReader::VerifyElfHeader defines what the Android loader rejects: magic, class, byte order, e_type, e_version, e_machine, e_shentsize, e_shstrndx. It never reads e_flags."
     },
     {
+      "path": "log.h",
+      "sha256": "5BC4D976E0B5AE12FFADD3F2D0A5482A734C4A920485CC4CE10DF6FAC95CE7C0",
+      "url": "https://android.googlesource.com/platform/system/logging/+/0d18f57987b1dbf3494ca7d2b13645eac002d3cd/liblog/include/android/log.h?format=TEXT",
+      "transport": "gitiles-base64",
+      "role": "Android liblog API at android-14.0.0_r1. The android_LogPriority enum and __android_log_write, which the emitted native host calls."
+    },
+    {
+      "path": "native_activity.h",
+      "sha256": "04F85D119FC222ABD65AEF1F57F8E03A94134C272B95ED781E8F3791C64D973A",
+      "url": "https://android.googlesource.com/platform/frameworks/native/+/bfcf75076e562945bae131a4929f29a90d0d2481/include/android/native_activity.h?format=TEXT",
+      "transport": "gitiles-base64",
+      "role": "Android NativeActivity API at android-14.0.0_r1. ANativeActivity_onCreate is the entry point the framework NativeActivity calls in the library named by android.app.lib_name."
+    },
+    {
+      "path": "host_runtime_contract.h",
+      "sha256": "CB3EEBA1E755B15B187ACCE315EE322FDBCC500786D8B4B7150D91F9B4481380",
+      "url": "https://raw.githubusercontent.com/dotnet/runtime/ab19415702aa8139d5369e47c73edb47343c34ad/src/native/corehost/host_runtime_contract.h",
+      "role": "CoreCLR host contract at v11.0.0-rc.1.26425.128. external_assembly_probe lets a host serve assemblies from memory it owns, such as the mapped store."
+    },
+    {
       "path": "DynamicTags.def",
       "sha256": "52E6D36141C7CC70A3B5BFE99EC0D50313497C536F93F8A6D4A9ED9482B19C82",
       "url": "https://raw.githubusercontent.com/llvm/llvm-project/1fe126ef2d6330b7459704e28b2cb3f9bb92b63c/llvm/include/llvm/BinaryFormat/DynamicTags.def",

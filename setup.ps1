@@ -760,14 +760,15 @@ $script:KeepPackageCache = -not $DeletePackages -and $Packages -eq 'Folder'
 # any of them fails verification before a single byte is parsed.
 $script:RepositoryLibBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/a31dddd971087a5e4dfb2ba031ff9ef510099d2c/lib/'
 $script:LibRootManifestPath = 'manifest.json'
-$script:LibRootManifestSha256 = '89963C1B418E062DAA44293B60028141CC2C4ED4660EA65248DF21D227C0327A'
+$script:LibRootManifestSha256 = '6CC98B420B072398B437DD6C9095CB10540F69FE7D504915491D1044F2481314'
 $script:LibSourceManifest = $null
 
 function Get-LibFileBytes {
     param(
         [Parameter(Mandatory)][string] $Path,
         [Parameter(Mandatory)][string] $Sha256,
-        [string] $Url
+        [string] $Url,
+        [string] $Transport = ''
     )
 
     $bytes = $null
@@ -800,11 +801,7 @@ function Get-LibFileBytes {
     }
 
     Write-Host ('[ .. ] Restoring lib source: {0}' -f $Path) -ForegroundColor DarkCyan
-    $response = Invoke-WebRequest -Uri $address -UseBasicParsing
-    if ([int]$response.StatusCode -ne 200) {
-        throw "Restoring lib source '$Path' from '$address' returned HTTP $([int]$response.StatusCode)."
-    }
-    $bytes = $response.RawContentStream.ToArray()
+    $bytes = Get-UpstreamSourceBytes -Url $address -Transport $(if ([string]::IsNullOrWhiteSpace($Url)) { '' } else { $Transport })
 
     $stream = [System.IO.MemoryStream]::new($bytes, $false)
     try { $actual = Get-Sha256Hex -Stream $stream }
@@ -817,6 +814,33 @@ function Get-LibFileBytes {
     if ($script:LibRestoreDirectory -and -not $WhatIfPreference) {
         Write-BuildFile -Path (Join-Path $script:LibRestoreDirectory $Path) -Bytes $bytes
     }
+    return $bytes
+}
+
+function Get-PinTransport {
+    # The optional 'transport' field of a provenance pin; empty when absent.
+    param([Parameter(Mandatory)] $Pin)
+    $property = $Pin.PSObject.Properties['transport']
+    if ($null -eq $property) { return '' }
+    [string]$property.Value
+}
+
+function Get-UpstreamSourceBytes {
+    # Fetches a pinned address and returns the file's bytes. Gitiles
+    # (android.googlesource.com) serves a file at a fixed commit only as base64
+    # (?format=TEXT); 'gitiles-base64' decodes that. The pinned digest is always
+    # over the decoded file bytes.
+    param([Parameter(Mandatory)][string] $Url, [string] $Transport = '')
+
+    $response = Invoke-WebRequest -Uri $Url -UseBasicParsing
+    if ([int]$response.StatusCode -ne 200) {
+        throw "Upstream source '$Url' returned HTTP $([int]$response.StatusCode)."
+    }
+    $bytes = $response.RawContentStream.ToArray()
+    if ($Transport -ceq 'gitiles-base64') {
+        return [Convert]::FromBase64String([System.Text.Encoding]::ASCII.GetString($bytes).Trim())
+    }
+    if (-not [string]::IsNullOrEmpty($Transport)) { throw "Unknown upstream transport '$Transport'." }
     return $bytes
 }
 
@@ -842,6 +866,10 @@ function Get-LibSourceManifest {
         }
         if ($null -ne $source.url -and -not ([string]$source.url).StartsWith('https://', [StringComparison]::Ordinal)) {
             throw "Source '$($source.path)' declares a non-HTTPS upstream address."
+        }
+        $transport = Get-PinTransport -Pin $source
+        if ($transport -and ($transport -cne 'gitiles-base64' -or -not ([string]$source.url).StartsWith('https://android.googlesource.com/', [StringComparison]::Ordinal))) {
+            throw "Source '$($source.path)' declares transport '$transport', which is allowed only as 'gitiles-base64' for android.googlesource.com."
         }
     }
     if (@($sources | Group-Object -Property path | Where-Object Count -ne 1).Count -ne 0) {
@@ -884,7 +912,7 @@ function Import-LibSourceBytes {
     param([Parameter(Mandatory)][string] $Path)
 
     $pin = Get-LibSourcePin -Path $Path
-    return Get-LibFileBytes -Path $Path -Sha256 ([string]$pin.sha256) -Url ([string]$pin.url)
+    return Get-LibFileBytes -Path $Path -Sha256 ([string]$pin.sha256) -Url ([string]$pin.url) -Transport (Get-PinTransport -Pin $pin)
 }
 function Import-LibSourceText {
     param([Parameter(Mandatory)][string] $Path)
@@ -937,11 +965,7 @@ function Invoke-VerifyStep {
             continue
         }
 
-        $response = Invoke-WebRequest -Uri ([string]$pin.url) -UseBasicParsing
-        if ([int]$response.StatusCode -ne 200) {
-            throw "Upstream source '$($pin.url)' returned HTTP $([int]$response.StatusCode)."
-        }
-        $remoteBytes = $response.RawContentStream.ToArray()
+        $remoteBytes = Get-UpstreamSourceBytes -Url ([string]$pin.url) -Transport (Get-PinTransport -Pin $pin)
         $remoteStream = [System.IO.MemoryStream]::new($remoteBytes, $false)
         try { $remoteHash = Get-Sha256Hex -Stream $remoteStream }
         finally { $remoteStream.Dispose() }

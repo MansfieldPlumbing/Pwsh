@@ -90,15 +90,27 @@ PowerShell.
 | `libxamarin-app.so`: application config, runtime properties, type map, DSO cache | 1.18 MB | DELETE |
 | `Mono.Android.dll`, `Mono.Android.Runtime.dll`, `Java.Interop.dll`, `_Microsoft.Android.Resource.Designer.dll` | four payload assemblies | DELETE |
 | `RuntimeFeature` switches, JNIEnv init tokens, type-map lookups | host-only data | DELETE |
-| `libassembly-store.so` (XABA, read by monodroid) | the store format | REPLACE; open question 1 |
+| `libassembly-store.so` (XABA, read by monodroid) | the store format | KEEP if the owned host can serve it through `external_assembly_probe`; open question 1 |
 
 ## Open questions
 
-1. **Assembly provisioning without monodroid.** `coreclr_initialize` needs
-   `System.Private.CoreLib` through `TRUSTED_PLATFORM_ASSEMBLIES`, which takes
-   file paths. The owned host must either extract assemblies to the files
-   directory, or load CoreLib from a path and the rest from a store. This
-   decides milestone gate 2.
+1. **Who owns assembly resolution at CoreCLR startup, and which runtime
+   properties and callbacks are required?** Extraction to disk is not forced:
+   the pinned host contract (`lib/host_runtime_contract.h`,
+   v11.0.0-rc.1.26425.128) has `external_assembly_probe`, which returns a
+   pointer and size for an assembly from memory the host owns. Candidate
+   shapes:
+   - loose assemblies listed in `TRUSTED_PLATFORM_ASSEMBLIES`;
+   - a hybrid of files on disk and a store;
+   - an owned `HOST_RUNTIME_CONTRACT` whose `external_assembly_probe` serves
+     assemblies from the existing XABA store, mapped by `dlopen` of
+     `libassembly-store.so` and `_assembly_store`.
+
+   The third keeps the store proven on three architectures and deletes
+   `libmonodroid` and `libxamarin-app`. Rule it out before accepting the
+   first-run writes and duplicate storage that extraction costs. The current
+   .NET for Android CoreCLR host is the oracle for the minimal property set.
+   This decides milestone gate 2.
 2. **`libSystem.Security.Cryptography.Native.Android.so` and the Java VM.** A
    `dlopen` from CoreCLR does not run `JNI_OnLoad`; the host may have to pass
    `activity->vm` explicitly before hashing or TLS work.
@@ -118,3 +130,11 @@ Milestone 1 is split so that a failure points at one layer:
    Xamarin or any DEX.
 2. `NativeActivity` → emitted host `.so` → CoreCLR → the smallest managed
    entry. Proves runtime ownership. Needs open question 1 decided first.
+
+Gate 1 is deliberately minimal: `android:hasCode="false"`, the framework
+`android.app.NativeActivity`, `android.app.lib_name` naming the host library,
+an exported `ANativeActivity_onCreate` that makes one `__android_log_write`
+call through `DT_NEEDED liblog.so` and returns. It passes only if the APK also
+proves absence: no `.dex` entries, no `MonoRuntimeProvider`, no
+`libmonodroid.so` or `libxamarin-app.so`. It is a separate build mode; the
+Xamarin build stays the oracle until gate 1 holds on all three targets.
