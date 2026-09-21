@@ -44,6 +44,12 @@ param(
     [ValidateSet('Xamarin', 'NativeActivity')]
     [string] $Admission = 'Xamarin',
 
+    # Validate the manifest emitter and reader only, then exit: no packages, no
+    # store, no APK, and nothing written. -Aapt2Path additionally has an
+    # installed aapt2 parse both manifests (diagnostic only).
+    [switch] $ValidateManifest,
+    [string] $Aapt2Path = '',
+
 
     # Minimal:  Assembly set, IL only, no ReadyToRun (R2R) code.
     # Standard: every runtime assembly the packages ship, R2R code included.
@@ -207,6 +213,12 @@ OPTIONS
   -Architecture <arm64|x64|arm32>
                             Target. arm64 for phones, x64 for the x86_64
                             emulator. arm32 for 32-bit ARMv7 devices.
+  -ValidateManifest         Check the manifest emitter and reader in seconds:
+                            the Xamarin manifest against its pinned fixture,
+                            both manifests through the production reader and
+                            resource-id check, and malformed-document controls.
+                            Writes nothing. -Aapt2Path <aapt2.exe> adds an
+                            independent parse (one temporary file, deleted).
   -Admission <Xamarin|NativeActivity>
                             Xamarin (default) builds the proven host.
                             NativeActivity builds gate 1: a DEX-free APK whose
@@ -401,7 +413,9 @@ function Invoke-StepNode {
     foreach ($id in Resolve-StepOrder -Target $Target) {
         if ($script:CompletedNodes.Contains($id)) { continue }
         $script:RunningStep = $id
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         & $script:StepGraph[$id].Action
+        Write-Host ('[TIME] Step {0} ({1}): {2:N1} s' -f $id, $script:StepGraph[$id].Key, $stopwatch.Elapsed.TotalSeconds) -ForegroundColor DarkGray
         [void]$script:CompletedNodes.Add($id)
     }
 }
@@ -770,7 +784,7 @@ $script:KeepPackageCache = -not $DeletePackages -and $Packages -eq 'Folder'
 # any of them fails verification before a single byte is parsed.
 $script:RepositoryLibBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/16c349db8b0941e7ad6b72777592514245d5745b/lib/'
 $script:LibRootManifestPath = 'manifest.json'
-$script:LibRootManifestSha256 = '6CC98B420B072398B437DD6C9095CB10540F69FE7D504915491D1044F2481314'
+$script:LibRootManifestSha256 = 'BA6144E313A0D462BFB1F5A0198A0E62E226DA9FDFB2FA821E5F02151D537F6E'
 $script:LibSourceManifest = $null
 
 function Get-LibFileBytes {
@@ -8140,11 +8154,13 @@ function Test-BinaryAxml {
                         $at += $(if ($Document[$at] -band 0x80) { 2 } else { 1 })
                         $byteLength = $Document[$at]
                         if ($byteLength -band 0x80) { $byteLength = (($byteLength -band 0x7F) -shl 8) -bor $Document[$at + 1]; $at += 2 } else { $at += 1 }
+                        if ($at + $byteLength -gt $cursor + $chunkSize) { throw "String $s runs past the string pool." }
                         $strings.Add([System.Text.Encoding]::UTF8.GetString($Document, $at, $byteLength))
                     }
                     else {
                         $length = [BitConverter]::ToUInt16($Document, $at)
                         if ($length -band 0x8000) { $length = (($length -band 0x7FFF) -shl 16) -bor [BitConverter]::ToUInt16($Document, $at + 2); $at += 4 } else { $at += 2 }
+                        if ($at + 2 * $length -gt $cursor + $chunkSize) { throw "String $s runs past the string pool." }
                         $strings.Add([System.Text.Encoding]::Unicode.GetString($Document, $at, 2 * $length))
                     }
                 }
@@ -8228,6 +8244,114 @@ function Assert-ManifestAttributeIds {
         }
     }
     $checked
+}
+
+function Get-AxmlChunkOffset {
+    # Offset of the Nth chunk of a type, walking the document's chunk sizes.
+    param([Parameter(Mandatory)][byte[]] $Document, [Parameter(Mandatory)][uint16] $Type, [int] $Occurrence = 0)
+    $cursor = [BitConverter]::ToUInt16($Document, 2)
+    $seen = 0
+    while ($cursor -lt $Document.Length) {
+        if ([BitConverter]::ToUInt16($Document, $cursor) -eq $Type) {
+            if ($seen -eq $Occurrence) { return $cursor }
+            $seen++
+        }
+        $cursor += [BitConverter]::ToUInt32($Document, $cursor + 4)
+    }
+    throw ('No chunk of type 0x{0:X4} at occurrence {1}.' -f $Type, $Occurrence)
+}
+
+function Test-ManifestNegativeControls {
+    # Each mutation breaks one rule the reader enforces and must be rejected for
+    # that reason: AOSP validate_chunk (size and header alignment, minimum
+    # header, header within chunk, chunk within container), start-element
+    # attribute bounds, string-pool bounds, and resource-map identity.
+    param([Parameter(Mandatory)][byte[]] $Document)
+
+    $res = Get-ResourceChunkConstants
+    $set16 = { param($d, $at, $v) [System.Array]::Copy([BitConverter]::GetBytes([uint16]$v), 0, $d, $at, 2) }
+    $set32 = { param($d, $at, $v) [System.Array]::Copy([BitConverter]::GetBytes([uint32]$v), 0, $d, $at, 4) }
+    $pool = Get-AxmlChunkOffset -Document $Document -Type $res['RES_STRING_POOL_TYPE']
+    $map = Get-AxmlChunkOffset -Document $Document -Type $res['RES_XML_RESOURCE_MAP_TYPE']
+    $endElement = Get-AxmlChunkOffset -Document $Document -Type $res['RES_XML_END_ELEMENT_TYPE']
+    $startElement = Get-AxmlChunkOffset -Document $Document -Type $res['RES_XML_START_ELEMENT_TYPE']
+    $last = [BitConverter]::ToUInt16($Document, 2)
+    while ($last + [BitConverter]::ToUInt32($Document, $last + 4) -lt $Document.Length) { $last += [BitConverter]::ToUInt32($Document, $last + 4) }
+    $hasCodeEntry = -1
+    for ($i = 0; $i -lt ([BitConverter]::ToUInt32($Document, $map + 4) - 8) / 4; $i++) {
+        if ([BitConverter]::ToUInt32($Document, $map + 8 + 4 * $i) -eq 0x0101000C) { $hasCodeEntry = $map + 8 + 4 * $i }
+    }
+    if ($hasCodeEntry -lt 0) { throw 'The document under test has no android:hasCode resource-map entry.' }
+    $firstString = $pool + [BitConverter]::ToUInt32($Document, $pool + 20) + [BitConverter]::ToUInt32($Document, $pool + 28)
+
+    $controls = [ordered]@{
+        'misaligned chunk size'        = @({ param($d) & $set32 $d ($pool + 4) ([BitConverter]::ToUInt32($d, $pool + 4) - 2) }, 'multiples of 4')
+        'misaligned header size'       = @({ param($d) & $set16 $d ($pool + 2) 30 }, 'multiples of 4')
+        'header below minimum'         = @({ param($d) & $set16 $d ($pool + 2) 24 }, 'needs at least 28')
+        'header larger than chunk'     = @({ param($d) & $set16 $d ($endElement + 2) 28 }, 'is only 24 bytes')
+        'chunk past its container'     = @({ param($d) & $set32 $d ($last + 4) ([BitConverter]::ToUInt32($d, $last + 4) + 4) }, 'runs past its container')
+        'attributes past their node'   = @({ param($d) & $set16 $d ($startElement + 16 + 12) 60 }, 'past the end of its node')
+        'string past the pool'         = @({ param($d) & $set16 $d $firstString 0x7FFF }, 'runs past the string pool')
+        'wrong resource-map id'        = @({ param($d) & $set32 $d $hasCodeEntry 0x01010003 }, 'hasCode maps to 0x01010003')
+    }
+    foreach ($name in $controls.Keys) {
+        $mutated = [byte[]]$Document.Clone()
+        & $controls[$name][0] $mutated
+        $message = $null
+        try { [void](Assert-ManifestAttributeIds -Report (Test-BinaryAxml -Document $mutated)) }
+        catch { $message = $_.Exception.Message }
+        if ($null -eq $message) { throw "Negative control '$name' was accepted." }
+        if ($message -notmatch [regex]::Escape($controls[$name][1])) { throw "Negative control '$name' was rejected for another reason: $message" }
+    }
+    $controls.Count
+}
+
+function Invoke-Aapt2ManifestCheck {
+    # Diagnostic only: an independently implemented Android parser reads the
+    # manifest. Nothing it produces is used by the build.
+    param([Parameter(Mandatory)][byte[]] $Document, [Parameter(Mandatory)][string] $Label)
+    $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) ('pwsh-manifest-check-{0}.zip' -f [guid]::NewGuid().ToString('N'))
+    Write-Host ('[ .. ] aapt2 check writes and then deletes {0}' -f $zipPath) -ForegroundColor DarkCyan
+    try {
+        $archive = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            $stream = $archive.CreateEntry('AndroidManifest.xml').Open()
+            try { $stream.Write($Document, 0, $Document.Length) } finally { $stream.Dispose() }
+        }
+        finally { $archive.Dispose() }
+        $output = & $Aapt2Path dump xmltree --file AndroidManifest.xml $zipPath 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "aapt2 rejects the $Label manifest: $($output -join ' ')" }
+    }
+    finally { Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue }
+}
+
+function Invoke-ManifestValidation {
+    # The inner loop for manifest work: the production emitter, reader and
+    # checks, without the rest of the build. Returns the exit code.
+    try {
+        [void](Test-AndroidAttributeIds)
+        $xamarin = New-BinaryAxmlManifest -PackageName $script:PackageName -ActivityClassName $script:ActivityClassName -ActivityLabel $script:ApplicationLabel -Admission Xamarin
+        $fixture = Import-LibSourceBytes -Path 'AndroidManifest.xamarin.xml'
+        if ([Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($xamarin)) -cne [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($fixture))) {
+            throw 'The Xamarin manifest differs from its pinned fixture, lib/AndroidManifest.xamarin.xml.'
+        }
+        $native = New-BinaryAxmlManifest -PackageName $script:PackageName -ActivityClassName $script:ActivityClassName -ActivityLabel $script:ApplicationLabel -Admission NativeActivity
+        $counts = foreach ($pair in @(@('Xamarin', $xamarin), @('NativeActivity', $native))) {
+            Assert-ManifestAttributeIds -Report (Test-BinaryAxml -Document $pair[1])
+        }
+        $controls = Test-ManifestNegativeControls -Document $native
+        if ($Aapt2Path) {
+            Invoke-Aapt2ManifestCheck -Document $xamarin -Label 'Xamarin'
+            Invoke-Aapt2ManifestCheck -Document $native -Label 'NativeActivity'
+        }
+        Write-Host ('[PASS] Manifest validation: Xamarin manifest matches its pinned fixture; both manifests pass the reader with {0} and {1} android: attributes matched to public-final.xml ids; {2} malformed-document controls rejected for the expected reason{3}.' -f
+            $counts[0], $counts[1], $controls, $(if ($Aapt2Path) { '; aapt2 parses both' } else { '' })) -ForegroundColor Green
+        return 0
+    }
+    catch {
+        Write-Host ('[FAIL] Manifest validation: {0}' -f $_.Exception.Message) -ForegroundColor Red
+        return 1
+    }
 }
 
 function Invoke-ManifestStep {
@@ -9026,6 +9150,8 @@ elseif ($Headless) {
 else {
     Test-InteractiveConsole
 }
+
+if ($ValidateManifest) { exit (Invoke-ManifestValidation) }
 
 # Informed consent: show every write location before anything is written.
 $writePlan = Resolve-WritePlan

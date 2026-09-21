@@ -26,6 +26,12 @@
       "role": "TRAINING WHEELS, to be removed. Produced by MSBuild from the reference csproj facade against the same pinned packs, so it is version-matched to the shipped runtime and reproducible locally, but it is still not emitted by setup.ps1. The replacement path is known and requires no build tool: Microsoft.Android.Sdk ships tools/java_runtime_clr.dex, 8728 bytes, already dexed, holding mono.android.Runtime, MonoPackageManager, GCUserPeer and IGCUserPeer. That plus an emitted mono.MonoRuntimeProvider and the peers setup.ps1 already emits replaces this 423KB artifact entirely."
     },
     {
+      "path": "AndroidManifest.xamarin.xml",
+      "sha256": "36DA5B3FB494DACC99B6433E7C47ACC0BC8AE047AC8F26C0B5A3826D13A9BA57",
+      "url": null,
+      "role": "Test fixture. The Xamarin-mode binary AndroidManifest.xml proven on hardware; -ValidateManifest requires the emitter to reproduce it byte for byte. Re-pin only as a deliberate manifest change."
+    },
+    {
       "path": "android-native-producer.contract.json",
       "sha256": "BBFD0569F87D7666BE8BB82242A5A0EE40E11E71209B3EA564611E42011CFBDB",
       "url": null,
