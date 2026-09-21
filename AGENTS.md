@@ -74,12 +74,13 @@ only when that group's evidence exists. Name the source for every new fact.
   other change.
 - The payload is the names in `lib/arm64-v8a.lean-assembly-order.txt`, pinned
   by digest; its length (96) is the assembly count every step checks.
-- With `-Admission NativeActivity`, `libpwsh-host.so` (x86-64 only so far)
+- With `-Admission NativeActivity`, `libpwsh-host.so` (x86-64 and arm64)
   starts CoreCLR: `DT_NEEDED` libc, liblog, libcoreclr and the store library;
   three runtime properties as the pinned .NET for Android host sets them; an
   `external_assembly_probe` that walks a table read back from the store; then
   `coreclr_create_delegate` for `NativeHost.Admit`. Its code passes the
-  x86-64 decoder, a control-flow ABI checker and the emitter controls in Step 6.
+  per-ISA decoder, a control-flow ABI checker (SysV AMD64 or AAPCS64) and the
+  emitter controls in Step 6.
 - The payload has no cmdlet modules (`Microsoft.PowerShell.Commands.*`), so
   `Get-ChildItem` and `Get-Process` are absent, and no Roslyn
   (`Microsoft.CodeAnalysis.*`), so `Add-Type -TypeDefinition` and
@@ -98,7 +99,8 @@ only when that group's evidence exists. Name the source for every new fact.
   `libxamarin-app.so` through its LLD 18 SysV hash table: 37 buckets, 25 in
   use, six collision chains, the longest four entries. That exercises the
   reader's own hash function and chain walk against an independent writer.
-- The x86-64 encoder's forms (34 cases) disassemble as intended in MSVC
+- The x86-64 encoder's forms (34 cases) and the A64 encoder's forms (23 cases,
+  with branch and `adrp` targets resolved) disassemble as intended in MSVC
   `dumpbin`, used as a diagnostic only.
 - `-Debug` compares the emitted type-map name and `classes.dex` against a .NET
   SDK reference build.
@@ -118,6 +120,10 @@ only when that group's evidence exists. Name the source for every new fact.
   CoreCLR accepted pointers into the read-only mapped store for the assemblies
   this gate needs, and `Pwsh.dll` ran a method that touches no Xamarin type
   without resolving its `Mono.Android` reference.
+- Gate 2a, arm64 physical device (Samsung Galaxy S23): the same APK shape,
+  with an independently emitted A64 host, logged `GATE2A Admit returned
+  0x50575348`; the process stayed alive and the crash buffer held nothing for
+  it. The Xamarin arm64 build from the same script stayed byte-identical.
 - The arm32 host rejected a store whose version word carried the 64-bit flag;
   emitter and reader had agreed on it (arm32 device).
 
@@ -171,9 +177,8 @@ only when that group's evidence exists. Name the source for every new fact.
 
 Verify each on hardware before relying on it.
 
-- Not yet proven for Gate 2a: arm64 and arm32 hosts; SMA and a runspace under
-  the owned host (2c); serving the whole payload from the read-only mapped
-  store; the owned host on a physical device.
+- Not yet proven for Gate 2a: the arm32 host; SMA and a runspace under the
+  owned host (2c); serving the whole payload from the read-only mapped store.
 - To prove at gate 2c, then promote: QuickPS's function-table call performs
   JNI on Android, shown by `GetVersion`, `FindClass`, `GetMethodID` and one
   `Call*MethodA` with a `jvalue[]`, using slot numbers from a pinned Android 14

@@ -5185,11 +5185,69 @@ function New-A64BranchRegister {
     [uint32](0xD61F0000u -bor ($opc -shl 21) -bor ($Rn -shl 5))
 }
 
+function New-A64PairTransfer {
+    # STP / LDP of two X registers: pre-index, post-index or signed offset.
+    # opc 10 101 0 mode L imm7 Rt2 Rn Rt; the offset is imm7 * 8.
+    param([ValidateSet('stp-pre', 'ldp-post', 'stp', 'ldp')][string] $Op, [ValidateRange(0, 30)][int] $Rt,
+          [ValidateRange(0, 30)][int] $Rt2, [ValidateRange(0, 31)][int] $Rn = 31, [int] $Offset)
+    if ($Offset % 8 -or $Offset -lt -512 -or $Offset -gt 504) { throw "$Op offset $Offset is not a multiple of 8 in [-512, 504]." }
+    $base = switch ($Op) { 'stp-pre' { 0xA9800000u } 'ldp-post' { 0xA8C00000u } 'stp' { 0xA9000000u } 'ldp' { 0xA9400000u } }
+    [uint32]($base -bor (([long]($Offset / 8) -band 0x7F) -shl 15) -bor ($Rt2 -shl 10) -bor ($Rn -shl 5) -bor $Rt)
+}
+
+function New-A64AddImmediate {
+    # ADD Xd, Xn|SP, #imm12: 1 0 0 100010 0 imm12 Rn Rd. Register 31 is SP here.
+    param([ValidateRange(0, 31)][int] $Rd, [ValidateRange(0, 31)][int] $Rn, [ValidateRange(0, 4095)][int] $Imm)
+    [uint32](0x91000000u -bor ($Imm -shl 10) -bor ($Rn -shl 5) -bor $Rd)
+}
+
+function New-A64AddRegister {
+    # ADD Xd, Xn, Xm: 1 0 0 01011 00 0 Rm 000000 Rn Rd
+    param([ValidateRange(0, 30)][int] $Rd, [ValidateRange(0, 30)][int] $Rn, [ValidateRange(0, 30)][int] $Rm)
+    [uint32](0x8B000000u -bor ($Rm -shl 16) -bor ($Rn -shl 5) -bor $Rd)
+}
+
+function New-A64CompareImmediate {
+    # CMP Wn, #imm12 is SUBS WZR, Wn, #imm12: 0 1 1 100010 0 imm12 Rn 11111
+    param([ValidateRange(0, 30)][int] $Rn, [ValidateRange(0, 4095)][int] $Imm)
+    [uint32](0x7100001Fu -bor ($Imm -shl 10) -bor ($Rn -shl 5))
+}
+
+function New-A64LoadStore {
+    # LDR/STR (unsigned offset): 64-bit 11 111 0 01 opc imm12 Rn Rt, imm12 =
+    # offset / 8; LDR W: 10 111 0 01 01, imm12 = offset / 4.
+    param([ValidateSet('ldr64', 'ldr32', 'str64')][string] $Op, [ValidateRange(0, 30)][int] $Rt,
+          [ValidateRange(0, 31)][int] $Rn, [int] $Offset)
+    $scale = if ($Op -eq 'ldr32') { 4 } else { 8 }
+    if ($Offset % $scale -or $Offset -lt 0 -or $Offset / $scale -gt 4095) { throw "$Op offset $Offset is not a multiple of $scale in range." }
+    $base = switch ($Op) { 'ldr64' { 0xF9400000u } 'ldr32' { 0xB9400000u } 'str64' { 0xF9000000u } }
+    [uint32]($base -bor ([long]($Offset / $scale) -shl 10) -bor ($Rn -shl 5) -bor $Rt)
+}
+
+function New-A64Branch {
+    # B imm26; B.cond imm19 cond; CBZ/CBNZ sf 011010 op imm19 Rt. The distance
+    # is in instructions and must fit the field exactly.
+    param([ValidateSet('b', 'b.hs', 'cbz', 'cbnz')][string] $Op, [long] $Distance, [int] $Rt = 0, [bool] $Is64 = $false)
+    if ($Distance % 4) { throw "$Op distance $Distance is not a multiple of 4." }
+    $words = [long]($Distance / 4)
+    $bits = if ($Op -eq 'b') { 26 } else { 19 }
+    $limit = [long]1 -shl ($bits - 1)
+    if ($words -lt -$limit -or $words -ge $limit) { throw "$Op distance $Distance does not fit imm$bits." }
+    $field = [uint32]($words -band (([long]1 -shl $bits) - 1))
+    switch ($Op) {
+        'b'    { [uint32](0x14000000u -bor $field) }
+        'b.hs' { [uint32](0x54000000u -bor ($field -shl 5) -bor 2) }
+        'cbz'  { [uint32]((([uint32]$Is64) -shl 31) -bor 0x34000000u -bor ($field -shl 5) -bor $Rt) }
+        'cbnz' { [uint32]((([uint32]$Is64) -shl 31) -bor 0x35000000u -bor ($field -shl 5) -bor $Rt) }
+    }
+}
+
 function Read-A64Instruction {
     # Independent decode: classifies by the fixed opcode bits and extracts the
     # fields, without calling any encoder.
     param([Parameter(Mandatory)][uint32] $Word)
 
+    $signed = { param([uint32] $value, [int] $bits) $v = [long]$value; if ($v -band ([long]1 -shl ($bits - 1))) { $v - ([long]1 -shl $bits) } else { $v } }
     if (($Word -band 0x7F800000) -eq 0x52800000) {
         return [pscustomobject]@{ Op = 'movz'; Is64 = [bool]($Word -shr 31); Hw = ($Word -shr 21) -band 3; Imm = ($Word -shr 5) -band 0xFFFF; Rd = $Word -band 31 }
     }
@@ -5207,6 +5265,38 @@ function Read-A64Instruction {
     if (($Word -band 0xFFC00000u) -eq 0xF9400000u) {
         return [pscustomobject]@{ Op = 'ldr'; Offset = (($Word -shr 10) -band 0xFFF) * 8; Rn = ($Word -shr 5) -band 31; Rt = $Word -band 31 }
     }
+    if (($Word -band 0xFFC00000u) -eq 0xB9400000u) {
+        return [pscustomobject]@{ Op = 'ldr32'; Offset = (($Word -shr 10) -band 0xFFF) * 4; Rn = ($Word -shr 5) -band 31; Rt = $Word -band 31 }
+    }
+    if (($Word -band 0xFFC00000u) -eq 0xF9000000u) {
+        return [pscustomobject]@{ Op = 'str64'; Offset = (($Word -shr 10) -band 0xFFF) * 8; Rn = ($Word -shr 5) -band 31; Rt = $Word -band 31 }
+    }
+    foreach ($pair in @(@(0xA9800000u, 'stp-pre'), @(0xA8C00000u, 'ldp-post'), @(0xA9000000u, 'stp'), @(0xA9400000u, 'ldp'))) {
+        if (($Word -band 0xFFC00000u) -eq $pair[0]) {
+            return [pscustomobject]@{ Op = $pair[1]; Offset = 8 * (& $signed (($Word -shr 15) -band 0x7F) 7); Rt2 = ($Word -shr 10) -band 31; Rn = ($Word -shr 5) -band 31; Rt = $Word -band 31 }
+        }
+    }
+    if (($Word -band 0xFFC00000u) -eq 0x91000000u) {
+        return [pscustomobject]@{ Op = 'add-imm'; Imm = ($Word -shr 10) -band 0xFFF; Rn = ($Word -shr 5) -band 31; Rd = $Word -band 31 }
+    }
+    if (($Word -band 0xFFE0FC00u) -eq 0x8B000000u) {
+        return [pscustomobject]@{ Op = 'add-reg'; Rm = ($Word -shr 16) -band 31; Rn = ($Word -shr 5) -band 31; Rd = $Word -band 31 }
+    }
+    if (($Word -band 0xFFC0001Fu) -eq 0x7100001Fu) {
+        return [pscustomobject]@{ Op = 'cmp-imm32'; Imm = ($Word -shr 10) -band 0xFFF; Rn = ($Word -shr 5) -band 31 }
+    }
+    if (($Word -band 0xFC000000u) -eq 0x14000000u) {
+        return [pscustomobject]@{ Op = 'b'; Distance = 4 * (& $signed ($Word -band 0x3FFFFFF) 26) }
+    }
+    if (($Word -band 0xFF000010u) -eq 0x54000000u) {
+        return [pscustomobject]@{ Op = 'b.cond'; Cond = $Word -band 0xF; Distance = 4 * (& $signed (($Word -shr 5) -band 0x7FFFF) 19) }
+    }
+    if (($Word -band 0x7E000000u) -eq 0x34000000u) {
+        return [pscustomobject]@{ Op = $(if ($Word -band 0x01000000u) { 'cbnz' } else { 'cbz' }); Is64 = [bool]($Word -shr 31); Rt = $Word -band 31; Distance = 4 * (& $signed (($Word -shr 5) -band 0x7FFFF) 19) }
+    }
+    if (($Word -band 0xFFFFFC1Fu) -eq 0xD63F0000u) {
+        return [pscustomobject]@{ Op = 'blr'; Rn = ($Word -shr 5) -band 31 }
+    }
     if (($Word -band 0xFFFFFC1Fu) -eq 0xD61F0000u) {
         return [pscustomobject]@{ Op = 'br'; Rn = ($Word -shr 5) -band 31 }
     }
@@ -5219,30 +5309,45 @@ function Read-A64Instruction {
 function Get-A64StepLength {
     param([Parameter(Mandatory)] $Step)
     switch ($Step.Op) {
+        'label' { 0 }
         'tail' { 12 }
-        { $_ -in 'movz', 'movn', 'mov', 'ret', 'adr-data' } { 4 }
+        { $_ -in 'call-import', 'call-data' } { 12 }
+        { $_ -in 'lea-data', 'load64-data', 'load32-data', 'load-got' } { 8 }
+        { $_ -in 'movz', 'movn', 'mov', 'ret', 'adr-data', 'stp-pre', 'ldp-post', 'stp', 'ldp', 'add-imm', 'add-reg', 'cmp-imm32', 'ldr64', 'ldr32', 'str64', 'b', 'b.hs', 'cbz', 'cbnz' } { 4 }
         default { throw "Unknown A64 step '$($Step.Op)'." }
     }
 }
 
 function New-A64Step {
-    # Bytes for one step at Pc. Target is the GOT slot for 'tail' and the data
-    # address for 'adr-data'. 'tail' is ADRP x16, LDR x16, BR x16.
+    # Bytes for one step at Pc. Target is the GOT slot for 'tail', 'load-got'
+    # and 'call-import', the data address for data steps, and the label
+    # address for branches. Page-relative forms are ADRP x, then an ADD, LDR
+    # or LDR+BLR on the page offset.
     param([Parameter(Mandatory)] $Step, [long] $Pc, [long] $Target)
+    $pages = ([long]($Target -band -4096) - [long]($Pc -band -4096)) -shr 12
+    $low = [int]($Target -band 0xFFF)
     $words = switch ($Step.Op) {
+        'label' { , [uint32[]]@() }
         { $_ -in 'movz', 'movn' } { , [uint32[]]@(New-A64MovWide -Op $Step.Op -Rd $Step.Rd -Imm16 $Step.Imm -Is64 ([bool]$Step.Is64)) }
         'mov' { , [uint32[]]@(New-A64MovRegister -Rd $Step.Rd -Rm $Step.Rm -Is64 ([bool]$Step.Is64)) }
         'ret' { , [uint32[]]@(New-A64BranchRegister -Op ret) }
         'adr-data' { , [uint32[]]@(New-A64Adr -Op adr -Rd $Step.Rd -Imm21 ($Target - $Pc)) }
-        'tail' {
-            $pages = ([long]($Target -band -4096) - [long]($Pc -band -4096)) -shr 12
-            , [uint32[]]@(
-                (New-A64Adr -Op adrp -Rd 16 -Imm21 $pages),
-                (New-A64LdrUnsigned -Rt 16 -Rn 16 -Offset ($Target -band 0xFFF)),
-                (New-A64BranchRegister -Op br -Rn 16))
-        }
+        'tail' { , [uint32[]]@((New-A64Adr -Op adrp -Rd 16 -Imm21 $pages), (New-A64LdrUnsigned -Rt 16 -Rn 16 -Offset $low), (New-A64BranchRegister -Op br -Rn 16)) }
+        { $_ -in 'stp-pre', 'ldp-post', 'stp', 'ldp' } { , [uint32[]]@(New-A64PairTransfer -Op $Step.Op -Rt $Step.Rt -Rt2 $Step.Rt2 -Offset $Step.Offset) }
+        'add-imm' { , [uint32[]]@(New-A64AddImmediate -Rd $Step.Rd -Rn $Step.Rn -Imm $Step.Imm) }
+        'add-reg' { , [uint32[]]@(New-A64AddRegister -Rd $Step.Rd -Rn $Step.Rn -Rm $Step.Rm) }
+        'cmp-imm32' { , [uint32[]]@(New-A64CompareImmediate -Rn $Step.Rn -Imm $Step.Imm) }
+        { $_ -in 'ldr64', 'ldr32', 'str64' } { , [uint32[]]@(New-A64LoadStore -Op $Step.Op -Rt $Step.Rt -Rn $Step.Rn -Offset $Step.Offset) }
+        'lea-data' { , [uint32[]]@((New-A64Adr -Op adrp -Rd $Step.Rd -Imm21 $pages), (New-A64AddImmediate -Rd $Step.Rd -Rn $Step.Rd -Imm $low)) }
+        'load64-data' { , [uint32[]]@((New-A64Adr -Op adrp -Rd $Step.Rd -Imm21 $pages), (New-A64LoadStore -Op ldr64 -Rt $Step.Rd -Rn $Step.Rd -Offset $low)) }
+        'load32-data' { , [uint32[]]@((New-A64Adr -Op adrp -Rd $Step.Rd -Imm21 $pages), (New-A64LoadStore -Op ldr32 -Rt $Step.Rd -Rn $Step.Rd -Offset $low)) }
+        'load-got' { , [uint32[]]@((New-A64Adr -Op adrp -Rd $Step.Rd -Imm21 $pages), (New-A64LoadStore -Op ldr64 -Rt $Step.Rd -Rn $Step.Rd -Offset $low)) }
+        { $_ -in 'call-import', 'call-data' } { , [uint32[]]@((New-A64Adr -Op adrp -Rd 16 -Imm21 $pages), (New-A64LoadStore -Op ldr64 -Rt 16 -Rn 16 -Offset $low), [uint32](0xD63F0000u -bor (16 -shl 5))) }
+        { $_ -in 'b', 'b.hs' } { , [uint32[]]@(New-A64Branch -Op $Step.Op -Distance ($Target - $Pc)) }
+        { $_ -in 'cbz', 'cbnz' } { , [uint32[]]@(New-A64Branch -Op $Step.Op -Distance ($Target - $Pc) -Rt $Step.Rt -Is64 ([bool]$Step.Is64)) }
         default { throw "Unknown A64 step '$($Step.Op)'." }
     }
+    if ($words.Count -eq 0) { return }
     [byte[]]@($words | ForEach-Object { [BitConverter]::GetBytes([uint32]$_) } | ForEach-Object { $_ })
 }
 
@@ -5251,22 +5356,179 @@ function Test-A64Step {
     # intended step. Returns the step's length.
     param([Parameter(Mandatory)][byte[]] $Image, [Parameter(Mandatory)][long] $Pc, [Parameter(Mandatory)] $Step,
           $DataAt, $SlotImport, [hashtable] $Labels, [string] $Name)
-    $word = Read-A64Instruction -Word ([BitConverter]::ToUInt32($Image, [int]$Pc))
+    if ($Step.Op -eq 'label') {
+        if ($Labels -and $Labels[$Step.Name] -ne $Pc) { throw "$Name label '$($Step.Name)' is at $($Labels[$Step.Name]), expected $Pc." }
+        return 0
+    }
+    $at = { param([int] $k) Read-A64Instruction -Word ([BitConverter]::ToUInt32($Image, [int]$Pc + 4 * $k)) }
+    $word = & $at 0
+    # ADRP at Pc plus the page offset in the next word: the address both select.
+    $paged = {
+        param($second, [int] $scale)
+        if ($word.Op -ne 'adrp') { return $null }
+        (($Pc -band -4096) + ($word.Imm -shl 12)) + $(if ($second.Op -eq 'add-imm') { $second.Imm } else { $second.Offset })
+    }
     $ok = switch ($Step.Op) {
         { $_ -in 'movz', 'movn' } { $word.Op -eq $Step.Op -and $word.Rd -eq $Step.Rd -and $word.Imm -eq $Step.Imm -and $word.Hw -eq 0 -and $word.Is64 -eq [bool]$Step.Is64 }
         'mov' { $word.Op -eq 'mov' -and $word.Rd -eq $Step.Rd -and $word.Rm -eq $Step.Rm -and $word.Is64 -eq [bool]$Step.Is64 }
         'ret' { $word.Op -eq 'ret' -and $word.Rn -eq 30 }
         'adr-data' { $word.Op -eq 'adr' -and $word.Rd -eq $Step.Rd -and ($Pc + $word.Imm) -eq $DataAt[$Step.Data] }
         'tail' {
-            $w2 = Read-A64Instruction -Word ([BitConverter]::ToUInt32($Image, [int]$Pc + 4))
-            $w3 = Read-A64Instruction -Word ([BitConverter]::ToUInt32($Image, [int]$Pc + 8))
+            $w2 = & $at 1; $w3 = & $at 2
             $slot = (($Pc -band -4096) + ($word.Imm -shl 12)) + $w2.Offset
             $word.Op -eq 'adrp' -and $word.Rd -eq 16 -and $w2.Op -eq 'ldr' -and $w2.Rn -eq 16 -and $w2.Rt -eq 16 -and
             $w3.Op -eq 'br' -and $w3.Rn -eq 16 -and $SlotImport[[long]$slot] -ceq $Step.Import
         }
+        { $_ -in 'stp-pre', 'ldp-post', 'stp', 'ldp' } { $word.Op -eq $Step.Op -and $word.Rt -eq $Step.Rt -and $word.Rt2 -eq $Step.Rt2 -and $word.Rn -eq 31 -and $word.Offset -eq $Step.Offset }
+        'add-imm' { $word.Op -eq 'add-imm' -and $word.Rd -eq $Step.Rd -and $word.Rn -eq $Step.Rn -and $word.Imm -eq $Step.Imm }
+        'add-reg' { $word.Op -eq 'add-reg' -and $word.Rd -eq $Step.Rd -and $word.Rn -eq $Step.Rn -and $word.Rm -eq $Step.Rm }
+        'cmp-imm32' { $word.Op -eq 'cmp-imm32' -and $word.Rn -eq $Step.Rn -and $word.Imm -eq $Step.Imm }
+        'ldr64' { $word.Op -eq 'ldr' -and $word.Rt -eq $Step.Rt -and $word.Rn -eq $Step.Rn -and $word.Offset -eq $Step.Offset }
+        'ldr32' { $word.Op -eq 'ldr32' -and $word.Rt -eq $Step.Rt -and $word.Rn -eq $Step.Rn -and $word.Offset -eq $Step.Offset }
+        'str64' { $word.Op -eq 'str64' -and $word.Rt -eq $Step.Rt -and $word.Rn -eq $Step.Rn -and $word.Offset -eq $Step.Offset }
+        'lea-data' { $w2 = & $at 1; $w2.Op -eq 'add-imm' -and $word.Rd -eq $Step.Rd -and $w2.Rd -eq $Step.Rd -and $w2.Rn -eq $Step.Rd -and (& $paged $w2) -eq $DataAt[$Step.Data] }
+        'load64-data' { $w2 = & $at 1; $w2.Op -eq 'ldr' -and $word.Rd -eq $Step.Rd -and $w2.Rt -eq $Step.Rd -and $w2.Rn -eq $Step.Rd -and (& $paged $w2) -eq $DataAt[$Step.Data] }
+        'load32-data' { $w2 = & $at 1; $w2.Op -eq 'ldr32' -and $word.Rd -eq $Step.Rd -and $w2.Rt -eq $Step.Rd -and $w2.Rn -eq $Step.Rd -and (& $paged $w2) -eq $DataAt[$Step.Data] }
+        'load-got' { $w2 = & $at 1; $w2.Op -eq 'ldr' -and $word.Rd -eq $Step.Rd -and $w2.Rt -eq $Step.Rd -and $w2.Rn -eq $Step.Rd -and $SlotImport[[long](& $paged $w2)] -ceq $Step.Import }
+        'call-import' { $w2 = & $at 1; $w3 = & $at 2; $word.Rd -eq 16 -and $w2.Op -eq 'ldr' -and $w2.Rt -eq 16 -and $w2.Rn -eq 16 -and $w3.Op -eq 'blr' -and $w3.Rn -eq 16 -and $SlotImport[[long](& $paged $w2)] -ceq $Step.Import }
+        'call-data' { $w2 = & $at 1; $w3 = & $at 2; $word.Rd -eq 16 -and $w2.Op -eq 'ldr' -and $w2.Rt -eq 16 -and $w2.Rn -eq 16 -and $w3.Op -eq 'blr' -and $w3.Rn -eq 16 -and (& $paged $w2) -eq $DataAt[$Step.Data] }
+        'b' { $word.Op -eq 'b' -and ($Pc + $word.Distance) -eq $Labels[$Step.Label] }
+        'b.hs' { $word.Op -eq 'b.cond' -and $word.Cond -eq 2 -and ($Pc + $word.Distance) -eq $Labels[$Step.Label] }
+        { $_ -in 'cbz', 'cbnz' } { $word.Op -eq $Step.Op -and $word.Rt -eq $Step.Rt -and $word.Is64 -eq [bool]$Step.Is64 -and ($Pc + $word.Distance) -eq $Labels[$Step.Label] }
     }
     if (-not $ok) { throw "$Name at ${Pc}: expected $($Step.Op), decoded $($word.Op)." }
     Get-A64StepLength -Step $Step
+}
+
+function Test-A64CallAbi {
+    <#
+        Checks an A64 step program against AAPCS64 over its control-flow graph,
+        as Test-X64CallAbi does for System V: arguments x0-x7 set on every path
+        to a call; a call keeps only x19-x29 and defines x0; sp stays 16-byte
+        aligned and returns to its entry value at ret and tail; equal stack
+        depth at joins; x18 (the platform register) is never written; a
+        function that calls, or writes x19-x29, saves the pairs in its
+        prologue (stp x29, x30, [sp, #-n]! then stp pairs) and restores them in
+        reverse order immediately before every exit; every block reachable.
+    #>
+    param([Parameter(Mandatory)][object[]] $Steps, [int] $Parameters = 0, [string] $Name = 'function')
+
+    $calleeSaved = 19..29
+    $branches = @('b', 'b.hs', 'cbz', 'cbnz')
+    $calls = @('call-import', 'call-data')
+    $labelIndex = @{}
+    for ($i = 0; $i -lt $Steps.Count; $i++) {
+        if ($Steps[$i]['Op'] -eq 'label') {
+            if ($labelIndex.ContainsKey($Steps[$i]['Name'])) { throw "$Name defines label '$($Steps[$i]['Name'])' twice." }
+            $labelIndex[$Steps[$i]['Name']] = $i
+        }
+    }
+    foreach ($step in $Steps) {
+        if ($step['Op'] -in $branches -and -not $labelIndex.ContainsKey($step['Label'])) { throw "$Name branches to undefined label '$($step['Label'])'." }
+        foreach ($field in 'Rd', 'Rt', 'Rt2') { if ($step[$field] -eq 18) { throw "$Name writes x18, the platform register." } }
+    }
+
+    # Prologue pairs: stp x29, x30, [sp, #-n]!, optionally add x29, sp, #0, then stp pairs.
+    $pairs = [System.Collections.Generic.List[object]]::new()
+    $k = 0
+    if ($Steps.Count -and $Steps[0]['Op'] -eq 'stp-pre') {
+        $pairs.Add(@($Steps[0]['Rt'], $Steps[0]['Rt2'])); $k = 1
+        if ($Steps[$k]['Op'] -eq 'add-imm' -and $Steps[$k]['Rd'] -eq 29 -and $Steps[$k]['Rn'] -eq 31 -and $Steps[$k]['Imm'] -eq 0) { $k++ }
+        while ($k -lt $Steps.Count -and $Steps[$k]['Op'] -eq 'stp') { $pairs.Add(@($Steps[$k]['Rt'], $Steps[$k]['Rt2'])); $k++ }
+    }
+    $saved = @($pairs | ForEach-Object { $_ }) | Where-Object { $_ -ne $null }
+    $makesCalls = @($Steps | Where-Object { $_['Op'] -in $calls }).Count -gt 0
+    if ($makesCalls -and 30 -notin $saved) { throw "$Name calls without saving x30 in its prologue." }
+    for ($i = 0; $i -lt $Steps.Count; $i++) {
+        $step = $Steps[$i]
+        if ($i -ge $k -and $step['Op'] -notin 'stp', 'ldp', 'ldp-post', 'stp-pre') {
+            foreach ($field in 'Rd', 'Rt') {
+                $reg = $step[$field]
+                if ($null -ne $reg -and $step['Op'] -notin 'str64', 'cbz', 'cbnz' -and $reg -in $calleeSaved -and $reg -notin $saved) { throw "$Name writes callee-saved x$reg without saving it in its prologue." }
+            }
+        }
+        if ($step['Op'] -in 'ret', 'tail' -and $pairs.Count) {
+
+            $restores = [System.Collections.Generic.List[object]]::new()
+            $j = $i - 1
+            while ($j -ge 0 -and $Steps[$j]['Op'] -in 'ldp', 'ldp-post', 'label') { if ($Steps[$j]['Op'] -ne 'label') { $restores.Insert(0, $Steps[$j]) }; $j-- }
+            $expectedOrder = for ($p = $pairs.Count - 1; $p -ge 0; $p--) { , $pairs[$p] }
+            if ($restores.Count -ne $pairs.Count) { throw "$Name exits without restoring its $($pairs.Count) saved pairs." }
+            for ($r = 0; $r -lt $restores.Count; $r++) {
+                $pair = $expectedOrder[$r]
+                $op = if ($r -eq $restores.Count - 1) { 'ldp-post' } else { 'ldp' }
+                if ($restores[$r]['Op'] -ne $op -or $restores[$r]['Rt'] -ne $pair[0] -or $restores[$r]['Rt2'] -ne $pair[1]) { throw "$Name exits without restoring x$($pair[0]) and x$($pair[1]) in reverse order." }
+            }
+        }
+    }
+
+    $leaders = [System.Collections.Generic.SortedSet[int]]::new()
+    [void]$leaders.Add(0)
+    for ($i = 0; $i -lt $Steps.Count; $i++) {
+        if ($Steps[$i]['Op'] -eq 'label') { [void]$leaders.Add($i) }
+        if ($Steps[$i]['Op'] -in ($branches + @('ret', 'tail')) -and $i + 1 -lt $Steps.Count) { [void]$leaders.Add($i + 1) }
+    }
+    $starts = @($leaders)
+    $blockOf = @{}
+    for ($b = 0; $b -lt $starts.Count; $b++) {
+        $end = if ($b + 1 -lt $starts.Count) { $starts[$b + 1] } else { $Steps.Count }
+        for ($i = $starts[$b]; $i -lt $end; $i++) { $blockOf[$i] = $b }
+    }
+    $copy = { param($s) [pscustomobject]@{ Depth = $s.Depth; Written = [System.Collections.Generic.HashSet[int]]::new($s.Written) } }
+    $entry = [pscustomobject]@{ Depth = 0; Written = [System.Collections.Generic.HashSet[int]]::new() }
+    for ($a = 0; $a -lt $Parameters; $a++) { [void]$entry.Written.Add($a) }
+    $inState = @{ 0 = $entry }
+    $queue = [System.Collections.Generic.Queue[int]]::new(); $queue.Enqueue(0)
+    $flow = {
+        param([int] $target, $state)
+        if (-not $inState.ContainsKey($target)) { $inState[$target] = & $copy $state; $queue.Enqueue($target); return }
+        $current = $inState[$target]
+        if ($current.Depth -ne $state.Depth) { throw "$Name reaches block $target with stack depths $($current.Depth) and $($state.Depth)." }
+        $before = $current.Written.Count
+        $current.Written.IntersectWith($state.Written)
+        if ($current.Written.Count -ne $before) { $queue.Enqueue($target) }
+    }
+    $guard = 0
+    while ($queue.Count -gt 0) {
+        if (++$guard -gt 10000) { throw "${Name}: control-flow analysis did not converge." }
+        $b = $queue.Dequeue()
+        $state = & $copy $inState[$b]
+        $end = if ($b + 1 -lt $starts.Count) { $starts[$b + 1] } else { $Steps.Count }
+        $fallsThrough = $true
+        for ($i = $starts[$b]; $i -lt $end; $i++) {
+            $step = $Steps[$i]
+            switch ($step['Op']) {
+                'label'    { }
+                'stp-pre'  { $state.Depth -= $step['Offset'] }
+                'ldp-post' { $state.Depth -= $step['Offset']; [void]$state.Written.Add($step['Rt']); [void]$state.Written.Add($step['Rt2']) }
+                'ldp'      { [void]$state.Written.Add($step['Rt']); [void]$state.Written.Add($step['Rt2']) }
+                { $_ -in $calls } {
+                    $callee = "$($step['Import'])$($step['Data'])"
+                    if ($state.Depth % 16 -ne 0) { throw "$Name calls $callee with sp $($state.Depth) bytes below entry, not 16-byte aligned." }
+                    for ($a = 0; $a -lt [int]$step['Args']; $a++) {
+                        if (-not $state.Written.Contains($a)) { throw "$Name calls $callee without setting x$a on every path." }
+                    }
+                    $state.Written.IntersectWith([int[]]$calleeSaved)
+                    [void]$state.Written.Add(0)
+                }
+                { $_ -in 'ret', 'tail' } {
+                    if ($state.Depth -ne 0) { throw "$Name leaves with sp $($state.Depth) bytes below entry." }
+                    $fallsThrough = $false
+                }
+                { $_ -in 'b.hs', 'cbz', 'cbnz' } { & $flow $blockOf[$labelIndex[$step['Label']]] $state }
+                'b' { & $flow $blockOf[$labelIndex[$step['Label']]] $state; $fallsThrough = $false }
+                default { foreach ($field in 'Rd', 'Rt') { if ($null -ne $step[$field] -and $step['Op'] -notin 'str64', 'cbz', 'cbnz', 'stp') { [void]$state.Written.Add($step[$field]) } } }
+            }
+        }
+        if ($fallsThrough -and $b + 1 -lt $starts.Count) { & $flow ($b + 1) $state }
+        if ($fallsThrough -and $b + 1 -ge $starts.Count) { throw "$Name runs off its end without ret or tail." }
+    }
+    for ($b = 0; $b -lt $starts.Count; $b++) {
+        if (-not $inState.ContainsKey($b)) {
+            $end = if ($b + 1 -lt $starts.Count) { $starts[$b + 1] } else { $Steps.Count }
+            if (@($Steps[$starts[$b]..($end - 1)] | Where-Object { $_['Op'] -ne 'label' }).Count) { throw "$Name has unreachable code at step $($starts[$b])." }
+        }
+    }
 }
 
 function New-PslNativeLibrary {
@@ -5935,7 +6197,7 @@ function New-NativeHostLibrary {
         [Parameter(Mandatory)][string] $StoreSymbol,
         [int] $PageSize = 16384
     )
-    if ($Architecture -ne 'x64') { throw "Gate 2a is implemented for x64 only; $Architecture follows once x64 passes on hardware." }
+    if ($Architecture -notin 'x64', 'arm64') { throw "Gate 2a is implemented for x64 and arm64; $Architecture follows after gates 2b and 2c." }
 
     $info = Get-AndroidLogPriority -Name 'ANDROID_LOG_INFO'
     $errorPriority = Get-AndroidLogPriority -Name 'ANDROID_LOG_ERROR'
@@ -5987,6 +6249,111 @@ function New-NativeHostLibrary {
         probeTable    = @{ Bytes = $table; Pointers = @($tablePointers) }
     }
 
+    if ($Architecture -eq 'arm64') {
+    # AAPCS64: arguments x0-x7 (all seven coreclr_initialize arguments fit),
+    # result w0/x0, x19-x28 callee-saved, x29 frame, x30 link, x16 scratch for
+    # calls through the GOT, x18 reserved. Variadic calls need no extra setup.
+    $logFailure = { param([string] $label, [string] $format) @(
+        @{ Op = 'label'; Name = $label },
+        @{ Op = 'mov'; Rd = 3; Rm = 0; Is64 = $false },
+        @{ Op = 'movz'; Rd = 0; Imm = $errorPriority; Is64 = $false },
+        @{ Op = 'lea-data'; Rd = 1; Data = 'tag' },
+        @{ Op = 'lea-data'; Rd = 2; Data = $format },
+        @{ Op = 'call-import'; Import = '__android_log_print'; Args = 4; Variadic = $true },
+        @{ Op = 'b'; Label = 'done' }) }
+    $onCreate = @(
+        @{ Op = 'stp-pre'; Rt = 29; Rt2 = 30; Offset = -32 },
+        @{ Op = 'add-imm'; Rd = 29; Rn = 31; Imm = 0 },
+        @{ Op = 'stp'; Rt = 19; Rt2 = 20; Offset = 16 },
+        @{ Op = 'mov'; Rd = 19; Rm = 0; Is64 = $true },                  # x19 = activity
+        # snprintf(baseDirectory, 512, "%s/", activity->internalDataPath)
+        @{ Op = 'lea-data'; Rd = 0; Data = 'baseDirectory' },
+        @{ Op = 'movz'; Rd = 1; Imm = 512; Is64 = $true },
+        @{ Op = 'lea-data'; Rd = 2; Data = 'fmtDirectory' },
+        @{ Op = 'ldr64'; Rt = 3; Rn = 19; Offset = 32 },                  # ANativeActivity: callbacks, vm, env, clazz, internalDataPath
+        @{ Op = 'call-import'; Import = 'snprintf'; Args = 4; Variadic = $true },
+        @{ Op = 'cmp-imm32'; Rn = 0; Imm = 512 },
+        @{ Op = 'b.hs'; Label = 'directoryFailed' },
+        # snprintf(contractText, 32, "%p", &contract)
+        @{ Op = 'lea-data'; Rd = 0; Data = 'contractText' },
+        @{ Op = 'movz'; Rd = 1; Imm = 32; Is64 = $true },
+        @{ Op = 'lea-data'; Rd = 2; Data = 'fmtPointer' },
+        @{ Op = 'lea-data'; Rd = 3; Data = 'contract' },
+        @{ Op = 'call-import'; Import = 'snprintf'; Args = 4; Variadic = $true },
+        @{ Op = 'cmp-imm32'; Rn = 0; Imm = 32 },
+        @{ Op = 'b.hs'; Label = 'contractFailed' },
+        # coreclr_initialize(package, "Pwsh", 3, keys, values, &hostHandle, &domainId)
+        @{ Op = 'lea-data'; Rd = 0; Data = 'packageName' },
+        @{ Op = 'lea-data'; Rd = 1; Data = 'domainName' },
+        @{ Op = 'movz'; Rd = 2; Imm = 3; Is64 = $false },
+        @{ Op = 'lea-data'; Rd = 3; Data = 'propertyKeys' },
+        @{ Op = 'lea-data'; Rd = 4; Data = 'propertyValues' },
+        @{ Op = 'lea-data'; Rd = 5; Data = 'hostHandle' },
+        @{ Op = 'lea-data'; Rd = 6; Data = 'domainId' },
+        @{ Op = 'call-import'; Import = 'coreclr_initialize'; Args = 7 },
+        @{ Op = 'cbnz'; Rt = 0; Is64 = $false; Label = 'initFailed' },
+        # coreclr_create_delegate(hostHandle, domainId, "Pwsh", type, "Admit", &admit)
+        @{ Op = 'load64-data'; Rd = 0; Data = 'hostHandle' },
+        @{ Op = 'load32-data'; Rd = 1; Data = 'domainId' },
+        @{ Op = 'lea-data'; Rd = 2; Data = 'assemblyName' },
+        @{ Op = 'lea-data'; Rd = 3; Data = 'typeName' },
+        @{ Op = 'lea-data'; Rd = 4; Data = 'methodName' },
+        @{ Op = 'lea-data'; Rd = 5; Data = 'admit' },
+        @{ Op = 'call-import'; Import = 'coreclr_create_delegate'; Args = 6 },
+        @{ Op = 'cbnz'; Rt = 0; Is64 = $false; Label = 'delegateFailed' },
+        # Admit(); __android_log_print(INFO, "Pwsh", "GATE2A Admit returned 0x%08x", result)
+        @{ Op = 'call-data'; Data = 'admit'; Args = 0 },
+        @{ Op = 'mov'; Rd = 3; Rm = 0; Is64 = $false },
+        @{ Op = 'movz'; Rd = 0; Imm = $info; Is64 = $false },
+        @{ Op = 'lea-data'; Rd = 1; Data = 'tag' },
+        @{ Op = 'lea-data'; Rd = 2; Data = 'fmtAdmit' },
+        @{ Op = 'call-import'; Import = '__android_log_print'; Args = 4; Variadic = $true },
+        @{ Op = 'b'; Label = 'done' }
+    ) + (& $logFailure 'directoryFailed' 'fmtDirectory2') + (& $logFailure 'contractFailed' 'fmtContract') + (& $logFailure 'initFailed' 'fmtInit') + (& $logFailure 'delegateFailed' 'fmtDelegate') + @(
+        @{ Op = 'label'; Name = 'done' },
+        @{ Op = 'ldp'; Rt = 19; Rt2 = 20; Offset = 16 },
+        @{ Op = 'ldp-post'; Rt = 29; Rt2 = 30; Offset = 32 },
+        @{ Op = 'ret' })
+
+    # bool pwsh_assembly_probe(const char* path, void** data_start, int64_t* size)
+    $probe = @(
+        @{ Op = 'stp-pre'; Rt = 29; Rt2 = 30; Offset = -48 },
+        @{ Op = 'add-imm'; Rd = 29; Rn = 31; Imm = 0 },
+        @{ Op = 'stp'; Rt = 19; Rt2 = 20; Offset = 16 },
+        @{ Op = 'stp'; Rt = 21; Rt2 = 22; Offset = 32 },
+        @{ Op = 'mov'; Rd = 19; Rm = 0; Is64 = $true },
+        @{ Op = 'mov'; Rd = 20; Rm = 1; Is64 = $true },
+        @{ Op = 'mov'; Rd = 21; Rm = 2; Is64 = $true },
+        @{ Op = 'lea-data'; Rd = 22; Data = 'probeTable' },
+        @{ Op = 'label'; Name = 'next' },
+        @{ Op = 'ldr64'; Rt = 1; Rn = 22; Offset = 0 },
+        @{ Op = 'cbz'; Rt = 1; Is64 = $true; Label = 'missing' },
+        @{ Op = 'mov'; Rd = 0; Rm = 19; Is64 = $true },
+        @{ Op = 'call-import'; Import = 'strcmp'; Args = 2 },
+        @{ Op = 'cbz'; Rt = 0; Is64 = $false; Label = 'found' },
+        @{ Op = 'add-imm'; Rd = 22; Rn = 22; Imm = 24 },
+        @{ Op = 'b'; Label = 'next' },
+        @{ Op = 'label'; Name = 'found' },
+        @{ Op = 'load-got'; Rd = 0; Import = $StoreSymbol },
+        @{ Op = 'ldr64'; Rt = 1; Rn = 22; Offset = 8 },
+        @{ Op = 'add-reg'; Rd = 0; Rn = 0; Rm = 1 },
+        @{ Op = 'str64'; Rt = 0; Rn = 20; Offset = 0 },
+        @{ Op = 'ldr64'; Rt = 1; Rn = 22; Offset = 16 },
+        @{ Op = 'str64'; Rt = 1; Rn = 21; Offset = 0 },
+        @{ Op = 'movz'; Rd = 0; Imm = 1; Is64 = $false },
+        @{ Op = 'b'; Label = 'out' },
+        @{ Op = 'label'; Name = 'missing' },
+        @{ Op = 'movz'; Rd = 0; Imm = 0; Is64 = $false },
+        @{ Op = 'label'; Name = 'out' },
+        @{ Op = 'ldp'; Rt = 21; Rt2 = 22; Offset = 32 },
+        @{ Op = 'ldp'; Rt = 19; Rt2 = 20; Offset = 16 },
+        @{ Op = 'ldp-post'; Rt = 29; Rt2 = 30; Offset = 48 },
+        @{ Op = 'ret' })
+
+    Test-A64CallAbi -Steps $onCreate -Parameters 3 -Name 'ANativeActivity_onCreate'
+    Test-A64CallAbi -Steps $probe -Parameters 3 -Name 'pwsh_assembly_probe'
+    }
+    else {
     # System V AMD64: rax 0, rcx 1, rdx 2, rbx 3, rsp 4, rbp 5, rsi 6, rdi 7, r8 8, r9 9, r12-r14 12-14.
     $logFailure = { param([string] $label, [string] $format) @(
         @{ Op = 'label'; Name = $label },
@@ -6100,6 +6467,7 @@ function New-NativeHostLibrary {
 
     Test-X64CallAbi -Steps $onCreate -Parameters 3 -Name 'ANativeActivity_onCreate'
     Test-X64CallAbi -Steps $probe -Parameters 3 -Name 'pwsh_assembly_probe'
+    }
 
     $functions = [ordered]@{ 'ANativeActivity_onCreate' = $onCreate; 'pwsh_assembly_probe' = $probe }
     $library = New-ElfCodeLibrary -Soname 'libpwsh-host.so' -Needed @('libc.so', 'liblog.so', 'libcoreclr.so', $StoreLibrary) `
@@ -6181,6 +6549,24 @@ function Test-NativeEmitterControls {
     if (@($library.Exports.PSBase.Keys).Count -ne 2) { throw 'Emitter control: functions named Keys and Count were not both exported.' }
     $controls = 2
 
+    if ($script:Target.Isa -eq 'A64') {
+        $frame = @{ Op = 'stp-pre'; Rt = 29; Rt2 = 30; Offset = -16 }
+        $unframe = @{ Op = 'ldp-post'; Rt = 29; Rt2 = 30; Offset = 16 }
+        $cases = [ordered]@{
+            'call without saving x30'      = @(@{ Op = 'lea-data'; Rd = 0; Data = 'a' }, @{ Op = 'call-import'; Import = 'f'; Args = 1 }, @{ Op = 'ret' })
+            'argument set on one branch'   = @($frame, @{ Op = 'cbz'; Rt = 1; Is64 = $true; Label = 'join' }, @{ Op = 'lea-data'; Rd = 0; Data = 'a' }, @{ Op = 'label'; Name = 'join' }, @{ Op = 'call-import'; Import = 'f'; Args = 1 }, $unframe, @{ Op = 'ret' })
+            'unsaved callee-saved write'   = @(@{ Op = 'mov'; Rd = 19; Rm = 0; Is64 = $true }, @{ Op = 'ret' })
+            'restores out of order'        = @($frame, @{ Op = 'stp'; Rt = 19; Rt2 = 20; Offset = 16 }, @{ Op = 'ldp-post'; Rt = 29; Rt2 = 30; Offset = 16 }, @{ Op = 'ret' })
+            'writes x18'                   = @(@{ Op = 'movz'; Rd = 18; Imm = 1; Is64 = $true }, @{ Op = 'ret' })
+            'unreachable code'             = @(@{ Op = 'ret' }, @{ Op = 'movz'; Rd = 0; Imm = 0; Is64 = $false }, @{ Op = 'ret' })
+        }
+        foreach ($case in $cases.PSBase.Keys) {
+            $rejected = $false
+            try { Test-A64CallAbi -Steps $cases[$case] -Name 'control' } catch { $rejected = $true }
+            if (-not $rejected) { throw "A64 ABI control '$case' was accepted." }
+            $controls++
+        }
+    }
     if ($script:Target.Isa -eq 'X64') {
         $call = @{ Op = 'call-import'; Import = 'f'; Args = 1 }
         $cases = [ordered]@{

@@ -114,17 +114,18 @@ x86_64 emulator, arm32 device). The APK has four entries and no application DEX,
 no `MonoRuntimeProvider`, and no Xamarin libraries.
 ## Gate 2a result
 
-Passed on the x86_64 emulator with `-Admission NativeActivity`: the emitted
+Passed on the x86_64 emulator and on an arm64 physical device (Samsung Galaxy
+S23) with `-Admission NativeActivity`: the emitted
 `libpwsh-host.so` started CoreCLR through its own `host_runtime_contract`,
 served `System.Private.CoreLib.dll` and `Pwsh.dll` from the mapped store through
 `external_assembly_probe`, and logged `GATE2A Admit returned 0x50575348`. The
-APK carries no DEX, `libmonodroid` or `libxamarin-app`. arm64, arm32, SMA and
-the full payload are the next gates.
+APK carries no DEX, `libmonodroid` or `libxamarin-app`. arm32, SMA and the full
+payload are the next gates.
 
 ## Open questions
 
 1. **Who owns assembly resolution at CoreCLR startup, and which runtime
-   properties and callbacks are required?** Answered for gate 2a on x86_64: the
+   properties and callbacks are required?** Answered for gate 2a on x86_64 and arm64: the
    owned contract with `external_assembly_probe` over the existing store and the
    three properties the pinned host sets (`HOST_RUNTIME_CONTRACT`,
    `RUNTIME_IDENTIFIER`, `APP_CONTEXT_BASE_DIRECTORY`) suffice; the rest of this
