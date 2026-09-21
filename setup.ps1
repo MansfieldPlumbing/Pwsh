@@ -2021,39 +2021,37 @@ function Add-PersistedMethod {
     $method
 }
 
-function New-RecoveryScreenTypes {
-    <#
-        Builds the recovery screen as compiled methods: the green failure screen
-        with COPY TO CLIPBOARD, IMPORT FILE and RETRY, the Profile.ps1 runtime
-        that falls back to it, the document importer, and OnActivityResult.
-        Every body is an expression tree compiled by the framework's
-        LambdaCompiler. OnCreate is the one method this does not build: it needs
-        a non-virtual base call, which has no expression-tree form, so the
-        caller emits it as a six-opcode shim that delegates to AdmitActivity.
+function New-StaticCall {
+    param([Reflection.MethodInfo] $Method, [Linq.Expressions.Expression[]] $Arguments = @())
+    New-ClrCall $null $Method $Arguments
+}
 
-        Ported from the pre-migration Emit-AndroidSMA.ps1 and
-        Build-RecoveryTree.ps1.
-    #>
-    param(
-        [Parameter(Mandatory)][Reflection.Emit.ModuleBuilder] $Module,
-        [Parameter(Mandatory)][Reflection.Emit.TypeBuilder] $Main,
-        [Parameter(Mandatory)][Reflection.Assembly] $Android
-    )
+function New-If {
+    param([Linq.Expressions.Expression] $Test, [Linq.Expressions.Expression] $Then, [Linq.Expressions.Expression] $Else)
+    [Linq.Expressions.Expression]::IfThenElse($Test, $Then, $Else)
+}
+
+function New-ReturnBlock {
+    param([Type] $Type, [Linq.Expressions.Expression[]] $Expressions)
+    [Linq.Expressions.Expression]::Block($Type, [Linq.Expressions.Expression[]]$Expressions)
+}
+
+function New-HomePath([Linq.Expressions.Expression] $Path, [Reflection.MethodInfo] $Concat, [Reflection.MethodInfo] $GetFileName) {
+    # HOME/<file name>: the form the recovery screen shows for a path.
+    New-StaticCall $Concat @((New-ClrConstant 'HOME/' ([string])), (New-StaticCall $GetFileName @($Path)))
+}
+
+function Add-AndroidHostDeclarations {
+    # Resolves the Android and runtime members the host methods bind to, and declares the RecoveryProgram type and its static fields.
+    # Part of New-AndroidHostTypes; the statements keep their emission order.
+    param([Parameter(Mandatory)][hashtable] $State)
+
+    $Android = $State['Android']
+    $Main = $State['Main']
+    $Module = $State['Module']
 
     Initialize-ExpressionKit -AndroidAssembly $Android
 
-    function New-StaticCall {
-        param([Reflection.MethodInfo] $Method, [Linq.Expressions.Expression[]] $Arguments = @())
-        New-ClrCall $null $Method $Arguments
-    }
-    function New-If {
-        param([Linq.Expressions.Expression] $Test, [Linq.Expressions.Expression] $Then, [Linq.Expressions.Expression] $Else)
-        [Linq.Expressions.Expression]::IfThenElse($Test, $Then, $Else)
-    }
-    function New-ReturnBlock {
-        param([Type] $Type, [Linq.Expressions.Expression[]] $Expressions)
-        [Linq.Expressions.Expression]::Block($Type, [Linq.Expressions.Expression[]]$Expressions)
-    }
 
     $activityType = Get-AndroidType 'Android.App.Activity'
     $buttonType = Get-AndroidType 'Android.Widget.Button'
@@ -2167,6 +2165,124 @@ function New-RecoveryScreenTypes {
     $emitted = [Collections.Generic.List[object]]::new()
     $publicStatic = [Reflection.MethodAttributes]'Public,Static,HideBySig'
     $privateStatic = [Reflection.MethodAttributes]'Private,Static,HideBySig'
+
+    $State['absolutePathProperty'] = $absolutePathProperty
+    $State['actionOpenDocumentField'] = $actionOpenDocumentField
+    $State['activityType'] = $activityType
+    $State['addCategory'] = $addCategory
+    $State['addView'] = $addView
+    $State['addViewWithParams'] = $addViewWithParams
+    $State['androidReleaseProperty'] = $androidReleaseProperty
+    $State['androidSdkProperty'] = $androidSdkProperty
+    $State['animationCallbackField'] = $animationCallbackField
+    $State['applyDimension'] = $applyDimension
+    $State['assemblyFullNameProperty'] = $assemblyFullNameProperty
+    $State['bottomMarginProperty'] = $bottomMarginProperty
+    $State['buttonAddClick'] = $buttonAddClick
+    $State['buttonConstructor'] = $buttonConstructor
+    $State['buttonLayoutParamsConstructor'] = $buttonLayoutParamsConstructor
+    $State['buttonTextProperty'] = $buttonTextProperty
+    $State['buttonType'] = $buttonType
+    $State['categoryOpenableField'] = $categoryOpenableField
+    $State['clipboardManagerType'] = $clipboardManagerType
+    $State['complexUnitType'] = $complexUnitType
+    $State['contextType'] = $contextType
+    $State['displayMetricsProperty'] = $displayMetricsProperty
+    $State['emitted'] = $emitted
+    $State['filesDirProperty'] = $filesDirProperty
+    $State['frameworkDescriptionProperty'] = $frameworkDescriptionProperty
+    $State['getFileSystemEntries'] = $getFileSystemEntries
+    $State['getSystemService'] = $getSystemService
+    $State['intentConstructor'] = $intentConstructor
+    $State['intentType'] = $intentType
+    $State['layoutParamsConstructor'] = $layoutParamsConstructor
+    $State['layoutParamsType'] = $layoutParamsType
+    $State['linearLayoutConstructor'] = $linearLayoutConstructor
+    $State['linearLayoutType'] = $linearLayoutType
+    $State['mainType'] = $mainType
+    $State['manufacturerProperty'] = $manufacturerProperty
+    $State['matchParentField'] = $matchParentField
+    $State['modelProperty'] = $modelProperty
+    $State['newPlainText'] = $newPlainText
+    $State['orientationProperty'] = $orientationProperty
+    $State['orientationType'] = $orientationType
+    $State['packageNameProperty'] = $packageNameProperty
+    $State['pathCombine'] = $pathCombine
+    $State['powerShellLoadContextInitializedField'] = $powerShellLoadContextInitializedField
+    $State['primaryClipProperty'] = $primaryClipProperty
+    $State['privateStatic'] = $privateStatic
+    $State['programType'] = $programType
+    $State['publicStatic'] = $publicStatic
+    $State['readAllText'] = $readAllText
+    $State['resourcesProperty'] = $resourcesProperty
+    $State['rgb'] = $rgb
+    $State['runspaceField'] = $runspaceField
+    $State['runspaceType'] = $runspaceType
+    $State['scrollAddView'] = $scrollAddView
+    $State['scrollViewConstructor'] = $scrollViewConstructor
+    $State['scrollViewType'] = $scrollViewType
+    $State['setBackgroundColor'] = $setBackgroundColor
+    $State['setContentView'] = $setContentView
+    $State['setPadding'] = $setPadding
+    $State['setTextColor'] = $setTextColor
+    $State['setTextIsSelectable'] = $setTextIsSelectable
+    $State['setTextSize'] = $setTextSize
+    $State['setType'] = $setType
+    $State['startActivityForResult'] = $startActivityForResult
+    $State['textViewConstructor'] = $textViewConstructor
+    $State['textViewTextProperty'] = $textViewTextProperty
+    $State['textViewType'] = $textViewType
+    $State['topMarginProperty'] = $topMarginProperty
+    $State['viewType'] = $viewType
+    $State['whiteProperty'] = $whiteProperty
+    $State['wrapContentField'] = $wrapContentField
+}
+
+function Add-RecoveryScreenMethods {
+    # The recovery screen: layout factories and ShowRecovery.
+    # Part of New-AndroidHostTypes; the statements keep their emission order.
+    param([Parameter(Mandatory)][hashtable] $State)
+
+    $activityType = $State['activityType']
+    $addView = $State['addView']
+    $addViewWithParams = $State['addViewWithParams']
+    $applyDimension = $State['applyDimension']
+    $bottomMarginProperty = $State['bottomMarginProperty']
+    $buttonAddClick = $State['buttonAddClick']
+    $buttonConstructor = $State['buttonConstructor']
+    $buttonLayoutParamsConstructor = $State['buttonLayoutParamsConstructor']
+    $buttonTextProperty = $State['buttonTextProperty']
+    $buttonType = $State['buttonType']
+    $complexUnitType = $State['complexUnitType']
+    $displayMetricsProperty = $State['displayMetricsProperty']
+    $layoutParamsConstructor = $State['layoutParamsConstructor']
+    $layoutParamsType = $State['layoutParamsType']
+    $linearLayoutConstructor = $State['linearLayoutConstructor']
+    $linearLayoutType = $State['linearLayoutType']
+    $matchParentField = $State['matchParentField']
+    $orientationProperty = $State['orientationProperty']
+    $orientationType = $State['orientationType']
+    $privateStatic = $State['privateStatic']
+    $programType = $State['programType']
+    $publicStatic = $State['publicStatic']
+    $resourcesProperty = $State['resourcesProperty']
+    $rgb = $State['rgb']
+    $scrollAddView = $State['scrollAddView']
+    $scrollViewConstructor = $State['scrollViewConstructor']
+    $scrollViewType = $State['scrollViewType']
+    $setBackgroundColor = $State['setBackgroundColor']
+    $setContentView = $State['setContentView']
+    $setPadding = $State['setPadding']
+    $setTextColor = $State['setTextColor']
+    $setTextIsSelectable = $State['setTextIsSelectable']
+    $setTextSize = $State['setTextSize']
+    $textViewConstructor = $State['textViewConstructor']
+    $textViewTextProperty = $State['textViewTextProperty']
+    $textViewType = $State['textViewType']
+    $topMarginProperty = $State['topMarginProperty']
+    $viewType = $State['viewType']
+    $whiteProperty = $State['whiteProperty']
+    $wrapContentField = $State['wrapContentField']
 
     # Small factories keep every persisted method closure-free.
     $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
@@ -2373,6 +2489,25 @@ function New-RecoveryScreenTypes {
         ([Action``3].MakeGenericType($activityType, [string], [string])) `
         @($a, $showTitle, $showDetails) $showBody
 
+    $State['a'] = $a
+    $State['contentDescriptionProperty'] = $contentDescriptionProperty
+    $State['showRecoveryMethod'] = $showRecoveryMethod
+}
+
+function Add-RecoverySupportMethods {
+    # The distress beacon, the case-insensitive Profile.ps1 lookup, and toasts.
+    # Part of New-AndroidHostTypes; the statements keep their emission order.
+    param([Parameter(Mandatory)][hashtable] $State)
+
+    $a = $State['a']
+    $absolutePathProperty = $State['absolutePathProperty']
+    $activityType = $State['activityType']
+    $contextType = $State['contextType']
+    $filesDirProperty = $State['filesDirProperty']
+    $pathCombine = $State['pathCombine']
+    $privateStatic = $State['privateStatic']
+    $programType = $State['programType']
+
     # The emitted recovery floor owns its own distress beacon. This remains usable
     # when SMA can load but the application runspace or Profile.ps1 cannot start.
     $androidLogType = Get-AndroidType 'Android.Util.Log'
@@ -2448,9 +2583,39 @@ function New-RecoveryScreenTypes {
     $objectToString = Get-ExactMethod ([Convert]) 'ToString' @([object]) ([Reflection.BindingFlags]'Public,Static')
     $fileInfoCtor = Get-ExactConstructor ([IO.FileInfo]) @([string])
     $fileLengthProperty = Get-ExactProperty ([IO.FileInfo]) 'Length'
-    function New-HomePath([Linq.Expressions.Expression] $Path) {
-        New-StaticCall $concat2 @((New-ClrConstant 'HOME/' ([string])), (New-StaticCall $getFileName @($Path)))
-    }
+
+    $State['a'] = $a
+    $State['dateToString'] = $dateToString
+    $State['fileInfoCtor'] = $fileInfoCtor
+    $State['fileLengthProperty'] = $fileLengthProperty
+    $State['getFileName'] = $getFileName
+    $State['nowProperty'] = $nowProperty
+    $State['objectToString'] = $objectToString
+    $State['resolveProfileMethod'] = $resolveProfileMethod
+    $State['retryCountField'] = $retryCountField
+    $State['showToastMethod'] = $showToastMethod
+    $State['writeDistressMethod'] = $writeDistressMethod
+}
+
+function Add-ProfileRuntimeMethods {
+    # The Profile.ps1 runtime: runspace creation, the animation callback, ExecuteProfile and StartProfile.
+    # Part of New-AndroidHostTypes; the statements keep their emission order.
+    param([Parameter(Mandatory)][hashtable] $State)
+
+    $a = $State['a']
+    $absolutePathProperty = $State['absolutePathProperty']
+    $activityType = $State['activityType']
+    $animationCallbackField = $State['animationCallbackField']
+    $filesDirProperty = $State['filesDirProperty']
+    $getFileName = $State['getFileName']
+    $privateStatic = $State['privateStatic']
+    $programType = $State['programType']
+    $publicStatic = $State['publicStatic']
+    $resolveProfileMethod = $State['resolveProfileMethod']
+    $runspaceField = $State['runspaceField']
+    $runspaceType = $State['runspaceType']
+    $showRecoveryMethod = $State['showRecoveryMethod']
+    $writeDistressMethod = $State['writeDistressMethod']
 
     # Profile.ps1 runtime. The runspace remains alive after successful startup so
     # event handlers and application state created by the Start script remain usable.
@@ -2601,7 +2766,7 @@ function New-RecoveryScreenTypes {
     $profilePathValue = New-StaticCall $resolveProfileMethod @($a)
     $missingDetails = New-StaticCall $concat2 @(
         (New-ClrConstant "message: Profile.ps1 is missing.`nsource: " ([string])),
-        (New-HomePath $profilePath))
+        (New-HomePath $profilePath $concat2 $getFileName))
     $failedStartup = New-ClrBlock @() @(
         (New-StaticCall $writeDistressMethod @(
             (New-StaticCall $concat2 @(
@@ -2637,6 +2802,30 @@ function New-RecoveryScreenTypes {
     $startProfileMethod = Add-PersistedMethod $programType 'StartProfile' $publicStatic ([void]) `
         @($activityType) ([Action``1].MakeGenericType($activityType)) @($a) $startProfileBody
 
+    $State['a'] = $a
+    $State['concat2'] = $concat2
+    $State['concat3'] = $concat3
+    $State['exceptionToString'] = $exceptionToString
+    $State['fileExists'] = $fileExists
+    $State['profilePathValue'] = $profilePathValue
+    $State['resetRuntimeMethod'] = $resetRuntimeMethod
+    $State['startProfileMethod'] = $startProfileMethod
+}
+
+function Add-ActivityAdmissionMethod {
+    # AdmitActivity, the Android-to-PowerShell admission OnCreate delegates to.
+    # Part of New-AndroidHostTypes; the statements keep their emission order.
+    param([Parameter(Mandatory)][hashtable] $State)
+
+    $a = $State['a']
+    $absolutePathProperty = $State['absolutePathProperty']
+    $activityType = $State['activityType']
+    $filesDirProperty = $State['filesDirProperty']
+    $powerShellLoadContextInitializedField = $State['powerShellLoadContextInitializedField']
+    $programType = $State['programType']
+    $publicStatic = $State['publicStatic']
+    $startProfileMethod = $State['startProfileMethod']
+
     # Irreducible Android-to-PowerShell admission. The Activity override performs
     # only the nonvirtual CLR base call, then enters this persisted expression body.
     $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
@@ -2671,6 +2860,37 @@ function New-RecoveryScreenTypes {
         [Linq.Expressions.Expression]::Empty())
     $admitActivityMethod = Add-PersistedMethod $programType 'AdmitActivity' $publicStatic ([void]) `
         @($activityType) ([Action``1].MakeGenericType($activityType)) @($a) $admitActivityBody
+
+    $State['a'] = $a
+    $State['admitActivityMethod'] = $admitActivityMethod
+}
+
+function Add-DocumentImportMethods {
+    # Document import from the file picker: display names, ImportDocument and HandleActivityResult.
+    # Part of New-AndroidHostTypes; the statements keep their emission order.
+    param([Parameter(Mandatory)][hashtable] $State)
+
+    $a = $State['a']
+    $absolutePathProperty = $State['absolutePathProperty']
+    $activityType = $State['activityType']
+    $concat2 = $State['concat2']
+    $concat3 = $State['concat3']
+    $exceptionToString = $State['exceptionToString']
+    $fileInfoCtor = $State['fileInfoCtor']
+    $fileLengthProperty = $State['fileLengthProperty']
+    $filesDirProperty = $State['filesDirProperty']
+    $getFileName = $State['getFileName']
+    $intentType = $State['intentType']
+    $objectToString = $State['objectToString']
+    $pathCombine = $State['pathCombine']
+    $privateStatic = $State['privateStatic']
+    $programType = $State['programType']
+    $publicStatic = $State['publicStatic']
+    $resetRuntimeMethod = $State['resetRuntimeMethod']
+    $resolveProfileMethod = $State['resolveProfileMethod']
+    $showRecoveryMethod = $State['showRecoveryMethod']
+    $showToastMethod = $State['showToastMethod']
+    $startProfileMethod = $State['startProfileMethod']
 
     # File-picker completion. Selected documents retain their display name in the
     # private app directory; Profile.ps1 is restarted immediately after import.
@@ -2780,7 +3000,7 @@ function New-RecoveryScreenTypes {
     $importedTitle = New-StaticCall $concat2 @(
         (New-ClrConstant 'IMPORTED: ' ([string])), $displayName)
     $importedDetails = New-StaticCall $concat2 @(
-        (New-ClrConstant 'source: ' ([string])), (New-HomePath $destination))
+        (New-ClrConstant 'source: ' ([string])), (New-HomePath $destination $concat2 $getFileName))
     $showImported = New-StaticCall $showRecoveryMethod @(
         $a, $importedTitle, $importedDetails)
     $afterImport = [Linq.Expressions.Expression]::IfThenElse(
@@ -2815,7 +3035,7 @@ function New-RecoveryScreenTypes {
             $a,
             (New-StaticCall $concat3 @(
                 (New-ClrConstant 'Imported ' ([string])),
-                (New-HomePath $destination),
+                (New-HomePath $destination $concat2 $getFileName),
                 (New-StaticCall $concat3 @(
                     (New-ClrConstant ' (' ([string])),
                     (New-StaticCall $objectToString @(
@@ -2870,6 +3090,64 @@ function New-RecoveryScreenTypes {
         @($activityType, [int], $resultType, $intentType) `
         ([Action``4].MakeGenericType($activityType, [int], $resultType, $intentType)) `
         @($a, $requestCode, $resultCode, $intent) $handleResultBody
+
+    $State['a'] = $a
+    $State['handleResultMethod'] = $handleResultMethod
+    $State['intentType'] = $intentType
+    $State['resultType'] = $resultType
+}
+
+function Add-RecoveryActionMethods {
+    # The recovery screen actions: the clipboard payload, CopyClick, ImportClick and RetryClick.
+    # Part of New-AndroidHostTypes; the statements keep their emission order.
+    param([Parameter(Mandatory)][hashtable] $State)
+
+    $a = $State['a']
+    $absolutePathProperty = $State['absolutePathProperty']
+    $actionOpenDocumentField = $State['actionOpenDocumentField']
+    $activityType = $State['activityType']
+    $addCategory = $State['addCategory']
+    $androidReleaseProperty = $State['androidReleaseProperty']
+    $androidSdkProperty = $State['androidSdkProperty']
+    $assemblyFullNameProperty = $State['assemblyFullNameProperty']
+    $buttonType = $State['buttonType']
+    $categoryOpenableField = $State['categoryOpenableField']
+    $clipboardManagerType = $State['clipboardManagerType']
+    $concat2 = $State['concat2']
+    $concat3 = $State['concat3']
+    $contentDescriptionProperty = $State['contentDescriptionProperty']
+    $contextType = $State['contextType']
+    $dateToString = $State['dateToString']
+    $emitted = $State['emitted']
+    $fileExists = $State['fileExists']
+    $filesDirProperty = $State['filesDirProperty']
+    $frameworkDescriptionProperty = $State['frameworkDescriptionProperty']
+    $getFileSystemEntries = $State['getFileSystemEntries']
+    $getSystemService = $State['getSystemService']
+    $handleResultMethod = $State['handleResultMethod']
+    $intentConstructor = $State['intentConstructor']
+    $intentType = $State['intentType']
+    $manufacturerProperty = $State['manufacturerProperty']
+    $modelProperty = $State['modelProperty']
+    $newPlainText = $State['newPlainText']
+    $nowProperty = $State['nowProperty']
+    $objectToString = $State['objectToString']
+    $packageNameProperty = $State['packageNameProperty']
+    $primaryClipProperty = $State['primaryClipProperty']
+    $privateStatic = $State['privateStatic']
+    $profilePathValue = $State['profilePathValue']
+    $programType = $State['programType']
+    $publicStatic = $State['publicStatic']
+    $readAllText = $State['readAllText']
+    $resetRuntimeMethod = $State['resetRuntimeMethod']
+    $resolveProfileMethod = $State['resolveProfileMethod']
+    $resultType = $State['resultType']
+    $retryCountField = $State['retryCountField']
+    $setType = $State['setType']
+    $showToastMethod = $State['showToastMethod']
+    $startActivityForResult = $State['startActivityForResult']
+    $startProfileMethod = $State['startProfileMethod']
+    $viewType = $State['viewType']
 
     # Clipboard payload: recursive helpers avoid persisted local variables while
     # retaining a complete inventory of assemblies, files, runtime, and Profile.ps1.
@@ -3072,6 +3350,25 @@ function New-RecoveryScreenTypes {
         $activityType, [int], $resultType, $intentType)
     $onActivityResultLambda = New-ClrLambda $onActivityResultDelegate $onActivityResultBody @(
         $resultSelf, $resultRequest, $resultCodeParameter, $resultData)
+
+    $State['onActivityResultLambda'] = $onActivityResultLambda
+    $State['resultType'] = $resultType
+}
+
+function Complete-AndroidHostTypes {
+    # The OnActivityResult override on the activity, then the finished RecoveryProgram type.
+    # Part of New-AndroidHostTypes; the statements keep their emission order.
+    param([Parameter(Mandatory)][hashtable] $State)
+
+    $activityType = $State['activityType']
+    $admitActivityMethod = $State['admitActivityMethod']
+    $emitted = $State['emitted']
+    $intentType = $State['intentType']
+    $mainType = $State['mainType']
+    $onActivityResultLambda = $State['onActivityResultLambda']
+    $programType = $State['programType']
+    $resultType = $State['resultType']
+
     $onActivityResultMethod = $mainType.DefineMethod(
         'OnActivityResult',
         [Reflection.MethodAttributes]'Family,Virtual,HideBySig',
@@ -3098,6 +3395,41 @@ function New-RecoveryScreenTypes {
         ActivityType = $activityType
         MethodCount  = $script:PersistedMethods.Count + $emitted.Count
     }
+}
+
+function New-AndroidHostTypes {
+    <#
+        Builds the Android host as compiled methods on RecoveryProgram: the
+        Profile.ps1 runtime, AdmitActivity, the recovery screen it falls back to
+        (COPY TO CLIPBOARD, IMPORT FILE, RETRY), the document importer, and the
+        OnActivityResult override. Every body is an expression tree compiled by
+        the framework's LambdaCompiler. OnCreate is the one method this does not
+        build: it needs a non-virtual base call, which has no expression-tree
+        form, so the caller emits it as a six-opcode shim that delegates to
+        AdmitActivity. The phases below run in emission order.
+
+        Ported from the predecessor appliance's emitter.
+    #>
+    param(
+        [Parameter(Mandatory)][Reflection.Emit.ModuleBuilder] $Module,
+        [Parameter(Mandatory)][Reflection.Emit.TypeBuilder] $Main,
+        [Parameter(Mandatory)][Reflection.Assembly] $Android
+    )
+
+    $state = @{ Module = $Module; Main = $Main; Android = $Android }
+    # Each phase takes the state it needs from $state and puts back what later
+    # phases read. A phase writes nothing to the pipeline.
+    foreach ($phase in 'Add-AndroidHostDeclarations',
+            'Add-RecoveryScreenMethods',
+            'Add-RecoverySupportMethods',
+            'Add-ProfileRuntimeMethods',
+            'Add-ActivityAdmissionMethod',
+            'Add-DocumentImportMethods',
+            'Add-RecoveryActionMethods') {
+        $output = @(& $phase -State $state)
+        if ($output.Count -ne 0) { throw "Host phase $phase wrote $($output.Count) objects to the pipeline." }
+    }
+    Complete-AndroidHostTypes -State $state
 }
 
 function New-PwshActivityAssemblyBytes {
@@ -3143,7 +3475,7 @@ function New-PwshActivityAssemblyBytes {
 
         # The recovery menu, as compiled methods. This also gives the activity
         # its OnActivityResult override, which needs no hand-written IL.
-        $screen = New-RecoveryScreenTypes -Module $module -Main $main -Android $android
+        $screen = New-AndroidHostTypes -Module $module -Main $main -Android $android
         $main.DefineDefaultConstructor(
             [Reflection.MethodAttributes]'Public,HideBySig,SpecialName,RTSpecialName') | Out-Null
 
