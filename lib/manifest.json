@@ -106,6 +106,12 @@
       "role": "Android NativeActivity API at android-14.0.0_r1. ANativeActivity_onCreate is the entry point the framework NativeActivity calls in the library named by android.app.lib_name."
     },
     {
+      "path": "coreclrhost.h",
+      "sha256": "304545B7EA44B4AEB4318697C66EF4DF5294C98E8C4135822E22CC1C1FAF44F1",
+      "url": "https://raw.githubusercontent.com/dotnet/runtime/ab19415702aa8139d5369e47c73edb47343c34ad/src/coreclr/hosts/inc/coreclrhost.h",
+      "role": "CoreCLR hosting API at v11.0.0-rc.1.26425.128: coreclr_initialize and coreclr_create_delegate, which the emitted native host calls."
+    },
+    {
       "path": "host_runtime_contract.h",
       "sha256": "CB3EEBA1E755B15B187ACCE315EE322FDBCC500786D8B4B7150D91F9B4481380",
       "url": "https://raw.githubusercontent.com/dotnet/runtime/ab19415702aa8139d5369e47c73edb47343c34ad/src/native/corehost/host_runtime_contract.h",

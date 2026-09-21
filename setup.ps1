@@ -784,7 +784,7 @@ $script:KeepPackageCache = -not $DeletePackages -and $Packages -eq 'Folder'
 # any of them fails verification before a single byte is parsed.
 $script:RepositoryLibBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/1bc917bf13b9ed7da299cd3d525f3eeca10cc8ca/lib/'
 $script:LibRootManifestPath = 'manifest.json'
-$script:LibRootManifestSha256 = 'BA6144E313A0D462BFB1F5A0198A0E62E226DA9FDFB2FA821E5F02151D537F6E'
+$script:LibRootManifestSha256 = 'C2B3C6D044EACBACAD7E7B1C58F18EA8AE6FB836B421B5EC3788D009E57CEDC4'
 $script:LibSourceManifest = $null
 
 function Get-LibFileBytes {
@@ -1366,7 +1366,6 @@ function Get-VerifiedPackageBytes {
 }
 
 function Invoke-AcquisitionStep {
-    if (Skip-ForNativeAdmission -Step 2 -Output 'the NuGet packages') { return }
     if ($Packages -ne 'Memory' -and -not (Test-Path -LiteralPath $CacheDirectory -PathType Container)) {
         if ($PSCmdlet.ShouldProcess($CacheDirectory, 'Create package cache directory')) {
             New-ApprovedDirectory -Path $CacheDirectory
@@ -1504,7 +1503,6 @@ function Read-ZipEntryBytes {
 }
 
 function Invoke-InspectionStep {
-    if (Skip-ForNativeAdmission -Step 3 -Output 'package inspection') { return }
 
     $managedCount = 0
     $nativeCount = 0
@@ -3582,6 +3580,17 @@ function New-PwshActivityAssemblyBytes {
         $main.DefineMethodOverride($onCreate, $baseOnCreate)
         $main.CreateType() | Out-Null
 
+        if ($Admission -eq 'NativeActivity') {
+            # Gate 2a: the managed entry the emitted native host reaches through
+            # coreclr_create_delegate. It touches no Android type, so
+            # Mono.Android is never loaded; it returns 'PWSH' (0x50575348).
+            $nativeHostType = $module.DefineType('Dev.MansfieldPlumbing.Pwsh.NativeHost',
+                [Reflection.TypeAttributes]'Public,Abstract,Sealed,BeforeFieldInit')
+            [void](Add-PersistedMethod $nativeHostType 'Admit' ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([int]) @() `
+                ([Func[int]]) @() ([Linq.Expressions.Expression]::Constant([int]0x50575348, [int])))
+            $nativeHostType.CreateType() | Out-Null
+        }
+
         Write-Host ('[PASS] Screen: {0} methods compiled from expression trees; 6 hand-written opcodes in the OnCreate shim.' -f
             $screen.MethodCount) -ForegroundColor Green
 
@@ -3623,7 +3632,6 @@ function Add-GeneratedAssemblyCandidates {
 }
 
 function Invoke-SelectionStep {
-    if (Skip-ForNativeAdmission -Step 4 -Output 'the assembly set') { return }
     if ($Payload -ne 'Minimal') {
         throw "Payload '$Payload' is not built yet. Only Minimal is."
     }
@@ -3982,16 +3990,25 @@ function Test-AssemblyStoreBytes {
         $storedDigest.Dispose()
     }
 
+    $entries = for ($i = 0; $i -lt $entryCount; $i++) {
+        $descriptorOffset = $descriptorStart + ($i * $descriptorSize)
+        [pscustomobject]@{
+            Name   = $names[$i]
+            Offset = [long][BitConverter]::ToUInt32($StoreBytes, $descriptorOffset + 4)
+            Size   = [long][BitConverter]::ToUInt32($StoreBytes, $descriptorOffset + 8)
+        }
+    }
+
     return [pscustomobject]@{
         EntryCount      = $entryCount
         IndexEntryCount = $indexEntryCount
         MetadataSize    = $cursor
         TotalSize       = $StoreBytes.Length
+        Entries         = @($entries)
     }
 }
 
 function Invoke-StoreStep {
-    if (Skip-ForNativeAdmission -Step 5 -Output 'the XABA store') { return }
 
     $contract = Get-AndroidNativeContract
     $selected = $script:BuildContext.SelectedAssemblies
@@ -4014,9 +4031,10 @@ function Invoke-StoreStep {
     finally { $storeStream.Dispose() }
 
     $script:BuildContext.AssemblyStore = [pscustomobject]@{
-        Path   = $storePath
-        Bytes  = $storeBytes
-        Sha256 = $storeHash
+        Path    = $storePath
+        Bytes   = $storeBytes
+        Sha256  = $storeHash
+        Entries = $report.Entries
     }
 
     Write-Host ('[PASS] Step 5 complete: {0} assemblies emitted into a {1}-byte XABA store ({2} index entries, {3} bytes of metadata), verified by the runtime''s own lookup rules. SHA-256 {4}' -f
@@ -4465,6 +4483,11 @@ function New-ElfCodeLibrary {
         [Parameter(Mandatory)][string[]] $Needed,
         [Parameter(Mandatory)][System.Collections.IDictionary] $Functions,
         [System.Collections.IDictionary] $Data = @{},
+        # Process-lifetime writable data after the GOT. Each entry is a byte
+        # array, or @{ Bytes; Pointers = @(@{ At; Target }) } whose pointer-sized
+        # slots at At receive the address of Target (a Data, WritableData or
+        # function label) through the target's RELATIVE relocation.
+        [System.Collections.IDictionary] $WritableData = @{},
         [int] $PageSize = 16384
     )
 
@@ -4478,12 +4501,12 @@ function New-ElfCodeLibrary {
 
     # Imports, in first-use order.
     $imports = [System.Collections.Generic.List[string]]::new()
-    foreach ($name in $Functions.Keys) {
+    foreach ($name in $Functions.PSBase.Keys) {
         foreach ($step in $Functions[$name]) {
-            if ($step.Op -eq 'tail' -and -not $imports.Contains($step.Import)) { $imports.Add($step.Import) }
+            if ($step['Import'] -and -not $imports.Contains($step['Import'])) { $imports.Add($step['Import']) }
         }
     }
-    $exports = @($Functions.Keys)
+    $exports = @($Functions.PSBase.Keys)
     $symbols = @($imports) + $exports
 
     $strings = New-ElfStringTable -Strings (@($Soname) + @($Needed) + $symbols)
@@ -4494,8 +4517,11 @@ function New-ElfCodeLibrary {
     $dynsymOffset = Get-AlignedOffset ($dynstrOffset + $strings.Bytes.Length) $w
     $dynsymSize = $L.Symbol * ($symbols.Count + 1)
     $hashOffset = Get-AlignedOffset ($dynsymOffset + $dynsymSize) $w
+    $pointerCount = 0
+    # PSBase.Keys: a dictionary's .Keys would return an entry named 'keys'.
+    foreach ($label in $WritableData.PSBase.Keys) { if ($WritableData[$label] -is [System.Collections.IDictionary]) { $pointerCount += @($WritableData[$label].Pointers).Count } }
     $relocationOffset = Get-AlignedOffset ($hashOffset + $hashBytes.Length) $w
-    $relocationSize = $relocationEntry * $imports.Count
+    $relocationSize = $relocationEntry * ($imports.Count + $pointerCount)
     $dynamicOffset = Get-AlignedOffset ($relocationOffset + $relocationSize) $w
     $dynamicSize = $L.Dynamic * (11 + $Needed.Count)
     $metaEnd = $dynamicOffset + $dynamicSize
@@ -4504,22 +4530,49 @@ function New-ElfCodeLibrary {
     $functionOffset = [ordered]@{}
     $functionSize = @{}
     $cursor = $textOffset
+    $labels = @{}
     foreach ($name in $exports) {
         $functionOffset[$name] = $cursor
+        $labels[$name] = @{}
         $size = 0
-        foreach ($step in $Functions[$name]) { $size += & $isa.Length -Step $step }
+        foreach ($step in $Functions[$name]) {
+            if ($step.Op -eq 'label') {
+                if ($labels[$name].ContainsKey($step.Name)) { throw "$name defines label '$($step.Name)' twice." }
+                $labels[$name][$step.Name] = $cursor + $size
+            }
+            $size += & $isa.Length -Step $step
+        }
         $functionSize[$name] = $size
         $cursor += $size
     }
     $dataOffset = [ordered]@{}
-    foreach ($label in $Data.Keys) {
+    foreach ($label in $Data.PSBase.Keys) {
         $dataOffset[$label] = $cursor
         $cursor += $Data[$label].Length
     }
     $textEnd = $cursor
     $gotOffset = Get-AlignedOffset $textEnd $PageSize
     $gotSize = $w * [Math]::Max(1, $imports.Count)
-    $imageSize = $gotOffset + $gotSize
+    $writableOffset = [ordered]@{}
+    $writableEnd = $gotOffset + $gotSize
+    foreach ($label in $WritableData.PSBase.Keys) {
+        $entry = $WritableData[$label]
+        [byte[]] $bytes = if ($entry -is [System.Collections.IDictionary]) { $entry.Bytes } else { $entry }
+        $writableEnd = Get-AlignedOffset $writableEnd 16
+        $writableOffset[$label] = $writableEnd
+        $writableEnd += $bytes.Length
+    }
+    $rwSize = $writableEnd - $gotOffset
+    $imageSize = $writableEnd
+
+    # Addresses by label: read-only data, writable data, and exported functions.
+    $address = @{}
+    foreach ($label in $dataOffset.PSBase.Keys) { $address[$label] = $dataOffset[$label] }
+    foreach ($label in $writableOffset.PSBase.Keys) {
+        if ($address.ContainsKey($label)) { throw "Data label '$label' is defined twice." }
+        $address[$label] = $writableOffset[$label]
+    }
+    foreach ($name in $exports) { if (-not $address.ContainsKey($name)) { $address[$name] = $functionOffset[$name] } }
 
     $image = New-Object byte[] $imageSize
     Write-ElfHeader $image $L $programHeaderCount
@@ -4528,7 +4581,7 @@ function New-ElfCodeLibrary {
             @($elf['PT_PHDR'], $elf['PF_R'], $L.Header, ($L.ProgramHeader * $programHeaderCount), $w),
             @($elf['PT_LOAD'], $elf['PF_R'], 0, $metaEnd, $PageSize),
             @($elf['PT_LOAD'], ($elf['PF_R'] -bor $elf['PF_X']), $textOffset, ($textEnd - $textOffset), $PageSize),
-            @($elf['PT_LOAD'], ($elf['PF_R'] -bor $elf['PF_W']), $gotOffset, $gotSize, $PageSize),
+            @($elf['PT_LOAD'], ($elf['PF_R'] -bor $elf['PF_W']), $gotOffset, $rwSize, $PageSize),
             @($elf['PT_DYNAMIC'], $elf['PF_R'], $dynamicOffset, $dynamicSize, $w),
             @($elf['PT_GNU_STACK'], ($elf['PF_R'] -bor $elf['PF_W']), 0, 0, 16))) {
         Write-ElfProgramHeader $image $L $ph $s[0] $s[1] $s[2] $s[3] $s[3] $s[4]
@@ -4559,6 +4612,23 @@ function New-ElfCodeLibrary {
         Write-ElfRelocation $image $L ($relocationOffset + $relocationEntry * $i) $form $slot $symbolIndex[$imports[$i]] $elf[$script:Target.GotRelocation] 0
     }
 
+    # Writable data, then its pointer slots. REL writes each addend into the
+    # slot, so the data is copied first.
+    $relocationIndex = $imports.Count
+    foreach ($label in $WritableData.PSBase.Keys) {
+        $entry = $WritableData[$label]
+        [byte[]] $writableBytes = if ($entry -is [System.Collections.IDictionary]) { $entry.Bytes } else { $entry }
+        [System.Array]::Copy($writableBytes, 0, $image, $writableOffset[$label], $writableBytes.Length)
+        if ($entry -is [System.Collections.IDictionary]) {
+            foreach ($pointer in @($entry.Pointers)) {
+                if (-not $address.ContainsKey($pointer.Target)) { throw "Writable '$label' points at undefined label '$($pointer.Target)'." }
+                if ($pointer.At + $w -gt $writableBytes.Length) { throw "Writable '$label' has a pointer slot past its end." }
+                Write-ElfRelocation $image $L ($relocationOffset + $relocationEntry * $relocationIndex) $form ($writableOffset[$label] + $pointer.At) 0 $elf[$script:Target.RelativeRelocation] $address[$pointer.Target]
+                $relocationIndex++
+            }
+        }
+    }
+
     $entries = [System.Collections.Generic.List[object]]::new()
     foreach ($lib in $Needed) { $entries.Add(@($elf['DT_NEEDED'], $strings.Offset[$lib])) }
     foreach ($e in @(
@@ -4579,18 +4649,23 @@ function New-ElfCodeLibrary {
         $pc = [long]$functionOffset[$name]
         foreach ($step in $Functions[$name]) {
             $length = & $isa.Length -Step $step
-            $target = switch ($step.Op) {
-                'tail' { $gotSlot[$step.Import] }
-                { $_ -in 'adr-data', 'lea-data' } { $dataOffset[$step.Data] }
-                default { 0 }
-            }
+            $target = if ($step['Import']) { $gotSlot[$step['Import']] }
+                elseif ($step['Data']) {
+                    if (-not $address.ContainsKey($step['Data'])) { throw "$name refers to undefined data '$($step['Data'])'." }
+                    $address[$step['Data']]
+                }
+                elseif ($step['Label']) {
+                    if (-not $labels[$name].ContainsKey($step['Label'])) { throw "$name branches to undefined label '$($step['Label'])'." }
+                    $labels[$name][$step['Label']]
+                }
+                else { 0 }
             $bytes = [byte[]]@(& $isa.Encode -Step $step -Pc $pc -Target $target)
             if ($bytes.Length -ne $length) { throw "$($isa.Name) step '$($step.Op)' encoded to $($bytes.Length) bytes, expected $length." }
             [System.Array]::Copy($bytes, 0, $image, $pc, $length)
             $pc += $length
         }
     }
-    foreach ($label in $Data.Keys) {
+    foreach ($label in $Data.PSBase.Keys) {
         [System.Array]::Copy([byte[]]$Data[$label], 0, $image, $dataOffset[$label], $Data[$label].Length)
     }
 
@@ -4602,7 +4677,8 @@ function New-ElfCodeLibrary {
         Exports   = $functionOffset
         Imports   = @($imports)
         GotSlots  = $gotSlot
-        DataAt    = $dataOffset
+        DataAt    = $address
+        Labels    = $labels
         Functions = $Functions
     }
 }
@@ -4968,20 +5044,24 @@ function Test-ElfCodeLibrary {
 
     $slotImport = @{}
     foreach ($relocation in $image.Relocations) {
-        if ($relocation.Type -ne $elf[$script:Target.GotRelocation]) { throw "Relocation at $($relocation.Offset) is not $($script:Target.GotRelocation)." }
+        if ($relocation.Type -eq $elf[$script:Target.RelativeRelocation]) {
+            if ($relocation.Symbol -ne 0 -or $relocation.Addend -lt 0 -or $relocation.Addend -ge $bytes.Length) { throw "RELATIVE relocation at $($relocation.Offset) does not address the image." }
+            continue
+        }
+        if ($relocation.Type -ne $elf[$script:Target.GotRelocation]) { throw "Relocation at $($relocation.Offset) is neither $($script:Target.GotRelocation) nor $($script:Target.RelativeRelocation)." }
         if ($relocation.Addend -ne 0) { throw "GOT slot $($relocation.Offset) carries a nonzero addend." }
         $slotImport[[long]$relocation.Offset] = $relocation.SymbolName
     }
 
     $steps = 0
-    foreach ($name in $Library.Exports.Keys) {
+    foreach ($name in $Library.Exports.PSBase.Keys) {
         $symbol = $image.Resolved[$name]
         if (-not $symbol -or $symbol.Section -eq 0) { throw "Export '$name' does not resolve." }
         if ($symbol.Value -ne $Library.Exports[$name]) { throw "Export '$name' resolves to $($symbol.Value), expected $($Library.Exports[$name])." }
         if ($symbol.Value % $isa.Alignment) { throw "Export '$name' is not aligned to a $($isa.Name) instruction." }
         $pc = [long]$symbol.Value
         foreach ($step in $Library.Functions[$name]) {
-            $pc += & $isa.Verify -Image $bytes -Pc $pc -Step $step -DataAt $Library.DataAt -SlotImport $slotImport -Name $name
+            $pc += & $isa.Verify -Image $bytes -Pc $pc -Step $step -DataAt $Library.DataAt -SlotImport $slotImport -Labels $Library.Labels[$name] -Name $name
             $steps++
         }
     }
@@ -5170,7 +5250,7 @@ function Test-A64Step {
     # Decodes the step at Pc with Read-A64Instruction and checks it against the
     # intended step. Returns the step's length.
     param([Parameter(Mandatory)][byte[]] $Image, [Parameter(Mandatory)][long] $Pc, [Parameter(Mandatory)] $Step,
-          $DataAt, $SlotImport, [string] $Name)
+          $DataAt, $SlotImport, [hashtable] $Labels, [string] $Name)
     $word = Read-A64Instruction -Word ([BitConverter]::ToUInt32($Image, [int]$Pc))
     $ok = switch ($Step.Op) {
         { $_ -in 'movz', 'movn' } { $word.Op -eq $Step.Op -and $word.Rd -eq $Step.Rd -and $word.Imm -eq $Step.Imm -and $word.Hw -eq 0 -and $word.Is64 -eq [bool]$Step.Is64 }
@@ -5248,59 +5328,132 @@ function Get-X64ModRm {
     [byte](($Mod -shl 6) -bor ($Reg -shl 3) -bor $Rm)
 }
 
+function Get-X64Rex {
+    # REX prefix: 0100WRXB. Returns nothing when no bit is needed, so the
+    # register-0-7 forms keep their REX-less encodings.
+    param([bool] $W = $false, [int] $R = 0, [int] $B = 0, [bool] $Force = $false)
+    $value = 0x40 -bor ([int]$W -shl 3) -bor ((($R -shr 3) -band 1) -shl 2) -bor (($B -shr 3) -band 1)
+    if ($value -ne 0x40 -or $Force) { return , [byte[]]@([byte]$value) }
+    , [byte[]]@()
+}
+
 function New-X64Instruction {
-    # Returns the bytes for one step. RIP-relative forms take the distance from
-    # the end of the instruction.
+    # Returns the bytes for one step. RIP-relative forms, branches and calls
+    # take the distance from the end of the instruction. Register numbers are
+    # 0-15 (rax rcx rdx rbx rsp rbp rsi rdi r8-r15).
     param([Parameter(Mandatory)] $Step, [long] $RipDisplacement = 0)
     $imm32 = { param([long] $v) [BitConverter]::GetBytes([int32]$v) }
-    switch ($Step.Op) {
-        'mov32'     { return [byte[]]@(0x89, (Get-X64ModRm 3 $Step.Src $Step.Dst)) }
-        'mov64'     { return [byte[]]@(0x48, 0x89, (Get-X64ModRm 3 $Step.Src $Step.Dst)) }
-        'movimm32'  { return [byte[]](@([byte](0xB8 + $Step.Dst)) + (& $imm32 $Step.Imm)) }
-        'movimm64s' { return [byte[]](@(0x48, 0xC7, (Get-X64ModRm 3 0 $Step.Dst)) + (& $imm32 $Step.Imm)) }
-        'xor32'     { return [byte[]]@(0x31, (Get-X64ModRm 3 $Step.Dst $Step.Dst)) }
-        'lea-data'  { return [byte[]](@(0x48, 0x8D, (Get-X64ModRm 0 $Step.Dst 5)) + (& $imm32 $RipDisplacement)) }
-        'ret'       { return [byte[]]@(0xC3) }
-        'tail'      { return [byte[]](@(0xFF, (Get-X64ModRm 0 4 5)) + (& $imm32 $RipDisplacement)) }
-        default     { throw "Unknown x86-64 step '$($Step.Op)'." }
+    $rip = { param([int] $reg) Get-X64ModRm 0 ($reg -band 7) 5 }
+    $base = {
+        param([int] $reg, [int] $baseReg, [int] $disp)
+        if (($baseReg -band 7) -eq 4) { throw 'Base rsp/r12 needs a SIB byte; use store64-rsp.' }
+        if ($disp -lt -128 -or $disp -gt 127) { throw "Displacement $disp does not fit disp8." }
+        [byte[]]@((Get-X64ModRm 1 ($reg -band 7) ($baseReg -band 7)), [byte]($disp -band 0xFF))
+    }
+    $s = $Step
+    switch ($s.Op) {
+        'label'        { return }
+        'mov32'        { return [byte[]]((Get-X64Rex -R $s.Src -B $s.Dst) + @(0x89, (Get-X64ModRm 3 ($s.Src -band 7) ($s.Dst -band 7)))) }
+        'mov64'        { return [byte[]]((Get-X64Rex -W $true -R $s.Src -B $s.Dst) + @(0x89, (Get-X64ModRm 3 ($s.Src -band 7) ($s.Dst -band 7)))) }
+        'movimm32'     { return [byte[]]((Get-X64Rex -B $s.Dst) + @([byte](0xB8 + ($s.Dst -band 7))) + (& $imm32 $s.Imm)) }
+        'movimm64s'    { return [byte[]]((Get-X64Rex -W $true -B $s.Dst) + @(0xC7, (Get-X64ModRm 3 0 ($s.Dst -band 7))) + (& $imm32 $s.Imm)) }
+        'xor32'        { return [byte[]]((Get-X64Rex -R $s.Dst -B $s.Dst) + @(0x31, (Get-X64ModRm 3 ($s.Dst -band 7) ($s.Dst -band 7)))) }
+        'lea-data'     { return [byte[]]((Get-X64Rex -W $true -R $s.Dst) + @(0x8D, (& $rip $s.Dst)) + (& $imm32 $RipDisplacement)) }
+        'load64-data'  { return [byte[]]((Get-X64Rex -W $true -R $s.Dst) + @(0x8B, (& $rip $s.Dst)) + (& $imm32 $RipDisplacement)) }
+        'load32-data'  { return [byte[]]((Get-X64Rex -R $s.Dst) + @(0x8B, (& $rip $s.Dst)) + (& $imm32 $RipDisplacement)) }
+        'load-got'     { return [byte[]]((Get-X64Rex -W $true -R $s.Dst) + @(0x8B, (& $rip $s.Dst)) + (& $imm32 $RipDisplacement)) }
+        'load64-base'  { return [byte[]]((Get-X64Rex -W $true -R $s.Dst -B $s.Base) + @(0x8B) + (& $base $s.Dst $s.Base $s.Disp)) }
+        'store64-base' { return [byte[]]((Get-X64Rex -W $true -R $s.Src -B $s.Base) + @(0x89) + (& $base $s.Src $s.Base $s.Disp)) }
+        'add64-base'   { return [byte[]]((Get-X64Rex -W $true -R $s.Dst -B $s.Base) + @(0x03) + (& $base $s.Dst $s.Base $s.Disp)) }
+        'store64-rsp'  {
+            if ($s.Disp -lt 0 -or $s.Disp -gt 127) { throw "Displacement $($s.Disp) does not fit disp8." }
+            return [byte[]]((Get-X64Rex -W $true -R $s.Src) + @(0x89, (Get-X64ModRm 1 ($s.Src -band 7) 4), 0x24, [byte]$s.Disp))
+        }
+        'sub-rsp'      { return [byte[]]@(0x48, 0x83, (Get-X64ModRm 3 5 4), [byte]$s.Imm) }
+        'add-rsp'      { return [byte[]]@(0x48, 0x83, (Get-X64ModRm 3 0 4), [byte]$s.Imm) }
+        'add64-imm8'   { return [byte[]]((Get-X64Rex -W $true -B $s.Dst) + @(0x83, (Get-X64ModRm 3 0 ($s.Dst -band 7)), [byte]$s.Imm)) }
+        'test32'       { return [byte[]]((Get-X64Rex -R $s.Reg -B $s.Reg) + @(0x85, (Get-X64ModRm 3 ($s.Reg -band 7) ($s.Reg -band 7)))) }
+        'cmp32-imm'    { return [byte[]]((Get-X64Rex -B $s.Reg) + @(0x81, (Get-X64ModRm 3 7 ($s.Reg -band 7))) + (& $imm32 $s.Imm)) }
+        'test64'       { return [byte[]]((Get-X64Rex -W $true -R $s.Reg -B $s.Reg) + @(0x85, (Get-X64ModRm 3 ($s.Reg -band 7) ($s.Reg -band 7)))) }
+        'push'         { return [byte[]]((Get-X64Rex -B $s.Reg) + @([byte](0x50 + ($s.Reg -band 7)))) }
+        'pop'          { return [byte[]]((Get-X64Rex -B $s.Reg) + @([byte](0x58 + ($s.Reg -band 7)))) }
+        'jz'           { return [byte[]](@(0x0F, 0x84) + (& $imm32 $RipDisplacement)) }
+        'jnz'          { return [byte[]](@(0x0F, 0x85) + (& $imm32 $RipDisplacement)) }
+        'jae'          { return [byte[]](@(0x0F, 0x83) + (& $imm32 $RipDisplacement)) }
+        'jmp'          { return [byte[]](@(0xE9) + (& $imm32 $RipDisplacement)) }
+        'call-import'  { return [byte[]](@(0xFF, (Get-X64ModRm 0 2 5)) + (& $imm32 $RipDisplacement)) }
+        'call-data'    { return [byte[]](@(0xFF, (Get-X64ModRm 0 2 5)) + (& $imm32 $RipDisplacement)) }
+        'ret'          { return [byte[]]@(0xC3) }
+        'tail'         { return [byte[]](@(0xFF, (Get-X64ModRm 0 4 5)) + (& $imm32 $RipDisplacement)) }
+        default        { throw "Unknown x86-64 step '$($s.Op)'." }
     }
 }
 
 function Get-X64StepLength {
+    # Every form has a fixed width (rel32 and disp32 throughout), so the length
+    # is the length of the encoding with a zero displacement.
     param([Parameter(Mandatory)] $Step)
-    switch ($Step.Op) {
-        'mov32' { 2 } 'mov64' { 3 } 'movimm32' { 5 } 'movimm64s' { 7 }
-        'xor32' { 2 } 'lea-data' { 7 } 'ret' { 1 } 'tail' { 6 }
-        default { throw "Unknown x86-64 step '$($Step.Op)'." }
-    }
+    ([byte[]]@(New-X64Instruction -Step $Step -RipDisplacement 0)).Length
 }
 
 function Read-X64Instruction {
-    # Independent decode of the forms above, from the opcode and ModRM bytes.
+    # Independent decode of the forms above, from the prefix, opcode and ModRM
+    # bytes. Register numbers are returned 0-15 with the REX bits applied.
     param([Parameter(Mandatory)][byte[]] $Image, [Parameter(Mandatory)][long] $At)
-    $b0 = $Image[$At]
-    $disp = { param([long] $o) [BitConverter]::ToInt32($Image, [int]$o) }
+    $p = $At
+    $w = 0; $r = 0; $b = 0
+    if (($Image[$p] -band 0xF0) -eq 0x40) { $rex = $Image[$p]; $w = ($rex -shr 3) -band 1; $r = (($rex -shr 2) -band 1) * 8; $b = ($rex -band 1) * 8; $p++ }
+    $op = $Image[$p]
+    $disp32 = { param([long] $o) [BitConverter]::ToInt32($Image, [int]$o) }
     $modrm = { param([byte] $m) [pscustomobject]@{ Mod = $m -shr 6; Reg = ($m -shr 3) -band 7; Rm = $m -band 7 } }
-    if ($b0 -eq 0x48) {
-        $b1 = $Image[$At + 1]; $m = & $modrm $Image[$At + 2]
-        if ($b1 -eq 0x89 -and $m.Mod -eq 3) { return [pscustomobject]@{ Op = 'mov64'; Dst = $m.Rm; Src = $m.Reg; Length = 3 } }
-        if ($b1 -eq 0xC7 -and $m.Mod -eq 3 -and $m.Reg -eq 0) { return [pscustomobject]@{ Op = 'movimm64s'; Dst = $m.Rm; Imm = (& $disp ($At + 3)); Length = 7 } }
-        if ($b1 -eq 0x8D -and $m.Mod -eq 0 -and $m.Rm -eq 5) { return [pscustomobject]@{ Op = 'lea-rip'; Dst = $m.Reg; Disp = (& $disp ($At + 3)); Length = 7 } }
+    $result = { param([hashtable] $h, [long] $end) $h.Length = [int]($end - $At); [pscustomobject]$h }
+    $s8 = { param([byte] $v) if ($v -ge 128) { [int]$v - 256 } else { [int]$v } }
+    if ($op -ge 0x50 -and $op -le 0x57) { return & $result @{ Op = 'push'; Reg = ($op - 0x50) + $b } ($p + 1) }
+    if ($op -ge 0x58 -and $op -le 0x5F) { return & $result @{ Op = 'pop'; Reg = ($op - 0x58) + $b } ($p + 1) }
+    if ($op -ge 0xB8 -and $op -le 0xBF -and -not $w) { return & $result @{ Op = 'movimm32'; Dst = ($op - 0xB8) + $b; Imm = (& $disp32 ($p + 1)) } ($p + 5) }
+    if ($op -eq 0xC3) { return & $result @{ Op = 'ret' } ($p + 1) }
+    if ($op -eq 0xE9) { return & $result @{ Op = 'jmp'; Disp = (& $disp32 ($p + 1)) } ($p + 5) }
+    if ($op -eq 0x0F -and $Image[$p + 1] -in 0x83, 0x84, 0x85) {
+        $branch = switch ($Image[$p + 1]) { 0x83 { 'jae' } 0x84 { 'jz' } 0x85 { 'jnz' } }
+        return & $result @{ Op = $branch; Disp = (& $disp32 ($p + 2)) } ($p + 6)
     }
-    if ($b0 -eq 0x89) { $m = & $modrm $Image[$At + 1]; if ($m.Mod -eq 3) { return [pscustomobject]@{ Op = 'mov32'; Dst = $m.Rm; Src = $m.Reg; Length = 2 } } }
-    if ($b0 -ge 0xB8 -and $b0 -le 0xBF) { return [pscustomobject]@{ Op = 'movimm32'; Dst = $b0 - 0xB8; Imm = (& $disp ($At + 1)); Length = 5 } }
-    if ($b0 -eq 0x31) { $m = & $modrm $Image[$At + 1]; if ($m.Mod -eq 3) { return [pscustomobject]@{ Op = 'xor32'; Dst = $m.Rm; Src = $m.Reg; Length = 2 } } }
-    if ($b0 -eq 0xC3) { return [pscustomobject]@{ Op = 'ret'; Length = 1 } }
-    if ($b0 -eq 0xFF) { $m = & $modrm $Image[$At + 1]; if ($m.Mod -eq 0 -and $m.Reg -eq 4 -and $m.Rm -eq 5) { return [pscustomobject]@{ Op = 'jmp-rip'; Disp = (& $disp ($At + 2)); Length = 6 } } }
-    throw ('Unrecognized x86-64 instruction at {0}: 0x{1:X2}.' -f $At, $b0)
+    $m = & $modrm $Image[$p + 1]
+    switch ($op) {
+        0x89 {
+            if ($m.Mod -eq 3) { return & $result @{ Op = $(if ($w) { 'mov64' } else { 'mov32' }); Dst = $m.Rm + $b; Src = $m.Reg + $r } ($p + 2) }
+            if ($m.Mod -eq 1 -and $m.Rm -eq 4 -and $Image[$p + 2] -eq 0x24 -and $w) { return & $result @{ Op = 'store64-rsp'; Src = $m.Reg + $r; Disp = (& $s8 $Image[$p + 3]) } ($p + 4) }
+            if ($m.Mod -eq 1 -and $m.Rm -ne 4 -and $w) { return & $result @{ Op = 'store64-base'; Src = $m.Reg + $r; Base = $m.Rm + $b; Disp = (& $s8 $Image[$p + 2]) } ($p + 3) }
+        }
+        0x8B {
+            if ($m.Mod -eq 0 -and $m.Rm -eq 5) { return & $result @{ Op = $(if ($w) { 'load64-rip' } else { 'load32-rip' }); Dst = $m.Reg + $r; Disp = (& $disp32 ($p + 2)) } ($p + 6) }
+            if ($m.Mod -eq 1 -and $m.Rm -ne 4 -and $w) { return & $result @{ Op = 'load64-base'; Dst = $m.Reg + $r; Base = $m.Rm + $b; Disp = (& $s8 $Image[$p + 2]) } ($p + 3) }
+        }
+        0x03 { if ($m.Mod -eq 1 -and $m.Rm -ne 4 -and $w) { return & $result @{ Op = 'add64-base'; Dst = $m.Reg + $r; Base = $m.Rm + $b; Disp = (& $s8 $Image[$p + 2]) } ($p + 3) } }
+        0x8D { if ($m.Mod -eq 0 -and $m.Rm -eq 5 -and $w) { return & $result @{ Op = 'lea-rip'; Dst = $m.Reg + $r; Disp = (& $disp32 ($p + 2)) } ($p + 6) } }
+        0xC7 { if ($m.Mod -eq 3 -and $m.Reg -eq 0 -and $w) { return & $result @{ Op = 'movimm64s'; Dst = $m.Rm + $b; Imm = (& $disp32 ($p + 2)) } ($p + 6) } }
+        0x31 { if ($m.Mod -eq 3) { return & $result @{ Op = 'xor32'; Dst = $m.Rm + $b; Src = $m.Reg + $r } ($p + 2) } }
+        0x81 { if ($m.Mod -eq 3 -and $m.Reg -eq 7 -and -not $w) { return & $result @{ Op = 'cmp32-imm'; Reg = $m.Rm + $b; Imm = (& $disp32 ($p + 2)) } ($p + 6) } }
+        0x85 { if ($m.Mod -eq 3 -and ($m.Reg + $r) -eq ($m.Rm + $b)) { return & $result @{ Op = $(if ($w) { 'test64' } else { 'test32' }); Reg = $m.Rm + $b } ($p + 2) } }
+        0x83 {
+            if ($m.Mod -eq 3 -and $w -and $m.Rm -eq 4 -and $b -eq 0 -and ($m.Reg -eq 5 -or $m.Reg -eq 0)) { return & $result @{ Op = $(if ($m.Reg -eq 5) { 'sub-rsp' } else { 'add-rsp' }); Imm = [int]$Image[$p + 2] } ($p + 3) }
+            if ($m.Mod -eq 3 -and $w -and $m.Reg -eq 0) { return & $result @{ Op = 'add64-imm8'; Dst = $m.Rm + $b; Imm = (& $s8 $Image[$p + 2]) } ($p + 3) }
+        }
+        0xFF {
+            if ($m.Mod -eq 0 -and $m.Rm -eq 5 -and $m.Reg -eq 2) { return & $result @{ Op = 'call-rip'; Disp = (& $disp32 ($p + 2)) } ($p + 6) }
+            if ($m.Mod -eq 0 -and $m.Rm -eq 5 -and $m.Reg -eq 4) { return & $result @{ Op = 'jmp-rip'; Disp = (& $disp32 ($p + 2)) } ($p + 6) }
+        }
+    }
+    throw ('Unrecognized x86-64 instruction at {0}: 0x{1:X2}.' -f $At, $op)
 }
 
 function New-X64Step {
-    # Bytes for one step at Pc. RIP-relative forms take the distance from the
-    # end of the instruction to Target.
+    # Bytes for one step at Pc. Target is the resolved address of the step's
+    # Import GOT slot, Data label or branch Label.
     param([Parameter(Mandatory)] $Step, [long] $Pc, [long] $Target)
     $next = $Pc + (Get-X64StepLength -Step $Step)
-    $displacement = if ($Step.Op -in 'tail', 'lea-data') { $Target - $next } else { 0 }
+    $relative = $Step.Op -in 'tail', 'lea-data', 'load64-data', 'load32-data', 'load-got', 'call-import', 'call-data', 'jz', 'jnz', 'jae', 'jmp'
+    $displacement = if ($relative) { $Target - $next } else { 0 }
+    if ($displacement -lt [int32]::MinValue -or $displacement -gt [int32]::MaxValue) { throw "x86-64 step '$($Step.Op)' target is out of rel32 range." }
     # @() keeps a one-byte instruction an array; PowerShell unrolls it otherwise.
     [byte[]]@(New-X64Instruction -Step $Step -RipDisplacement $displacement)
 }
@@ -5309,21 +5462,187 @@ function Test-X64Step {
     # Decodes the step at Pc with Read-X64Instruction and checks it against the
     # intended step. Returns the step's length.
     param([Parameter(Mandatory)][byte[]] $Image, [Parameter(Mandatory)][long] $Pc, [Parameter(Mandatory)] $Step,
-          $DataAt, $SlotImport, [string] $Name)
+          $DataAt, $SlotImport, [hashtable] $Labels, [string] $Name)
+    if ($Step.Op -eq 'label') {
+        if ($Labels -and $Labels[$Step.Name] -ne $Pc) { throw "$Name label '$($Step.Name)' is at $($Labels[$Step.Name]), expected $Pc." }
+        return 0
+    }
     $d = Read-X64Instruction -Image $Image -At $Pc
     $next = $Pc + $d.Length
     $ok = switch ($Step.Op) {
-        'mov32'     { $d.Op -eq 'mov32' -and $d.Dst -eq $Step.Dst -and $d.Src -eq $Step.Src }
-        'mov64'     { $d.Op -eq 'mov64' -and $d.Dst -eq $Step.Dst -and $d.Src -eq $Step.Src }
-        'movimm32'  { $d.Op -eq 'movimm32' -and $d.Dst -eq $Step.Dst -and $d.Imm -eq $Step.Imm }
-        'movimm64s' { $d.Op -eq 'movimm64s' -and $d.Dst -eq $Step.Dst -and $d.Imm -eq $Step.Imm }
-        'xor32'     { $d.Op -eq 'xor32' -and $d.Dst -eq $Step.Dst -and $d.Src -eq $Step.Dst }
-        'lea-data'  { $d.Op -eq 'lea-rip' -and $d.Dst -eq $Step.Dst -and ($next + $d.Disp) -eq $DataAt[$Step.Data] }
-        'ret'       { $d.Op -eq 'ret' }
-        'tail'      { $d.Op -eq 'jmp-rip' -and $SlotImport[[long]($next + $d.Disp)] -ceq $Step.Import }
+        'mov32'        { $d.Op -eq 'mov32' -and $d.Dst -eq $Step.Dst -and $d.Src -eq $Step.Src }
+        'mov64'        { $d.Op -eq 'mov64' -and $d.Dst -eq $Step.Dst -and $d.Src -eq $Step.Src }
+        'movimm32'     { $d.Op -eq 'movimm32' -and $d.Dst -eq $Step.Dst -and $d.Imm -eq $Step.Imm }
+        'movimm64s'    { $d.Op -eq 'movimm64s' -and $d.Dst -eq $Step.Dst -and $d.Imm -eq $Step.Imm }
+        'xor32'        { $d.Op -eq 'xor32' -and $d.Dst -eq $Step.Dst -and $d.Src -eq $Step.Dst }
+        'lea-data'     { $d.Op -eq 'lea-rip' -and $d.Dst -eq $Step.Dst -and ($next + $d.Disp) -eq $DataAt[$Step.Data] }
+        'load64-data'  { $d.Op -eq 'load64-rip' -and $d.Dst -eq $Step.Dst -and ($next + $d.Disp) -eq $DataAt[$Step.Data] }
+        'load32-data'  { $d.Op -eq 'load32-rip' -and $d.Dst -eq $Step.Dst -and ($next + $d.Disp) -eq $DataAt[$Step.Data] }
+        'load-got'     { $d.Op -eq 'load64-rip' -and $d.Dst -eq $Step.Dst -and $SlotImport[[long]($next + $d.Disp)] -ceq $Step.Import }
+        'load64-base'  { $d.Op -eq 'load64-base' -and $d.Dst -eq $Step.Dst -and $d.Base -eq $Step.Base -and $d.Disp -eq $Step.Disp }
+        'store64-base' { $d.Op -eq 'store64-base' -and $d.Src -eq $Step.Src -and $d.Base -eq $Step.Base -and $d.Disp -eq $Step.Disp }
+        'add64-base'   { $d.Op -eq 'add64-base' -and $d.Dst -eq $Step.Dst -and $d.Base -eq $Step.Base -and $d.Disp -eq $Step.Disp }
+        'store64-rsp'  { $d.Op -eq 'store64-rsp' -and $d.Src -eq $Step.Src -and $d.Disp -eq $Step.Disp }
+        'sub-rsp'      { $d.Op -eq 'sub-rsp' -and $d.Imm -eq $Step.Imm }
+        'add-rsp'      { $d.Op -eq 'add-rsp' -and $d.Imm -eq $Step.Imm }
+        'add64-imm8'   { $d.Op -eq 'add64-imm8' -and $d.Dst -eq $Step.Dst -and $d.Imm -eq $Step.Imm }
+        'test32'       { $d.Op -eq 'test32' -and $d.Reg -eq $Step.Reg }
+        'cmp32-imm'    { $d.Op -eq 'cmp32-imm' -and $d.Reg -eq $Step.Reg -and $d.Imm -eq $Step.Imm }
+        'test64'       { $d.Op -eq 'test64' -and $d.Reg -eq $Step.Reg }
+        'push'         { $d.Op -eq 'push' -and $d.Reg -eq $Step.Reg }
+        'pop'          { $d.Op -eq 'pop' -and $d.Reg -eq $Step.Reg }
+        { $_ -in 'jz', 'jnz', 'jae', 'jmp' } { $d.Op -eq $Step.Op -and ($next + $d.Disp) -eq $Labels[$Step.Label] }
+        'call-import'  { $d.Op -eq 'call-rip' -and $SlotImport[[long]($next + $d.Disp)] -ceq $Step.Import }
+        'call-data'    { $d.Op -eq 'call-rip' -and ($next + $d.Disp) -eq $DataAt[$Step.Data] }
+        'ret'          { $d.Op -eq 'ret' }
+        'tail'         { $d.Op -eq 'jmp-rip' -and $SlotImport[[long]($next + $d.Disp)] -ceq $Step.Import }
     }
     if (-not $ok) { throw "$Name at ${Pc}: expected $($Step.Op), decoded $($d.Op)." }
     $d.Length
+}
+
+function Test-X64CallAbi {
+    <#
+        Checks a step program against the System V AMD64 calling convention
+        before it is encoded, over its control-flow graph rather than its text
+        order. Blocks start at the entry, at labels, and after branches, ret and
+        tail; state flows along every edge to a fixed point:
+        - stack depth below entry (8 at entry: the return address) must agree
+          at every join, and be 16-aligned at every call and 8 at ret and tail;
+        - the registers definitely written are intersected at joins; a call
+          keeps only callee-saved registers and then defines rax (its result);
+        - stack-argument slots stored at [rsp] are intersected at joins and
+          consumed by a call;
+        - a call's declared argument registers and stack slots must be
+          definitely written; a variadic call must follow xor eax, eax in the
+          same block;
+        - callee-saved registers (rbx rbp r12-r15) the function writes must be
+          pushed in its prologue and popped in reverse order immediately before
+          every exit (ret or tail); labels must be defined once, branch targets must
+          exist, and every block must be reachable.
+        OutgoingSlots tracks only outgoing stack-argument slots, which a call
+        consumes. Frame locals that survive calls would need a separate set.
+    #>
+    param([Parameter(Mandatory)][object[]] $Steps, [int] $Parameters = 0, [string] $Name = 'function')
+
+    $argumentRegisters = @(7, 6, 2, 1, 8, 9)
+    $calleeSaved = @(3, 5, 12, 13, 14, 15)
+    $branches = @('jz', 'jnz', 'jae', 'jmp')
+    $labelIndex = @{}
+    for ($i = 0; $i -lt $Steps.Count; $i++) {
+        if ($Steps[$i]['Op'] -eq 'label') {
+            if ($labelIndex.ContainsKey($Steps[$i]['Name'])) { throw "$Name defines label '$($Steps[$i]['Name'])' twice." }
+            $labelIndex[$Steps[$i]['Name']] = $i
+        }
+    }
+    foreach ($step in $Steps) {
+        if ($step['Op'] -in $branches -and -not $labelIndex.ContainsKey($step['Label'])) { throw "$Name branches to undefined label '$($step['Label'])'." }
+    }
+
+    # Prologue: the leading pushes (mov rbp, rsp may sit among them).
+    $saved = [System.Collections.Generic.List[int]]::new()
+    foreach ($step in $Steps) {
+        if ($step['Op'] -eq 'push') { $saved.Add($step['Reg']); continue }
+        if ($step['Op'] -eq 'mov64' -and $step['Dst'] -eq 5 -and $step['Src'] -eq 4) { continue }
+        break
+    }
+    $prologueEnd = 0
+    while ($prologueEnd -lt $Steps.Count -and ($Steps[$prologueEnd]['Op'] -eq 'push' -or ($Steps[$prologueEnd]['Op'] -eq 'mov64' -and $Steps[$prologueEnd]['Dst'] -eq 5 -and $Steps[$prologueEnd]['Src'] -eq 4))) { $prologueEnd++ }
+    for ($i = 0; $i -lt $Steps.Count; $i++) {
+        $step = $Steps[$i]
+        $dst = if ($step['Op'] -in 'push', 'pop') { $null } else { $step['Dst'] }
+        if ($null -ne $dst -and $dst -in $calleeSaved -and $dst -notin $saved) { throw "$Name writes callee-saved register $dst without saving it in its prologue." }
+        if ($step['Op'] -in 'ret', 'tail') {
+            $j = $i - 1
+            foreach ($reg in $saved) {
+                while ($j -ge 0 -and $Steps[$j]['Op'] -eq 'label') { $j-- }
+                if ($j -lt 0 -or $Steps[$j]['Op'] -ne 'pop' -or $Steps[$j]['Reg'] -ne $reg) { throw "$Name exits without popping register $reg in reverse push order." }
+                $j--
+            }
+        }
+    }
+
+    # Basic blocks.
+    $leaders = [System.Collections.Generic.SortedSet[int]]::new()
+    [void]$leaders.Add(0)
+    for ($i = 0; $i -lt $Steps.Count; $i++) {
+        if ($Steps[$i]['Op'] -eq 'label') { [void]$leaders.Add($i) }
+        if ($Steps[$i]['Op'] -in ($branches + @('ret', 'tail')) -and $i + 1 -lt $Steps.Count) { [void]$leaders.Add($i + 1) }
+    }
+    $starts = @($leaders)
+    $blockOf = @{}
+    for ($b = 0; $b -lt $starts.Count; $b++) {
+        $end = if ($b + 1 -lt $starts.Count) { $starts[$b + 1] } else { $Steps.Count }
+        for ($i = $starts[$b]; $i -lt $end; $i++) { $blockOf[$i] = $b }
+    }
+
+    $copy = { param($s) [pscustomobject]@{ Depth = $s.Depth; Written = [System.Collections.Generic.HashSet[int]]::new($s.Written); OutgoingSlots = [System.Collections.Generic.HashSet[int]]::new($s.OutgoingSlots) } }
+    $entry = [pscustomobject]@{ Depth = 8; Written = [System.Collections.Generic.HashSet[int]]::new(); OutgoingSlots = [System.Collections.Generic.HashSet[int]]::new() }
+    for ($a = 0; $a -lt $Parameters; $a++) { [void]$entry.Written.Add($argumentRegisters[$a]) }
+    $inState = @{ 0 = $entry }
+    $queue = [System.Collections.Generic.Queue[int]]::new(); $queue.Enqueue(0)
+    $flow = {
+        param([int] $target, $state)
+        if (-not $inState.ContainsKey($target)) { $inState[$target] = & $copy $state; $queue.Enqueue($target); return }
+        $current = $inState[$target]
+        if ($current.Depth -ne $state.Depth) { throw "$Name reaches block $target with stack depths $($current.Depth) and $($state.Depth)." }
+        $before = $current.Written.Count + $current.OutgoingSlots.Count
+        $current.Written.IntersectWith($state.Written)
+        $current.OutgoingSlots.IntersectWith($state.OutgoingSlots)
+        if ($current.Written.Count + $current.OutgoingSlots.Count -ne $before) { $queue.Enqueue($target) }
+    }
+    $guard = 0
+    while ($queue.Count -gt 0) {
+        if (++$guard -gt 10000) { throw "${Name}: control-flow analysis did not converge." }
+        $b = $queue.Dequeue()
+        $state = & $copy $inState[$b]
+        $end = if ($b + 1 -lt $starts.Count) { $starts[$b + 1] } else { $Steps.Count }
+        $previous = $null
+        $fallsThrough = $true
+        for ($i = $starts[$b]; $i -lt $end; $i++) {
+            $step = $Steps[$i]
+            $op = $step['Op']
+            switch ($op) {
+                'label'       { continue }
+                'push'        { $state.Depth += 8 }
+                'pop'         { $state.Depth -= 8; [void]$state.Written.Add($step['Reg']) }
+                'sub-rsp'     { $state.Depth += $step['Imm'] }
+                'add-rsp'     { $state.Depth -= $step['Imm'] }
+                'store64-rsp' { [void]$state.OutgoingSlots.Add($step['Disp']) }
+                { $_ -in 'call-import', 'call-data' } {
+                    $callee = "$($step['Import'])$($step['Data'])"
+                    if ($state.Depth % 16 -ne 0) { throw "$Name calls $callee with the stack $($state.Depth) bytes below entry, not 16-byte aligned." }
+                    for ($a = 0; $a -lt [int]$step['Args']; $a++) {
+                        if (-not $state.Written.Contains($argumentRegisters[$a])) { throw "$Name calls $callee without setting argument $($a + 1) on every path." }
+                    }
+                    for ($k = 0; $k -lt [int]$step['StackArgs']; $k++) {
+                        if (-not $state.OutgoingSlots.Contains(8 * $k)) { throw "$Name calls $callee without storing stack argument $($k + 1) at [rsp+$(8 * $k)] on every path." }
+                    }
+                    if ($step['Variadic'] -and -not ($null -ne $previous -and $previous['Op'] -eq 'xor32' -and $previous['Dst'] -eq 0)) { throw "$Name makes the variadic call $callee without clearing eax immediately before it." }
+                    $state.Written.IntersectWith([int[]]$calleeSaved)
+                    [void]$state.Written.Add(0)
+                    $state.OutgoingSlots.Clear()
+                }
+                { $_ -in 'ret', 'tail' } {
+                    if ($state.Depth -ne 8) { throw "$Name leaves with the stack $($state.Depth) bytes below entry; it must be 8." }
+                    $fallsThrough = $false
+                }
+                { $_ -in 'jz', 'jnz', 'jae' } { & $flow $blockOf[$labelIndex[$step['Label']]] $state }
+                'jmp' { & $flow $blockOf[$labelIndex[$step['Label']]] $state; $fallsThrough = $false }
+                default { if ($null -ne $step['Dst']) { [void]$state.Written.Add($step['Dst']) } }
+            }
+            if ($op -ne 'label') { $previous = $step }
+        }
+        if ($fallsThrough -and $b + 1 -lt $starts.Count) { & $flow ($b + 1) $state }
+        if ($fallsThrough -and $b + 1 -ge $starts.Count) { throw "$Name runs off its end without ret or tail." }
+    }
+    for ($b = 0; $b -lt $starts.Count; $b++) {
+        if (-not $inState.ContainsKey($b)) {
+            $end = if ($b + 1 -lt $starts.Count) { $starts[$b + 1] } else { $Steps.Count }
+            $code = @($Steps[$starts[$b]..($end - 1)] | Where-Object { $_['Op'] -ne 'label' })
+            if ($code.Count) { throw "$Name has unreachable code at step $($starts[$b])." }
+        }
+    }
 }
 
 function New-PslNativeLibraryX64 {
@@ -5481,7 +5800,7 @@ function Test-A32Step {
     # Decodes the step at Pc with Read-A32Instruction and checks it against the
     # intended step. Returns the step's length.
     param([Parameter(Mandatory)][byte[]] $Image, [Parameter(Mandatory)][long] $Pc, [Parameter(Mandatory)] $Step,
-          $DataAt, $SlotImport, [string] $Name)
+          $DataAt, $SlotImport, [hashtable] $Labels, [string] $Name)
     $u32 = { param([long] $At) [BitConverter]::ToUInt32($Image, [int]$At) }
     $d = Read-A32Instruction -Word (& $u32 $Pc)
     $ok = switch ($Step.Op) {
@@ -5576,26 +5895,227 @@ function Get-AndroidLogPriority {
     throw "log.h declares no $Name."
 }
 
+function Get-HostRuntimeContractLayout {
+    # struct host_runtime_contract in lib/host_runtime_contract.h: every member
+    # is size_t, a pointer or a function pointer, so each is one pointer wide
+    # and a member's offset is its position times the pointer size.
+    param([Parameter(Mandatory)][int] $PointerSize)
+    $text = Import-LibSourceText -Path 'host_runtime_contract.h'
+    $match = [regex]::Match($text, '(?s)struct host_runtime_contract\s*\{(.*?)\n\};')
+    if (-not $match.Success) { throw 'host_runtime_contract.h does not declare struct host_runtime_contract.' }
+    $body = [regex]::Replace($match.Groups[1].Value, '//[^\n]*', '')
+    $members = [System.Collections.Generic.List[string]]::new()
+    foreach ($m in [regex]::Matches($body, '(?s)\(\s*HOST_CONTRACT_CALLTYPE\s*\*\s*(\w+)\s*\)\s*\(.*?\);|(?m)^\s*(?:size_t|void\s*\*)\s*(\w+)\s*;')) {
+        $members.Add($(if ($m.Groups[1].Success) { $m.Groups[1].Value } else { $m.Groups[2].Value }))
+    }
+    if ($members[0] -cne 'size' -or 'external_assembly_probe' -cnotin $members) { throw "host_runtime_contract members parsed as: $($members -join ', ')." }
+    $offsets = [ordered]@{}
+    for ($i = 0; $i -lt $members.Count; $i++) { $offsets[$members[$i]] = $i * $PointerSize }
+    [pscustomobject]@{ Size = $members.Count * $PointerSize; Offsets = $offsets; Members = @($members) }
+}
+
 function New-NativeHostLibrary {
-    # Gate 1: libpwsh-host.so. ANativeActivity_onCreate (lib/native_activity.h)
-    # makes one __android_log_write(ANDROID_LOG_INFO, tag, text) call
-    # (lib/log.h) as a tail call and returns. The activity argument is unused.
-    param([int] $PageSize = 16384)
+    <#
+        Gate 2a: libpwsh-host.so owns CoreCLR start-up. ANativeActivity_onCreate
+        (lib/native_activity.h) builds three runtime properties the way the
+        pinned .NET for Android host does (HOST_RUNTIME_CONTRACT formatted with
+        snprintf "%p", RUNTIME_IDENTIFIER, APP_CONTEXT_BASE_DIRECTORY as
+        internalDataPath plus "/"), calls coreclr_initialize and
+        coreclr_create_delegate (lib/coreclrhost.h) for
+        Dev.MansfieldPlumbing.Pwsh.NativeHost.Admit, calls it, and logs what it
+        returns. The contract's external_assembly_probe
+        (lib/host_runtime_contract.h) is pwsh_assembly_probe: a linear strcmp
+        walk over a table of the store's own entries, returning a pointer into
+        the mapped store. libcoreclr.so and the store library are DT_NEEDED, so
+        the linker loads them and both resolve through the GOT.
+    #>
+    param(
+        [Parameter(Mandatory)][object[]] $StoreEntries,
+        [Parameter(Mandatory)][string] $StoreLibrary,
+        [Parameter(Mandatory)][string] $StoreSymbol,
+        [int] $PageSize = 16384
+    )
+    if ($Architecture -ne 'x64') { throw "Gate 2a is implemented for x64 only; $Architecture follows once x64 passes on hardware." }
 
     $info = Get-AndroidLogPriority -Name 'ANDROID_LOG_INFO'
-    $steps = switch ($Architecture) {
-        'arm64' { @(@{ Op = 'movz'; Rd = 0; Imm = $info; Is64 = $false }, @{ Op = 'adr-data'; Rd = 1; Data = 'tag' }, @{ Op = 'adr-data'; Rd = 2; Data = 'text' }, @{ Op = 'tail'; Import = '__android_log_write' }) }
-        'x64'   { @(@{ Op = 'movimm32'; Dst = 7; Imm = $info }, @{ Op = 'lea-data'; Dst = 6; Data = 'tag' }, @{ Op = 'lea-data'; Dst = 2; Data = 'text' }, @{ Op = 'tail'; Import = '__android_log_write' }) }
-        'arm32' { @(@{ Op = 'movimm'; Rd = 0; Imm = $info }, @{ Op = 'adr-data'; Rd = 1; Data = 'tag' }, @{ Op = 'adr-data'; Rd = 2; Data = 'text' }, @{ Op = 'tail'; Import = '__android_log_write' }) }
-        default { throw "No native host section for $Architecture." }
-    }
-    $functions = [ordered]@{ 'ANativeActivity_onCreate' = $steps }
+    $errorPriority = Get-AndroidLogPriority -Name 'ANDROID_LOG_ERROR'
+    $ascii = { param([string] $s) [System.Text.Encoding]::ASCII.GetBytes("$s`0") }
     $data = [ordered]@{
-        tag  = [System.Text.Encoding]::ASCII.GetBytes("Pwsh`0")
-        text = [System.Text.Encoding]::ASCII.GetBytes("GATE1 ANativeActivity_onCreate`0")
+        fmtDirectory = & $ascii '%s/'
+        fmtPointer   = & $ascii '%p'
+        packageName  = & $ascii $script:PackageName
+        domainName   = & $ascii 'Pwsh'
+        keyContract  = & $ascii 'HOST_RUNTIME_CONTRACT'
+        keyRid       = & $ascii 'RUNTIME_IDENTIFIER'
+        keyBase      = & $ascii 'APP_CONTEXT_BASE_DIRECTORY'
+        rid          = & $ascii $script:Target.Rid
+        assemblyName = & $ascii 'Pwsh'
+        typeName     = & $ascii 'Dev.MansfieldPlumbing.Pwsh.NativeHost'
+        methodName   = & $ascii 'Admit'
+        tag          = & $ascii 'Pwsh'
+        fmtAdmit     = & $ascii 'GATE2A Admit returned 0x%08x'
+        fmtInit      = & $ascii 'GATE2A coreclr_initialize failed 0x%08x'
+        fmtDelegate  = & $ascii 'GATE2A coreclr_create_delegate failed 0x%08x'
+        fmtDirectory2 = & $ascii 'GATE2A base directory does not fit (%d)'
+        fmtContract  = & $ascii 'GATE2A contract pointer does not fit (%d)'
     }
-    $library = New-ElfCodeLibrary -Soname 'libpwsh-host.so' -Needed @('liblog.so') -Functions $functions -Data $data -PageSize $PageSize
+    for ($i = 0; $i -lt $StoreEntries.Count; $i++) { $data["assembly$i"] = & $ascii $StoreEntries[$i].Name }
+
+    # host_runtime_contract, laid out from the pinned header: zero except its
+    # size and external_assembly_probe.
+    $layout = Get-HostRuntimeContractLayout -PointerSize 8
+    $contract = [byte[]]::new($layout.Size)
+    [System.Array]::Copy([BitConverter]::GetBytes([uint64]$layout.Size), 0, $contract, $layout.Offsets['size'], 8)
+    $probeOffset = $layout.Offsets['external_assembly_probe']
+    # The probe table: name pointer, data offset in the store, data size; a
+    # zero name pointer ends it.
+    $table = [byte[]]::new(24 * ($StoreEntries.Count + 1))
+    $tablePointers = for ($i = 0; $i -lt $StoreEntries.Count; $i++) {
+        [System.Array]::Copy([BitConverter]::GetBytes([uint64]$StoreEntries[$i].Offset), 0, $table, 24 * $i + 8, 8)
+        [System.Array]::Copy([BitConverter]::GetBytes([uint64]$StoreEntries[$i].Size), 0, $table, 24 * $i + 16, 8)
+        @{ At = 24 * $i; Target = "assembly$i" }
+    }
+    $writable = [ordered]@{
+        baseDirectory = [byte[]]::new(512)
+        contractText  = [byte[]]::new(32)
+        hostHandle    = [byte[]]::new(8)
+        domainId      = [byte[]]::new(8)
+        admit         = [byte[]]::new(8)
+        propertyKeys   = @{ Bytes = [byte[]]::new(24); Pointers = @(@{ At = 0; Target = 'keyContract' }, @{ At = 8; Target = 'keyRid' }, @{ At = 16; Target = 'keyBase' }) }
+        propertyValues = @{ Bytes = [byte[]]::new(24); Pointers = @(@{ At = 0; Target = 'contractText' }, @{ At = 8; Target = 'rid' }, @{ At = 16; Target = 'baseDirectory' }) }
+        contract      = @{ Bytes = $contract; Pointers = @(@{ At = $probeOffset; Target = 'pwsh_assembly_probe' }) }
+        probeTable    = @{ Bytes = $table; Pointers = @($tablePointers) }
+    }
+
+    # System V AMD64: rax 0, rcx 1, rdx 2, rbx 3, rsp 4, rbp 5, rsi 6, rdi 7, r8 8, r9 9, r12-r14 12-14.
+    $logFailure = { param([string] $label, [string] $format) @(
+        @{ Op = 'label'; Name = $label },
+        @{ Op = 'mov32'; Dst = 1; Src = 0 },
+        @{ Op = 'movimm32'; Dst = 7; Imm = $errorPriority },
+        @{ Op = 'lea-data'; Dst = 6; Data = 'tag' },
+        @{ Op = 'lea-data'; Dst = 2; Data = $format },
+        @{ Op = 'xor32'; Dst = 0 },
+        @{ Op = 'call-import'; Import = '__android_log_print'; Args = 4; Variadic = $true },
+        @{ Op = 'jmp'; Label = 'done' }) }
+    $onCreate = @(
+        @{ Op = 'push'; Reg = 5 },
+        @{ Op = 'mov64'; Dst = 5; Src = 4 },
+        @{ Op = 'push'; Reg = 3 },
+        @{ Op = 'sub-rsp'; Imm = 8 },                                   # the 7th-argument slot; keeps calls 16-byte aligned
+        @{ Op = 'mov64'; Dst = 3; Src = 7 },                            # rbx = activity
+        # snprintf(baseDirectory, 512, "%s/", activity->internalDataPath)
+        @{ Op = 'lea-data'; Dst = 7; Data = 'baseDirectory' },
+        @{ Op = 'movimm32'; Dst = 6; Imm = 512 },
+        @{ Op = 'lea-data'; Dst = 2; Data = 'fmtDirectory' },
+        @{ Op = 'load64-base'; Dst = 1; Base = 3; Disp = 32 },          # ANativeActivity: callbacks, vm, env, clazz, internalDataPath
+        @{ Op = 'xor32'; Dst = 0 },
+        @{ Op = 'call-import'; Import = 'snprintf'; Args = 4; Variadic = $true },
+        @{ Op = 'cmp32-imm'; Reg = 0; Imm = 512 },
+        @{ Op = 'jae'; Label = 'directoryFailed' },
+        # snprintf(contractText, 32, "%p", &contract)
+        @{ Op = 'lea-data'; Dst = 7; Data = 'contractText' },
+        @{ Op = 'movimm32'; Dst = 6; Imm = 32 },
+        @{ Op = 'lea-data'; Dst = 2; Data = 'fmtPointer' },
+        @{ Op = 'lea-data'; Dst = 1; Data = 'contract' },
+        @{ Op = 'xor32'; Dst = 0 },
+        @{ Op = 'call-import'; Import = 'snprintf'; Args = 4; Variadic = $true },
+        @{ Op = 'cmp32-imm'; Reg = 0; Imm = 32 },
+        @{ Op = 'jae'; Label = 'contractFailed' },
+        # coreclr_initialize(package, "Pwsh", 3, keys, values, &hostHandle, &domainId)
+        @{ Op = 'lea-data'; Dst = 7; Data = 'packageName' },
+        @{ Op = 'lea-data'; Dst = 6; Data = 'domainName' },
+        @{ Op = 'movimm32'; Dst = 2; Imm = 3 },
+        @{ Op = 'lea-data'; Dst = 1; Data = 'propertyKeys' },
+        @{ Op = 'lea-data'; Dst = 8; Data = 'propertyValues' },
+        @{ Op = 'lea-data'; Dst = 9; Data = 'hostHandle' },
+        @{ Op = 'lea-data'; Dst = 0; Data = 'domainId' },
+        @{ Op = 'store64-rsp'; Src = 0; Disp = 0 },
+        @{ Op = 'call-import'; Import = 'coreclr_initialize'; Args = 6; StackArgs = 1 },
+        @{ Op = 'test32'; Reg = 0 },
+        @{ Op = 'jnz'; Label = 'initFailed' },
+        # coreclr_create_delegate(hostHandle, domainId, "Pwsh", type, "Admit", &admit)
+        @{ Op = 'load64-data'; Dst = 7; Data = 'hostHandle' },
+        @{ Op = 'load32-data'; Dst = 6; Data = 'domainId' },
+        @{ Op = 'lea-data'; Dst = 2; Data = 'assemblyName' },
+        @{ Op = 'lea-data'; Dst = 1; Data = 'typeName' },
+        @{ Op = 'lea-data'; Dst = 8; Data = 'methodName' },
+        @{ Op = 'lea-data'; Dst = 9; Data = 'admit' },
+        @{ Op = 'call-import'; Import = 'coreclr_create_delegate'; Args = 6 },
+        @{ Op = 'test32'; Reg = 0 },
+        @{ Op = 'jnz'; Label = 'delegateFailed' },
+        # Admit(); __android_log_print(INFO, "Pwsh", "GATE2A Admit returned 0x%08x", result)
+        @{ Op = 'call-data'; Data = 'admit'; Args = 0 },
+        @{ Op = 'mov32'; Dst = 1; Src = 0 },
+        @{ Op = 'movimm32'; Dst = 7; Imm = $info },
+        @{ Op = 'lea-data'; Dst = 6; Data = 'tag' },
+        @{ Op = 'lea-data'; Dst = 2; Data = 'fmtAdmit' },
+        @{ Op = 'xor32'; Dst = 0 },
+        @{ Op = 'call-import'; Import = '__android_log_print'; Args = 4; Variadic = $true },
+        @{ Op = 'jmp'; Label = 'done' }
+    ) + (& $logFailure 'directoryFailed' 'fmtDirectory2') + (& $logFailure 'contractFailed' 'fmtContract') + (& $logFailure 'initFailed' 'fmtInit') + (& $logFailure 'delegateFailed' 'fmtDelegate') + @(
+        @{ Op = 'label'; Name = 'done' },
+        @{ Op = 'add-rsp'; Imm = 8 },
+        @{ Op = 'pop'; Reg = 3 },
+        @{ Op = 'pop'; Reg = 5 },
+        @{ Op = 'ret' })
+
+    # bool pwsh_assembly_probe(const char* path, void** data_start, int64_t* size)
+    $probe = @(
+        @{ Op = 'push'; Reg = 3 },
+        @{ Op = 'push'; Reg = 12 },
+        @{ Op = 'push'; Reg = 13 },
+        @{ Op = 'push'; Reg = 14 },
+        @{ Op = 'sub-rsp'; Imm = 8 },
+        @{ Op = 'mov64'; Dst = 12; Src = 7 },
+        @{ Op = 'mov64'; Dst = 13; Src = 6 },
+        @{ Op = 'mov64'; Dst = 14; Src = 2 },
+        @{ Op = 'lea-data'; Dst = 3; Data = 'probeTable' },
+        @{ Op = 'label'; Name = 'next' },
+        @{ Op = 'load64-base'; Dst = 6; Base = 3; Disp = 0 },
+        @{ Op = 'test64'; Reg = 6 },
+        @{ Op = 'jz'; Label = 'missing' },
+        @{ Op = 'mov64'; Dst = 7; Src = 12 },
+        @{ Op = 'call-import'; Import = 'strcmp'; Args = 2 },
+        @{ Op = 'test32'; Reg = 0 },
+        @{ Op = 'jz'; Label = 'found' },
+        @{ Op = 'add64-imm8'; Dst = 3; Imm = 24 },
+        @{ Op = 'jmp'; Label = 'next' },
+        @{ Op = 'label'; Name = 'found' },
+        @{ Op = 'load-got'; Dst = 0; Import = $StoreSymbol },
+        @{ Op = 'add64-base'; Dst = 0; Base = 3; Disp = 8 },
+        @{ Op = 'store64-base'; Src = 0; Base = 13; Disp = 0 },
+        @{ Op = 'load64-base'; Dst = 0; Base = 3; Disp = 16 },
+        @{ Op = 'store64-base'; Src = 0; Base = 14; Disp = 0 },
+        @{ Op = 'movimm32'; Dst = 0; Imm = 1 },
+        @{ Op = 'jmp'; Label = 'out' },
+        @{ Op = 'label'; Name = 'missing' },
+        @{ Op = 'xor32'; Dst = 0 },
+        @{ Op = 'label'; Name = 'out' },
+        @{ Op = 'add-rsp'; Imm = 8 },
+        @{ Op = 'pop'; Reg = 14 },
+        @{ Op = 'pop'; Reg = 13 },
+        @{ Op = 'pop'; Reg = 12 },
+        @{ Op = 'pop'; Reg = 3 },
+        @{ Op = 'ret' })
+
+    Test-X64CallAbi -Steps $onCreate -Parameters 3 -Name 'ANativeActivity_onCreate'
+    Test-X64CallAbi -Steps $probe -Parameters 3 -Name 'pwsh_assembly_probe'
+
+    $functions = [ordered]@{ 'ANativeActivity_onCreate' = $onCreate; 'pwsh_assembly_probe' = $probe }
+    $library = New-ElfCodeLibrary -Soname 'libpwsh-host.so' -Needed @('libc.so', 'liblog.so', 'libcoreclr.so', $StoreLibrary) `
+        -Functions $functions -Data $data -WritableData $writable -PageSize $PageSize
     $report = Test-ElfCodeLibrary -Library $library
+
+    # The contract as emitted: size, and every member zero but the probe, whose
+    # slot is relocated to pwsh_assembly_probe.
+    $contractAt = $library.DataAt['contract']
+    if ([BitConverter]::ToUInt64($library.Bytes, $contractAt + $layout.Offsets['size']) -ne $layout.Size) { throw 'The emitted host_runtime_contract.size is not the pinned structure size.' }
+    foreach ($member in $layout.Members) {
+        if ($member -in 'size', 'external_assembly_probe') { continue }
+        if ([BitConverter]::ToUInt64($library.Bytes, $contractAt + $layout.Offsets[$member]) -ne 0) { throw "host_runtime_contract.$member is not zero." }
+    }
+    $probeSlot = @((Read-ElfImage -Image $library.Bytes).Relocations | Where-Object { $_.Offset -eq $contractAt + $probeOffset })
+    if ($probeSlot.Count -ne 1 -or $probeSlot[0].Addend -ne $library.Exports['pwsh_assembly_probe']) { throw 'host_runtime_contract.external_assembly_probe is not relocated to pwsh_assembly_probe.' }
     [pscustomobject]@{ Library = $library; Report = $report }
 }
 
@@ -5606,7 +6126,7 @@ function Assert-NativeAdmissionApk {
     param([Parameter(Mandatory)][string[]] $EntryNames)
 
     $abi = $script:Target.Abi
-    $forbidden = @($EntryNames | Where-Object { $_ -like '*.dex' -or $_ -like '*/libmonodroid.so' -or $_ -like '*/libxamarin-app.so' -or $_ -like '*/libassembly-store.so' })
+    $forbidden = @($EntryNames | Where-Object { $_ -like '*.dex' -or $_ -like '*/libmonodroid.so' -or $_ -like '*/libxamarin-app.so' })
     if ($forbidden.Count) { throw "The NativeActivity APK carries Xamarin or DEX entries: $($forbidden -join ', ')" }
     if ("lib/$abi/libpwsh-host.so" -notin $EntryNames) { throw "The NativeActivity APK lacks lib/$abi/libpwsh-host.so." }
 
@@ -5621,27 +6141,71 @@ function Assert-NativeAdmissionApk {
     if ($libName.Count -ne 1 -or $libName[0].Attributes['value'] -cne 'pwsh-host') { throw 'The manifest does not name pwsh-host as android.app.lib_name.' }
 
     $library = Read-ElfImage -Image ([byte[]]$script:BuildContext.NativeHost.Bytes)
-    if ((@($library.Needed) -join ',') -cne 'liblog.so') { throw "libpwsh-host.so needs $(@($library.Needed) -join ', '); only liblog.so is allowed." }
-    if (-not $library.Resolved.ContainsKey('ANativeActivity_onCreate')) { throw 'libpwsh-host.so does not export ANativeActivity_onCreate.' }
+    $needed = (@($library.Needed) | Sort-Object) -join ','
+    if ($needed -cne 'libassembly-store.so,libc.so,libcoreclr.so,liblog.so') { throw "libpwsh-host.so needs $needed; only libc, liblog, libcoreclr and the store library are allowed." }
+    foreach ($export in 'ANativeActivity_onCreate', 'pwsh_assembly_probe') {
+        if (-not $library.Resolved.ContainsKey($export)) { throw "libpwsh-host.so does not export $export." }
+    }
+    foreach ($entry in "lib/$abi/libcoreclr.so", "lib/$abi/libassembly-store.so") {
+        if ($entry -notin $EntryNames) { throw "The NativeActivity APK lacks $entry." }
+    }
 
-    Write-Host ('[PASS] NativeActivity admission: {0} entries, none DEX or Xamarin; manifest has no provider, hasCode=false, android.app.NativeActivity with lib_name pwsh-host; libpwsh-host.so needs only liblog.so.' -f
+    Write-Host ('[PASS] NativeActivity admission: {0} entries, none DEX, libmonodroid or libxamarin-app; manifest has no provider, hasCode=false, android.app.NativeActivity with lib_name pwsh-host; libpwsh-host.so needs only libc, liblog, libcoreclr and the store library.' -f
         $EntryNames.Count) -ForegroundColor Green
+}
+
+function Test-NativeEmitterControls {
+    <#
+        Regression controls for defects already found in the emitter. They run
+        on every build, before any library is emitted:
+        - labels named like dictionary members (Keys, Values, Count, Item) are
+          placed exactly as ordinary labels, and steps without optional fields
+          encode under StrictMode;
+        - on x86-64, the ABI checker rejects a variadic call without xor eax,
+          a misaligned call, an argument set on only one branch before a join,
+          unequal stack depths at a join, and an unsaved callee-saved write.
+    #>
+    $return = switch ($script:Target.Isa) {
+        'A64' { @{ Op = 'ret' } }
+        'X64' { @{ Op = 'ret' } }
+        'A32' { @{ Op = 'bx'; Rm = 14 } }
+    }
+    $functions = [ordered]@{ Keys = @($return); Count = @($return) }
+    $data = [ordered]@{ Values = [byte[]]@(1, 2, 3, 4); Item = [byte[]]@(5, 6, 7, 8) }
+    $writable = [ordered]@{ Keys2 = [byte[]]::new(8); Count2 = @{ Bytes = [byte[]]::new(8); Pointers = @(@{ At = 0; Target = 'Values' }) } }
+    $library = New-ElfCodeLibrary -Soname 'libcontrol.so' -Needed @('libc.so') -Functions $functions -Data $data -WritableData $writable -PageSize 16384
+    [void](Test-ElfCodeLibrary -Library $library)
+    foreach ($label in 'Keys', 'Count', 'Values', 'Item', 'Keys2', 'Count2') {
+        if (-not $library.DataAt.ContainsKey($label)) { throw "Emitter control: label '$label' was not placed." }
+    }
+    if (@($library.Exports.PSBase.Keys).Count -ne 2) { throw 'Emitter control: functions named Keys and Count were not both exported.' }
+    $controls = 2
+
+    if ($script:Target.Isa -eq 'X64') {
+        $call = @{ Op = 'call-import'; Import = 'f'; Args = 1 }
+        $cases = [ordered]@{
+            'variadic call without xor eax' = @(@{ Op = 'push'; Reg = 3 }, @{ Op = 'lea-data'; Dst = 7; Data = 'a' }, @{ Op = 'call-import'; Import = 'f'; Args = 1; Variadic = $true }, @{ Op = 'pop'; Reg = 3 }, @{ Op = 'ret' })
+            'misaligned call'               = @(@{ Op = 'lea-data'; Dst = 7; Data = 'a' }, $call, @{ Op = 'ret' })
+            'argument set on one branch'    = @(@{ Op = 'push'; Reg = 3 }, @{ Op = 'test32'; Reg = 0 }, @{ Op = 'jz'; Label = 'join' }, @{ Op = 'lea-data'; Dst = 7; Data = 'a' }, @{ Op = 'label'; Name = 'join' }, $call, @{ Op = 'pop'; Reg = 3 }, @{ Op = 'ret' })
+            'unequal depth at a join'       = @(@{ Op = 'test32'; Reg = 0 }, @{ Op = 'jz'; Label = 'join' }, @{ Op = 'sub-rsp'; Imm = 8 }, @{ Op = 'label'; Name = 'join' }, @{ Op = 'ret' })
+            'unsaved callee-saved write'    = @(@{ Op = 'mov64'; Dst = 3; Src = 7 }, @{ Op = 'ret' })
+            'tail without restoring'      = @(@{ Op = 'push'; Reg = 3 }, @{ Op = 'tail'; Import = 'f' })
+            'unreachable code'            = @(@{ Op = 'ret' }, @{ Op = 'xor32'; Dst = 0 }, @{ Op = 'ret' })
+        }
+        foreach ($case in $cases.PSBase.Keys) {
+            $rejected = $false
+            try { Test-X64CallAbi -Steps $cases[$case] -Name 'control' } catch { $rejected = $true }
+            if (-not $rejected) { throw "ABI control '$case' was accepted." }
+            $controls++
+        }
+    }
+    $controls
 }
 
 function Invoke-NativeStep {
 
-    if ($Admission -eq 'NativeActivity') {
-        $pageSize = [int](Get-AndroidNativeContract).elf.maxPageSize
-        $nativeHost = New-NativeHostLibrary -PageSize $pageSize
-        $hostPath = Join-Path (Join-Path $OutputDirectory $script:Target.Abi) 'libpwsh-host.so'
-        if ($PSCmdlet.ShouldProcess($hostPath, 'Write libpwsh-host')) {
-            Write-BuildFile -Intermediate -Path $hostPath -Bytes $nativeHost.Library.Bytes
-        }
-        $script:BuildContext.NativeHost = [pscustomobject]@{ Path = $hostPath; Bytes = $nativeHost.Library.Bytes }
-        Write-Host ('[PASS] Step 6 complete: libpwsh-host.so emitted as {0} bytes exporting ANativeActivity_onCreate, one liblog import through a BIND_NOW GOT, {1} instructions decoded back and checked.' -f
-            $nativeHost.Report.ImageSize, $nativeHost.Report.Steps) -ForegroundColor Green
-        return
-    }
+    $controls = Test-NativeEmitterControls
+    Write-Host ('[PASS] Emitter controls: {0} regression controls held.' -f $controls) -ForegroundColor Green
 
     $contract = Get-AndroidNativeContract
     $storeBytes = [byte[]]$script:BuildContext.AssemblyStore.Bytes
@@ -5679,20 +6243,32 @@ function Invoke-NativeStep {
         Sha256 = $libraryHash
     }
 
-    # libpsl-native: SMA resolves it by name during startup logging.
-    $psl = switch ($Architecture) {
-        'arm64' { New-PslNativeLibrary -PageSize $pageSize }
-        'x64'   { New-PslNativeLibraryX64 -PageSize $pageSize }
-        'arm32' { New-PslNativeLibraryArm32 -PageSize $pageSize }
-        default { throw "No libpsl-native section for $Architecture." }
+    if ($Admission -eq 'NativeActivity') {
+        $nativeHost = New-NativeHostLibrary -StoreEntries $script:BuildContext.AssemblyStore.Entries -StoreLibrary $soname -StoreSymbol $symbol -PageSize $pageSize
+        $hostPath = Join-Path $outputDirectory 'libpwsh-host.so'
+        if ($PSCmdlet.ShouldProcess($hostPath, 'Write libpwsh-host')) {
+            Write-BuildFile -Intermediate -Path $hostPath -Bytes $nativeHost.Library.Bytes
+        }
+        $script:BuildContext.NativeHost = [pscustomobject]@{ Path = $hostPath; Bytes = $nativeHost.Library.Bytes }
+        Write-Host ('[PASS] libpwsh-host.so emitted: {0} bytes, exports {1}, {2} imports through a BIND_NOW GOT, a {3}-entry assembly probe table, {4} instructions decoded back and checked.' -f
+            $nativeHost.Report.ImageSize, ($nativeHost.Library.Exports.PSBase.Keys -join ' and '), $nativeHost.Report.Imports, $script:BuildContext.AssemblyStore.Entries.Count, $nativeHost.Report.Steps) -ForegroundColor Green
     }
-    $pslPath = Join-Path $outputDirectory 'libpsl-native.so'
-    if ($PSCmdlet.ShouldProcess($pslPath, 'Write libpsl-native')) {
-        Write-BuildFile -Intermediate -Path $pslPath -Bytes $psl.Library.Bytes
+    else {
+        # libpsl-native: SMA resolves it by name during startup logging.
+        $psl = switch ($Architecture) {
+            'arm64' { New-PslNativeLibrary -PageSize $pageSize }
+            'x64'   { New-PslNativeLibraryX64 -PageSize $pageSize }
+            'arm32' { New-PslNativeLibraryArm32 -PageSize $pageSize }
+            default { throw "No libpsl-native section for $Architecture." }
+        }
+        $pslPath = Join-Path $outputDirectory 'libpsl-native.so'
+        if ($PSCmdlet.ShouldProcess($pslPath, 'Write libpsl-native')) {
+            Write-BuildFile -Intermediate -Path $pslPath -Bytes $psl.Library.Bytes
+        }
+        $script:BuildContext.PslNative = [pscustomobject]@{ Path = $pslPath; Bytes = $psl.Library.Bytes }
+        Write-Host ('[PASS] libpsl-native.so emitted: {0} bytes, {1} exports, {2} libc imports through a BIND_NOW GOT, {3} instructions decoded back and checked.' -f
+            $psl.Report.ImageSize, $psl.Report.Exports, $psl.Report.Imports, $psl.Report.Steps) -ForegroundColor Green
     }
-    $script:BuildContext.PslNative = [pscustomobject]@{ Path = $pslPath; Bytes = $psl.Library.Bytes }
-    Write-Host ('[PASS] libpsl-native.so emitted: {0} bytes, {1} exports, {2} libc imports through a BIND_NOW GOT, {3} instructions decoded back and checked.' -f
-        $psl.Report.ImageSize, $psl.Report.Exports, $psl.Report.Imports, $psl.Report.Steps) -ForegroundColor Green
 
     Write-Host (('[PASS] Step 6 complete: {0} emitted as an ' + $script:Target.Machine + ' ET_DYN image of {1} bytes, carrying the store at offset {2} under the ''{3}'' symbol with {4} bytes of ELF overhead. Resolved through the emitted hash table exactly as dlsym would. SHA-256 {5}') -f
         $soname,
@@ -6592,6 +7168,11 @@ function Invoke-AssembleStep {
         & $add 'resources.arsc' (New-ResourceTable -PackageName $script:PackageName -IconPath 'res/mipmap/ic_launcher.png') $true 4
         & $add 'res/mipmap/ic_launcher.png' (Import-LibSourceBytes -Path 'ic_launcher.png') $true 4
         & $add "lib/$abi/libpwsh-host.so" ([byte[]]$script:BuildContext.NativeHost.Bytes) $false 0
+        & $add "lib/$abi/libassembly-store.so" ([byte[]]$script:BuildContext.StoreLibrary.Bytes) $false 0
+        # The .NET runtime's native components, from the verified runtime pack.
+        foreach ($name in 'libcoreclr.so', 'libclrjit.so', 'libSystem.Native.so', 'libSystem.Globalization.Native.so', 'libSystem.IO.Compression.Native.so', 'libSystem.Security.Cryptography.Native.Android.so') {
+            & $add "lib/$abi/$name" (Get-NativePayload -PackageId $runtimePack -EntryPath "runtimes/$($script:Target.Rid)/native/$name") $false 0
+        }
     }
     else {
         & $add 'AndroidManifest.xml' ([byte[]]$script:BuildContext.AndroidManifest.Bytes) $false 0

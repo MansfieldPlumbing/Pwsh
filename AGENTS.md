@@ -52,6 +52,11 @@ only when that group's evidence exists. Name the source for every new fact.
 - bionic's `VerifyElfHeader` checks magic, class, byte order, `e_type`,
   `e_version`, `e_machine`, `e_shentsize` and `e_shstrndx`, and never reads
   `e_flags` (`linker_phdr.cpp`, android-14.0.0_r1).
+- CoreCLR takes a host contract from the `HOST_RUNTIME_CONTRACT` property as a
+  number parsed with base 0 (`exports.cpp`), and asks its
+  `external_assembly_probe` for `System.Private.CoreLib.dll` before the file
+  system (`assemblybindercommon.cpp` `BindToSystem`), both at the runtime commit
+  of v11.0.0-rc.1.26425.128. The contract's layout is `host_runtime_contract.h`.
 - A 32-bit assembly store carries no 64-bit flag in its version word
   (`xamarin-app.hh` lines 14-19). Store name hashes are 32-bit on every target.
 
@@ -69,6 +74,12 @@ only when that group's evidence exists. Name the source for every new fact.
   other change.
 - The payload is the names in `lib/arm64-v8a.lean-assembly-order.txt`, pinned
   by digest; its length (96) is the assembly count every step checks.
+- With `-Admission NativeActivity`, `libpwsh-host.so` (x86-64 only so far)
+  starts CoreCLR: `DT_NEEDED` libc, liblog, libcoreclr and the store library;
+  three runtime properties as the pinned .NET for Android host sets them; an
+  `external_assembly_probe` that walks a table read back from the store; then
+  `coreclr_create_delegate` for `NativeHost.Admit`. Its code passes the
+  x86-64 decoder, a control-flow ABI checker and the emitter controls in Step 6.
 - The payload has no cmdlet modules (`Microsoft.PowerShell.Commands.*`), so
   `Get-ChildItem` and `Get-Process` are absent, and no Roslyn
   (`Microsoft.CodeAnalysis.*`), so `Add-Type -TypeDefinition` and
@@ -87,10 +98,12 @@ only when that group's evidence exists. Name the source for every new fact.
   `libxamarin-app.so` through its LLD 18 SysV hash table: 37 buckets, 25 in
   use, six collision chains, the longest four entries. That exercises the
   reader's own hash function and chain walk against an independent writer.
+- The x86-64 encoder's forms (34 cases) disassemble as intended in MSVC
+  `dumpbin`, used as a diagnostic only.
 - `-Debug` compares the emitted type-map name and `classes.dex` against a .NET
   SDK reference build.
 
-### Proven on hardware
+### Proven on a device or the emulator
 
 - The x86_64 emulator (API 36) runs CanvasDemo in-process.
 - The arm64 phone (Samsung Galaxy S23, API 36) and the arm32 device (API 34)
@@ -99,6 +112,12 @@ only when that group's evidence exists. Name the source for every new fact.
 - SMA calls `libpsl-native` during startup; the .NET for Android host waits
   for a Java-side load of it, so the activity calls
   `JavaSystem.LoadLibrary("psl-native")` (x86_64 emulator).
+- Gate 2a, x86_64 emulator (API 36): an APK with no DEX, no `MonoRuntimeProvider`,
+  no `libmonodroid` and no `libxamarin-app` logged `GATE2A Admit returned
+  0x50575348`, before and after the ABI checker was made control-flow aware.
+  CoreCLR accepted pointers into the read-only mapped store for the assemblies
+  this gate needs, and `Pwsh.dll` ran a method that touches no Xamarin type
+  without resolving its `Mono.Android` reference.
 - The arm32 host rejected a store whose version word carried the 64-bit flag;
   emitter and reader had agreed on it (arm32 device).
 
@@ -152,6 +171,9 @@ only when that group's evidence exists. Name the source for every new fact.
 
 Verify each on hardware before relying on it.
 
+- Not yet proven for Gate 2a: arm64 and arm32 hosts; SMA and a runspace under
+  the owned host (2c); serving the whole payload from the read-only mapped
+  store; the owned host on a physical device.
 - To prove at gate 2c, then promote: QuickPS's function-table call performs
   JNI on Android, shown by `GetVersion`, `FindClass`, `GetMethodID` and one
   `Call*MethodA` with a `jvalue[]`, using slot numbers from a pinned Android 14
