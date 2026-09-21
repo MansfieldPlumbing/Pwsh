@@ -38,6 +38,12 @@ param(
     [ValidateSet('arm64', 'x64', 'arm32')]
     [string] $Architecture = 'arm64',
 
+    # Xamarin: the .NET for Android host (the proven build).
+    # NativeActivity: gate 1 of leaving it. The framework NativeActivity loads
+    # an emitted libpwsh-host.so that logs one line; no DEX, no runtime.
+    [ValidateSet('Xamarin', 'NativeActivity')]
+    [string] $Admission = 'Xamarin',
+
 
     # Minimal:  Assembly set, IL only, no ReadyToRun (R2R) code.
     # Standard: every runtime assembly the packages ship, R2R code included.
@@ -201,6 +207,10 @@ OPTIONS
   -Architecture <arm64|x64|arm32>
                             Target. arm64 for phones, x64 for the x86_64
                             emulator. arm32 for 32-bit ARMv7 devices.
+  -Admission <Xamarin|NativeActivity>
+                            Xamarin (default) builds the proven host.
+                            NativeActivity builds gate 1: a DEX-free APK whose
+                            emitted host library logs one line.
   -Debug                    Write the intermediates and cross-check against a
                             .NET for Android reference build (needs the .NET
                             SDK with the Android workload; built in a temp
@@ -283,7 +293,7 @@ $script:StepGraph = @{
     2  = @{
         Key = 'Acquire'; DependsOn = @(1)
         Title = 'Acquire and hash the pinned NuGet packages'
-        Caption = 'Resolves the newest Android-compatible versions and checks catalog SHA-512.'
+        Caption = 'Downloads the versions pinned in lib/manifest.json and checks catalog SHA-512.'
         Action = { Invoke-AcquisitionStep }
     }
     3  = @{
@@ -1342,6 +1352,7 @@ function Get-VerifiedPackageBytes {
 }
 
 function Invoke-AcquisitionStep {
+    if (Skip-ForNativeAdmission -Step 2 -Output 'the NuGet packages') { return }
     if ($Packages -ne 'Memory' -and -not (Test-Path -LiteralPath $CacheDirectory -PathType Container)) {
         if ($PSCmdlet.ShouldProcess($CacheDirectory, 'Create package cache directory')) {
             New-ApprovedDirectory -Path $CacheDirectory
@@ -1479,6 +1490,7 @@ function Read-ZipEntryBytes {
 }
 
 function Invoke-InspectionStep {
+    if (Skip-ForNativeAdmission -Step 3 -Output 'package inspection') { return }
 
     $managedCount = 0
     $nativeCount = 0
@@ -3597,6 +3609,7 @@ function Add-GeneratedAssemblyCandidates {
 }
 
 function Invoke-SelectionStep {
+    if (Skip-ForNativeAdmission -Step 4 -Output 'the assembly set') { return }
     if ($Payload -ne 'Minimal') {
         throw "Payload '$Payload' is not built yet. Only Minimal is."
     }
@@ -3964,6 +3977,7 @@ function Test-AssemblyStoreBytes {
 }
 
 function Invoke-StoreStep {
+    if (Skip-ForNativeAdmission -Step 5 -Output 'the XABA store') { return }
 
     $contract = Get-AndroidNativeContract
     $selected = $script:BuildContext.SelectedAssemblies
@@ -5518,7 +5532,102 @@ function New-PslNativeLibraryArm32 {
     [pscustomobject]@{ Library = $library; Report = $report }
 }
 
+function Skip-ForNativeAdmission {
+    # True when the NativeActivity admission build does not use this step's
+    # output. The step still runs in its place in the graph and says so.
+    param([Parameter(Mandatory)][int] $Step, [Parameter(Mandatory)][string] $Output)
+    if ($Admission -ne 'NativeActivity') { return $false }
+    Write-Host ('[PASS] Step {0} skipped: {1} is not part of NativeActivity admission.' -f $Step, $Output) -ForegroundColor Green
+    $true
+}
+
+function Get-AndroidLogPriority {
+    # A value of the android_LogPriority enum in lib/log.h. The enumerators are
+    # implicit, so apply C's rule: each is the previous value plus one, unless
+    # it is assigned.
+    param([Parameter(Mandatory)][string] $Name)
+    $text = Import-LibSourceText -Path 'log.h'
+    $match = [regex]::Match($text, 'typedef enum android_LogPriority \{(.*?)\}', 'Singleline')
+    if (-not $match.Success) { throw 'log.h does not declare android_LogPriority.' }
+    $body = [regex]::Replace($match.Groups[1].Value, '/\*.*?\*/', '', 'Singleline')
+    $next = 0
+    foreach ($entry in ($body -split ',')) {
+        $item = $entry.Trim()
+        if (-not $item) { continue }
+        $parts = $item -split '\s*=\s*'
+        $value = if ($parts.Count -gt 1) { [int]$parts[1] } else { $next }
+        if ($parts[0] -ceq $Name) { return $value }
+        $next = $value + 1
+    }
+    throw "log.h declares no $Name."
+}
+
+function New-NativeHostLibrary {
+    # Gate 1: libpwsh-host.so. ANativeActivity_onCreate (lib/native_activity.h)
+    # makes one __android_log_write(ANDROID_LOG_INFO, tag, text) call
+    # (lib/log.h) as a tail call and returns. The activity argument is unused.
+    param([int] $PageSize = 16384)
+
+    $info = Get-AndroidLogPriority -Name 'ANDROID_LOG_INFO'
+    $steps = switch ($Architecture) {
+        'arm64' { @(@{ Op = 'movz'; Rd = 0; Imm = $info; Is64 = $false }, @{ Op = 'adr-data'; Rd = 1; Data = 'tag' }, @{ Op = 'adr-data'; Rd = 2; Data = 'text' }, @{ Op = 'tail'; Import = '__android_log_write' }) }
+        'x64'   { @(@{ Op = 'movimm32'; Dst = 7; Imm = $info }, @{ Op = 'lea-data'; Dst = 6; Data = 'tag' }, @{ Op = 'lea-data'; Dst = 2; Data = 'text' }, @{ Op = 'tail'; Import = '__android_log_write' }) }
+        'arm32' { @(@{ Op = 'movimm'; Rd = 0; Imm = $info }, @{ Op = 'adr-data'; Rd = 1; Data = 'tag' }, @{ Op = 'adr-data'; Rd = 2; Data = 'text' }, @{ Op = 'tail'; Import = '__android_log_write' }) }
+        default { throw "No native host section for $Architecture." }
+    }
+    $functions = [ordered]@{ 'ANativeActivity_onCreate' = $steps }
+    $data = [ordered]@{
+        tag  = [System.Text.Encoding]::ASCII.GetBytes("Pwsh`0")
+        text = [System.Text.Encoding]::ASCII.GetBytes("GATE1 ANativeActivity_onCreate`0")
+    }
+    $library = New-ElfCodeLibrary -Soname 'libpwsh-host.so' -Needed @('liblog.so') -Functions $functions -Data $data -PageSize $PageSize
+    $report = Test-ElfCodeLibrary -Library $library
+    [pscustomobject]@{ Library = $library; Report = $report }
+}
+
+function Assert-NativeAdmissionApk {
+    # Gate 1 proves absence as well as success, from parsed structures: the
+    # archive's own entry names, the manifest's elements and string pool, and
+    # the host library's dynamic section.
+    param([Parameter(Mandatory)][string[]] $EntryNames)
+
+    $abi = $script:Target.Abi
+    $forbidden = @($EntryNames | Where-Object { $_ -like '*.dex' -or $_ -like '*/libmonodroid.so' -or $_ -like '*/libxamarin-app.so' -or $_ -like '*/libassembly-store.so' })
+    if ($forbidden.Count) { throw "The NativeActivity APK carries Xamarin or DEX entries: $($forbidden -join ', ')" }
+    if ("lib/$abi/libpwsh-host.so" -notin $EntryNames) { throw "The NativeActivity APK lacks lib/$abi/libpwsh-host.so." }
+
+    $manifest = Test-BinaryAxml -Document ([byte[]]$script:BuildContext.AndroidManifest.Bytes)
+    if (@($manifest.Elements | Where-Object Name -eq 'provider').Count) { throw 'The NativeActivity manifest declares a provider.' }
+    if (@($manifest.Strings | Where-Object { $_ -like '*MonoRuntimeProvider*' }).Count) { throw 'The NativeActivity manifest string pool names MonoRuntimeProvider.' }
+    $application = @($manifest.Elements | Where-Object Name -eq 'application')[0]
+    if ($application.Attributes['hasCode'] -ne 0) { throw 'The NativeActivity manifest does not set android:hasCode="false".' }
+    $activity = @($manifest.Elements | Where-Object Name -eq 'activity')
+    if ($activity.Count -ne 1 -or $activity[0].Attributes['name'] -cne 'android.app.NativeActivity') { throw 'The manifest activity is not android.app.NativeActivity.' }
+    $libName = @($manifest.Elements | Where-Object { $_.Name -eq 'meta-data' -and $_.Attributes['name'] -ceq 'android.app.lib_name' })
+    if ($libName.Count -ne 1 -or $libName[0].Attributes['value'] -cne 'pwsh-host') { throw 'The manifest does not name pwsh-host as android.app.lib_name.' }
+
+    $library = Read-ElfImage -Image ([byte[]]$script:BuildContext.NativeHost.Bytes)
+    if ((@($library.Needed) -join ',') -cne 'liblog.so') { throw "libpwsh-host.so needs $(@($library.Needed) -join ', '); only liblog.so is allowed." }
+    if (-not $library.Resolved.ContainsKey('ANativeActivity_onCreate')) { throw 'libpwsh-host.so does not export ANativeActivity_onCreate.' }
+
+    Write-Host ('[PASS] NativeActivity admission: {0} entries, none DEX or Xamarin; manifest has no provider, hasCode=false, android.app.NativeActivity with lib_name pwsh-host; libpwsh-host.so needs only liblog.so.' -f
+        $EntryNames.Count) -ForegroundColor Green
+}
+
 function Invoke-NativeStep {
+
+    if ($Admission -eq 'NativeActivity') {
+        $pageSize = [int](Get-AndroidNativeContract).elf.maxPageSize
+        $nativeHost = New-NativeHostLibrary -PageSize $pageSize
+        $hostPath = Join-Path (Join-Path $OutputDirectory $script:Target.Abi) 'libpwsh-host.so'
+        if ($PSCmdlet.ShouldProcess($hostPath, 'Write libpwsh-host')) {
+            Write-BuildFile -Intermediate -Path $hostPath -Bytes $nativeHost.Library.Bytes
+        }
+        $script:BuildContext.NativeHost = [pscustomobject]@{ Path = $hostPath; Bytes = $nativeHost.Library.Bytes }
+        Write-Host ('[PASS] Step 6 complete: libpwsh-host.so emitted as {0} bytes exporting ANativeActivity_onCreate, one liblog import through a BIND_NOW GOT, {1} instructions decoded back and checked.' -f
+            $nativeHost.Report.ImageSize, $nativeHost.Report.Steps) -ForegroundColor Green
+        return
+    }
 
     $contract = Get-AndroidNativeContract
     $storeBytes = [byte[]]$script:BuildContext.AssemblyStore.Bytes
@@ -5634,7 +5743,7 @@ function Test-AndroidAttributeIds {
     $text = Import-LibSourceText -Path 'public-final.xml'
     $expected = [ordered]@{
         'theme' = 0x01010000; 'label' = 0x01010001; 'icon' = 0x01010002
-        'name' = 0x01010003; 'exported' = 0x01010010; 'authorities' = 0x01010018
+        'name' = 0x01010003; 'hasCode' = 0x0101000C; 'exported' = 0x01010010; 'authorities' = 0x01010018
         'initOrder' = 0x0101001A; 'launchMode' = 0x0101001D; 'value' = 0x01010024
         'resource' = 0x01010025; 'drawable' = 0x01010199; 'minSdkVersion' = 0x0101020C
         'versionCode' = 0x0101021B; 'versionName' = 0x0101021C
@@ -6219,6 +6328,7 @@ function Test-JavaPeerDex {
 }
 
 function Invoke-DexStep {
+    if (Skip-ForNativeAdmission -Step 8 -Output 'the Java peer DEX') { return }
 
     $peerPackage = ($script:JavaPeerName -replace '\.[^.]+$', '') -replace '\.', '/'
     $managedType = "$($script:ManagedNamespace).$($script:ActivityClassName), $($script:AssemblyName)"
@@ -6422,6 +6532,7 @@ function Test-ApkArchive {
     $stream = [System.IO.MemoryStream]::new($Apk, $false)
     $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Read, $false)
     try {
+        $names = @($archive.Entries | ForEach-Object FullName)
         if ($archive.Entries.Count -ne $Entries.Count) {
             throw "The archive holds $($archive.Entries.Count) entries; $($Entries.Count) were written."
         }
@@ -6446,6 +6557,7 @@ function Test-ApkArchive {
     return [pscustomobject]@{
         EntryCount = $Entries.Count
         Size       = $Apk.Length
+        Names      = $names
     }
 }
 
@@ -6461,35 +6573,44 @@ function Invoke-AssembleStep {
         $entries.Add([pscustomobject]@{ Name = $Name; Bytes = $Bytes; Stored = $Stored; Alignment = $Alignment })
     }
 
-    & $add 'AndroidManifest.xml' ([byte[]]$script:BuildContext.AndroidManifest.Bytes) $false 0
-    & $add 'classes.dex' (Import-LibSourceBytes -Path 'classes.dex') $false 0
-    & $add 'classes2.dex' ([byte[]]$script:BuildContext.PeerDex.Bytes) $false 0
-    # The launcher icon. Android requires resources.arsc stored and 4-byte
-    # aligned; the PNG is already compressed, so it is stored too.
-    & $add 'resources.arsc' (New-ResourceTable -PackageName $script:PackageName -IconPath 'res/mipmap/ic_launcher.png') $true 4
-    & $add 'res/mipmap/ic_launcher.png' (Import-LibSourceBytes -Path 'ic_launcher.png') $true 4
-    & $add "lib/$abi/libassembly-store.so" ([byte[]]$script:BuildContext.StoreLibrary.Bytes) $false 0
-    & $add "lib/$abi/libxamarin-app.so" ([byte[]]$script:BuildContext.XamarinApp.Bytes) $false 0
-    & $add "lib/$abi/libpsl-native.so" ([byte[]]$script:BuildContext.PslNative.Bytes) $false 0
-
-    # The .NET runtime's native components, taken from the verified packages.
-    $natives = [ordered]@{
-        'libcoreclr.so'                                = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libcoreclr.so" }
-        'libclrjit.so'                                 = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libclrjit.so" }
-        'libSystem.Native.so'                          = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libSystem.Native.so" }
-        'libSystem.Globalization.Native.so'            = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libSystem.Globalization.Native.so" }
-        'libSystem.IO.Compression.Native.so'           = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libSystem.IO.Compression.Native.so" }
-        'libSystem.Security.Cryptography.Native.Android.so' = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libSystem.Security.Cryptography.Native.Android.so" }
-        # The Android host itself. Packaged under the name the runtime loads.
-        'libmonodroid.so'                              = @{ Package = $hostPack; Path = "runtimes/$($script:Target.Rid)/native/libnet-android.release.so" }
+    if ($Admission -eq 'NativeActivity') {
+        & $add 'AndroidManifest.xml' ([byte[]]$script:BuildContext.AndroidManifest.Bytes) $false 0
+        & $add 'resources.arsc' (New-ResourceTable -PackageName $script:PackageName -IconPath 'res/mipmap/ic_launcher.png') $true 4
+        & $add 'res/mipmap/ic_launcher.png' (Import-LibSourceBytes -Path 'ic_launcher.png') $true 4
+        & $add "lib/$abi/libpwsh-host.so" ([byte[]]$script:BuildContext.NativeHost.Bytes) $false 0
     }
-    foreach ($name in $natives.Keys) {
-        $source = $natives[$name]
-        & $add "lib/$abi/$name" (Get-NativePayload -PackageId $source.Package -EntryPath $source.Path) $false 0
+    else {
+        & $add 'AndroidManifest.xml' ([byte[]]$script:BuildContext.AndroidManifest.Bytes) $false 0
+        & $add 'classes.dex' (Import-LibSourceBytes -Path 'classes.dex') $false 0
+        & $add 'classes2.dex' ([byte[]]$script:BuildContext.PeerDex.Bytes) $false 0
+        # The launcher icon. Android requires resources.arsc stored and 4-byte
+        # aligned; the PNG is already compressed, so it is stored too.
+        & $add 'resources.arsc' (New-ResourceTable -PackageName $script:PackageName -IconPath 'res/mipmap/ic_launcher.png') $true 4
+        & $add 'res/mipmap/ic_launcher.png' (Import-LibSourceBytes -Path 'ic_launcher.png') $true 4
+        & $add "lib/$abi/libassembly-store.so" ([byte[]]$script:BuildContext.StoreLibrary.Bytes) $false 0
+        & $add "lib/$abi/libxamarin-app.so" ([byte[]]$script:BuildContext.XamarinApp.Bytes) $false 0
+        & $add "lib/$abi/libpsl-native.so" ([byte[]]$script:BuildContext.PslNative.Bytes) $false 0
+
+        # The .NET runtime's native components, taken from the verified packages.
+        $natives = [ordered]@{
+            'libcoreclr.so'                                = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libcoreclr.so" }
+            'libclrjit.so'                                 = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libclrjit.so" }
+            'libSystem.Native.so'                          = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libSystem.Native.so" }
+            'libSystem.Globalization.Native.so'            = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libSystem.Globalization.Native.so" }
+            'libSystem.IO.Compression.Native.so'           = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libSystem.IO.Compression.Native.so" }
+            'libSystem.Security.Cryptography.Native.Android.so' = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libSystem.Security.Cryptography.Native.Android.so" }
+            # The Android host itself. Packaged under the name the runtime loads.
+            'libmonodroid.so'                              = @{ Package = $hostPack; Path = "runtimes/$($script:Target.Rid)/native/libnet-android.release.so" }
+        }
+        foreach ($name in $natives.Keys) {
+            $source = $natives[$name]
+            & $add "lib/$abi/$name" (Get-NativePayload -PackageId $source.Package -EntryPath $source.Path) $false 0
+        }
     }
 
     $apkBytes = New-ApkArchive -Entries $entries
     $report = Test-ApkArchive -Apk $apkBytes -Entries $entries
+    if ($Admission -eq 'NativeActivity') { Assert-NativeAdmissionApk -EntryNames $report.Names }
 
     $outputDirectory = Join-Path $OutputDirectory $script:Target.Abi
     $apkPath = Join-Path $outputDirectory 'Pwsh-unsigned.apk'
@@ -7382,6 +7503,7 @@ function Get-EmittedActivityIdentity {
     }
 }
 function Invoke-AppDataStep {
+    if (Skip-ForNativeAdmission -Step 9 -Output 'libxamarin-app.so') { return }
 
     $tokens = Get-JniEnvInitTokens
     $typeMapModules = Get-TypeMapModules
@@ -7565,7 +7687,9 @@ function New-BinaryAxmlManifest {
         [int] $MinSdkVersion = 26,
         [int] $TargetSdkVersion = 37,
         [int] $CompileSdkVersion = 37,
-        [string] $CompileSdkVersionCodename = "17"
+        [string] $CompileSdkVersionCodename = "17",
+        [ValidateSet('Xamarin', 'NativeActivity')][string] $Admission = 'Xamarin',
+        [string] $NativeLibraryName = 'pwsh-host'
     )
 
     $attrNames = @(
@@ -7642,6 +7766,17 @@ function New-BinaryAxmlManifest {
         'uses-sdk'
     )
 
+    # NativeActivity admission adds only its own strings, so the Xamarin
+    # manifest stays byte-identical to the proven one.
+    $native = $Admission -eq 'NativeActivity'
+    if ($native) {
+        $attrNames += 'hasCode'                        # ResID: 0x0101000C
+        $resIds += 0x0101000C
+        $otherStrings = @($otherStrings | Where-Object { $_ -notin 'mono.MonoRuntimeProvider', $providerAuthority, 'provider' })
+        $otherStrings += @('android.app.NativeActivity', 'android.app.lib_name', $NativeLibraryName)
+        $activityFullName = 'android.app.NativeActivity'
+    }
+
     $allStrings = $attrNames + $otherStrings
     $strMap = @{}
     for ($i = 0; $i -lt $allStrings.Count; $i++) {
@@ -7659,7 +7794,7 @@ function New-BinaryAxmlManifest {
         $strOffsets.Add([uint32]$spDataMs.Position)
         $chars = [System.Text.Encoding]::Unicode.GetBytes($s)
         $spDataBw.Write([uint16]($chars.Length / 2))
-        $spDataBw.Write($chars)
+        Write-ByteSpan -Writer $spDataBw -Bytes $chars
         $spDataBw.Write([uint16]0)
     }
     $rawStrBytes = $spDataMs.ToArray()
@@ -7667,7 +7802,8 @@ function New-BinaryAxmlManifest {
 
     $padLen = (4 - ($rawStrBytes.Length % 4)) % 4
     if ($padLen -gt 0) {
-        $rawStrBytes = $rawStrBytes + (New-Object byte[] $padLen)
+        # + on two arrays yields object[]; the cast keeps it byte[].
+        $rawStrBytes = [byte[]]($rawStrBytes + [byte[]]::new($padLen))
     }
 
     $strPoolHdrSize = 28
@@ -7686,7 +7822,7 @@ function New-BinaryAxmlManifest {
     $spBw.Write([uint32]$stringsStart)
     $spBw.Write([uint32]0)
     foreach ($off in $strOffsets) { $spBw.Write([uint32]$off) }
-    $spBw.Write($rawStrBytes)
+    Write-ByteSpan -Writer $spBw -Bytes $rawStrBytes
     $stringPoolChunk = $spMs.ToArray()
     $spBw.Dispose(); $spMs.Dispose()
 
@@ -7842,6 +7978,9 @@ function New-BinaryAxmlManifest {
         (Attr-Bool 'allowBackup' $true),
         (Attr-Bool 'extractNativeLibs' $true)
     )
+    # Attributes are written in resource-id order; hasCode (0x0101000C)
+    # follows name (0x01010003).
+    if ($native) { $appAttrs = @($appAttrs[0..2]) + @((Attr-Bool 'hasCode' $false)) + @($appAttrs[3..4]) }
     Write-StartElem 'application' $appAttrs 12
 
     $activityAttrs = @(
@@ -7861,16 +8000,24 @@ function New-BinaryAxmlManifest {
     Write-StartElem 'category' @((Attr-String 'name' 'android.intent.category.LEANBACK_LAUNCHER')) 17
     Write-EndElem 'category' 17
     Write-EndElem 'intent-filter' 14
+    if ($native) {
+        # NativeActivity loads lib<value>.so and calls ANativeActivity_onCreate
+        # (lib/native_activity.h).
+        Write-StartElem 'meta-data' @((Attr-String 'name' 'android.app.lib_name'), (Attr-String 'value' $NativeLibraryName)) 18
+        Write-EndElem 'meta-data' 18
+    }
     Write-EndElem 'activity' 13
 
-    $providerAttrs = @(
-        (Attr-String 'name' 'mono.MonoRuntimeProvider'),
-        (Attr-Bool 'exported' $false),
-        (Attr-String 'authorities' $providerAuthority),
-        (Attr-IntDec 'initOrder' 1999999999)
-    )
-    Write-StartElem 'provider' $providerAttrs 20
-    Write-EndElem 'provider' 20
+    if (-not $native) {
+        $providerAttrs = @(
+            (Attr-String 'name' 'mono.MonoRuntimeProvider'),
+            (Attr-Bool 'exported' $false),
+            (Attr-String 'authorities' $providerAuthority),
+            (Attr-IntDec 'initOrder' 1999999999)
+        )
+        Write-StartElem 'provider' $providerAttrs 20
+        Write-EndElem 'provider' 20
+    }
 
     $meta1Attrs = @(
         (Attr-String 'name' 'com.android.dynamic.apk.fused.modules'),
@@ -7893,9 +8040,9 @@ function New-BinaryAxmlManifest {
     $docBw.Write([uint16]0x0003)
     $docBw.Write([uint16]8)
     $docBw.Write([uint32]$totalFileSize)
-    $docBw.Write($stringPoolChunk)
-    $docBw.Write($resourceMapChunk)
-    $docBw.Write($xmlTreeBytes)
+    Write-ByteSpan -Writer $docBw -Bytes $stringPoolChunk
+    Write-ByteSpan -Writer $docBw -Bytes $resourceMapChunk
+    Write-ByteSpan -Writer $docBw -Bytes $xmlTreeBytes
     $docBytes = $docMs.ToArray()
     $docBw.Dispose(); $docMs.Dispose()
 
@@ -7921,6 +8068,22 @@ function Get-ResourceChunkConstants {
     return $script:ResourceChunkConstants
 }
 
+function Test-ResChunkHeader {
+    # AOSP's validate_chunk (libs/androidfw/ResourceTypes.cpp): the header is at
+    # least the structure's size, fits inside the chunk, both sizes are 4-byte
+    # aligned, and the chunk lies inside its container.
+    param([Parameter(Mandatory)][byte[]] $Data, [Parameter(Mandatory)][long] $At,
+          [Parameter(Mandatory)][int] $MinimumHeaderSize, [Parameter(Mandatory)][long] $End)
+    if ($At + 8 -gt $End) { throw "A chunk header at $At runs past its container." }
+    $headerSize = [BitConverter]::ToUInt16($Data, $At + 2)
+    $size = [long][BitConverter]::ToUInt32($Data, $At + 4)
+    if ($headerSize -lt $MinimumHeaderSize) { throw "The chunk at $At has a $headerSize-byte header; its type needs at least $MinimumHeaderSize." }
+    if ($headerSize -gt $size) { throw "The chunk at $At has a $headerSize-byte header but is only $size bytes." }
+    if ((($headerSize -bor $size) -band 3) -ne 0) { throw "The chunk at $At has size $size and header size $headerSize; both must be multiples of 4." }
+    if ($At + $size -gt $End) { throw "A $size-byte chunk at $At runs past its container." }
+    [pscustomobject]@{ HeaderSize = [int]$headerSize; Size = [int]$size }
+}
+
 function Test-BinaryAxml {
     param([Parameter(Mandatory)][byte[]] $Document)
 
@@ -7928,7 +8091,7 @@ function Test-BinaryAxml {
 
     if ($Document.Length -lt 8) { throw 'The emitted manifest is too short to hold a chunk header.' }
     $type = [BitConverter]::ToUInt16($Document, 0)
-    $headerSize = [BitConverter]::ToUInt16($Document, 2)
+    $headerSize = (Test-ResChunkHeader -Data $Document -At 0 -MinimumHeaderSize 8 -End $Document.Length).HeaderSize
     $fileSize = [int][BitConverter]::ToUInt32($Document, 4)
     if ($type -ne $res['RES_XML_TYPE']) {
         throw ('The emitted manifest declares chunk type 0x{0:X4}; RES_XML_TYPE is 0x{1:X4}.' -f $type, $res['RES_XML_TYPE'])
@@ -7945,20 +8108,86 @@ function Test-BinaryAxml {
     $elements = 0
     $sawStringPool = $false
     $sawResourceMap = $false
+    $strings = [System.Collections.Generic.List[string]]::new()
+    $parsed = [System.Collections.Generic.List[object]]::new()
+    $resourceIds = [System.Collections.Generic.List[uint32]]::new()
     while ($cursor -lt $Document.Length) {
         if (($Document.Length - $cursor) -lt 8) { throw "A chunk header at $cursor runs past the end of the manifest." }
         $chunkType = [BitConverter]::ToUInt16($Document, $cursor)
-        $chunkSize = [int][BitConverter]::ToUInt32($Document, $cursor + 4)
-        if ($chunkSize -le 0 -or ($cursor + $chunkSize) -gt $Document.Length) {
-            throw "A $chunkSize-byte chunk at $cursor runs past the end of the manifest."
+        # Minimum header sizes are the ResourceTypes.h structures: ResStringPool_header
+        # 28, ResXMLTree_node 16 for namespace and element nodes, ResChunk_header 8
+        # for the resource map and anything else.
+        $minimumHeader = switch ($chunkType) {
+            $res['RES_STRING_POOL_TYPE'] { 28 }
+            { $_ -in $res['RES_XML_START_NAMESPACE_TYPE'], $res['RES_XML_END_NAMESPACE_TYPE'], $res['RES_XML_START_ELEMENT_TYPE'], $res['RES_XML_END_ELEMENT_TYPE'] } { 16 }
+            default { 8 }
         }
+        $chunk = Test-ResChunkHeader -Data $Document -At $cursor -MinimumHeaderSize $minimumHeader -End $Document.Length
+        $chunkSize = $chunk.Size
 
         switch ($chunkType) {
-            $res['RES_STRING_POOL_TYPE'] { $sawStringPool = $true }
-            $res['RES_XML_RESOURCE_MAP_TYPE'] { $sawResourceMap = $true }
+            $res['RES_STRING_POOL_TYPE'] {
+                $sawStringPool = $true
+                # ResStringPool_header (lib/ResourceTypes.h): header, stringCount,
+                # styleCount, flags, stringsStart, stylesStart; then the offsets.
+                $count = [BitConverter]::ToUInt32($Document, $cursor + 8)
+                $utf8 = ([BitConverter]::ToUInt32($Document, $cursor + 16) -band 0x100) -ne 0
+                $stringsStart = $cursor + [BitConverter]::ToUInt32($Document, $cursor + 20)
+                $offsets = $cursor + [BitConverter]::ToUInt16($Document, $cursor + 2)
+                for ($s = 0; $s -lt $count; $s++) {
+                    $at = $stringsStart + [BitConverter]::ToUInt32($Document, $offsets + 4 * $s)
+                    if ($utf8) {
+                        $at += $(if ($Document[$at] -band 0x80) { 2 } else { 1 })
+                        $byteLength = $Document[$at]
+                        if ($byteLength -band 0x80) { $byteLength = (($byteLength -band 0x7F) -shl 8) -bor $Document[$at + 1]; $at += 2 } else { $at += 1 }
+                        $strings.Add([System.Text.Encoding]::UTF8.GetString($Document, $at, $byteLength))
+                    }
+                    else {
+                        $length = [BitConverter]::ToUInt16($Document, $at)
+                        if ($length -band 0x8000) { $length = (($length -band 0x7FFF) -shl 16) -bor [BitConverter]::ToUInt16($Document, $at + 2); $at += 4 } else { $at += 2 }
+                        $strings.Add([System.Text.Encoding]::Unicode.GetString($Document, $at, 2 * $length))
+                    }
+                }
+            }
+            $res['RES_XML_RESOURCE_MAP_TYPE'] {
+                $sawResourceMap = $true
+                # One resource id per leading string-pool entry; the count comes
+                # from the chunk size, so the map may be shorter than the pool.
+                $mapHeader = [BitConverter]::ToUInt16($Document, $cursor + 2)
+                for ($at = $cursor + $mapHeader; $at -lt $cursor + $chunkSize; $at += 4) { $resourceIds.Add([BitConverter]::ToUInt32($Document, $at)) }
+            }
             $res['RES_XML_START_NAMESPACE_TYPE'] { $namespaceDepth++ }
             $res['RES_XML_END_NAMESPACE_TYPE'] { $namespaceDepth-- }
-            $res['RES_XML_START_ELEMENT_TYPE'] { $depth++; $elements++ }
+            $res['RES_XML_START_ELEMENT_TYPE'] {
+                $depth++; $elements++
+                # ResXMLTree_attrExt follows the 16-byte node header: ns, name,
+                # attributeStart, attributeSize, attributeCount. Each
+                # ResXMLTree_attribute: ns, name, rawValue, typedValue (8 bytes).
+                $ext = $cursor + 16
+                $attributeStart = [BitConverter]::ToUInt16($Document, $ext + 8)
+                $attributeSize = [BitConverter]::ToUInt16($Document, $ext + 10)
+                $attributeCount = [BitConverter]::ToUInt16($Document, $ext + 12)
+                # AOSP validateNode: the attribute array must lie inside the node.
+                if ($attributeStart + $attributeSize * $attributeCount -gt $chunkSize - 16) {
+                    throw "The element at $cursor declares attributes past the end of its node."
+                }
+                $attributes = [ordered]@{}
+                $identities = [System.Collections.Generic.List[object]]::new()
+                for ($a = 0; $a -lt $attributeCount; $a++) {
+                    $at = $ext + $attributeStart + $a * $attributeSize
+                    $raw = [BitConverter]::ToInt32($Document, $at + 8)
+                    # ResXMLParser::getAttributeNameResID: the name's string index
+                    # indexes the resource map; past its end the id is 0.
+                    $nameIndex = [BitConverter]::ToInt32($Document, $at + 4)
+                    $identities.Add([pscustomobject]@{
+                        Name       = $strings[$nameIndex]
+                        Namespaced = [BitConverter]::ToInt32($Document, $at) -ge 0
+                        ResourceId = if ($nameIndex -ge 0 -and $nameIndex -lt $resourceIds.Count) { $resourceIds[$nameIndex] } else { [uint32]0 }
+                    })
+                    $attributes[$strings[[BitConverter]::ToInt32($Document, $at + 4)]] = if ($raw -ge 0) { $strings[$raw] } else { [BitConverter]::ToUInt32($Document, $at + 16) }
+                }
+                $parsed.Add([pscustomobject]@{ Name = $strings[[BitConverter]::ToInt32($Document, $ext + 4)]; Depth = $depth; Attributes = $attributes; Identities = $identities })
+            }
             $res['RES_XML_END_ELEMENT_TYPE'] {
                 $depth--
                 if ($depth -lt 0) { throw "An element closes at $cursor without a matching open." }
@@ -7975,7 +8204,30 @@ function Test-BinaryAxml {
     return [pscustomobject]@{
         FileSize     = $fileSize
         ElementCount = $elements
+        Strings      = $strings
+        Elements     = $parsed
     }
+}
+
+function Assert-ManifestAttributeIds {
+    # Every android:-namespaced attribute must resolve, through the resource
+    # map, to the id the pinned public-final.xml declares for its name. Text
+    # alone is not enough: Android identifies attributes by resource id.
+    param([Parameter(Mandatory)] $Report)
+    $text = Import-LibSourceText -Path 'public-final.xml'
+    $checked = 0
+    foreach ($element in $Report.Elements) {
+        foreach ($attribute in @($element.Identities | Where-Object Namespaced)) {
+            $match = [regex]::Match($text, "<public type=`"attr`" name=`"$([regex]::Escape($attribute.Name))`" id=`"0x([0-9a-fA-F]+)`"")
+            if (-not $match.Success) { throw "public-final.xml does not declare android:$($attribute.Name)." }
+            $declared = [Convert]::ToUInt32($match.Groups[1].Value, 16)
+            if ($attribute.ResourceId -ne $declared) {
+                throw ('<{0}> android:{1} maps to 0x{2:X8}; public-final.xml declares 0x{3:X8}.' -f $element.Name, $attribute.Name, $attribute.ResourceId, $declared)
+            }
+            $checked++
+        }
+    }
+    $checked
 }
 
 function Invoke-ManifestStep {
@@ -7983,8 +8235,10 @@ function Invoke-ManifestStep {
     $manifestBytes = New-BinaryAxmlManifest `
         -PackageName $script:PackageName `
         -ActivityClassName $script:ActivityClassName `
-        -ActivityLabel $script:ApplicationLabel
+        -ActivityLabel $script:ApplicationLabel `
+        -Admission $Admission
     $report = Test-BinaryAxml -Document $manifestBytes
+    $checkedIds = Assert-ManifestAttributeIds -Report $report
 
     $outputDirectory = Join-Path $OutputDirectory $script:Target.Abi
     $manifestPath = Join-Path $outputDirectory 'AndroidManifest.xml'
@@ -8002,12 +8256,13 @@ function Invoke-ManifestStep {
         Sha256 = $manifestHash
     }
 
-    Write-Host ('[PASS] Step 7 complete: AndroidManifest.xml emitted as {0} bytes of binary XML declaring {1} elements for {2}/{3}, chunk-walked and balanced. SHA-256 {4}' -f
+    Write-Host ('[PASS] Step 7 complete: AndroidManifest.xml emitted as {0} bytes of binary XML declaring {1} elements for {2}/{3}, chunk-walked and balanced, {5} android: attributes matched to public-final.xml ids. SHA-256 {4}' -f
         $report.FileSize,
         $report.ElementCount,
         $script:PackageName,
-        $script:ActivityClassName,
-        $manifestHash) -ForegroundColor Green
+        $(if ($Admission -eq 'NativeActivity') { 'android.app.NativeActivity' } else { $script:ActivityClassName }),
+        $manifestHash,
+        $checkedIds) -ForegroundColor Green
 }
 if ($Help) {
     Show-SetupHelp

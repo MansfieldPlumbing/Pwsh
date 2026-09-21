@@ -92,6 +92,26 @@ PowerShell.
 | `RuntimeFeature` switches, JNIEnv init tokens, type-map lookups | host-only data | DELETE |
 | `libassembly-store.so` (XABA, read by monodroid) | the store format | KEEP if the owned host can serve it through `external_assembly_probe`; open question 1 |
 
+## What the admission boundary already provides
+
+`ANativeActivity_onCreate` receives an `ANativeActivity*` that the framework has
+populated (`lib/native_activity.h`):
+
+- `JavaVM* vm` (line 64): the Java VM for any later JNI work.
+- `JNIEnv* env` (lines 67-71): usable only on the main thread. A PowerShell or
+  console thread that needs JNI must attach through `vm`.
+- `internalDataPath` (line 88): the candidate for HOME, without JNI.
+- `sdkVersion` (line 98) and `AAssetManager* assetManager` (line 111).
+- Callbacks (lines 123-124) run on the main thread and are all NULL until set,
+  so an entry point that installs none is valid.
+
+## Gate 1 result
+
+Passed on all three targets with `-Admission NativeActivity`: the framework
+`android.app.NativeActivity` loaded the emitted `libpwsh-host.so` and it logged
+`GATE1 ANativeActivity_onCreate` on the main thread (Samsung Galaxy S23 arm64,
+x86_64 emulator, arm32 device). The APK has four entries and no application DEX,
+no `MonoRuntimeProvider`, and no Xamarin libraries.
 ## Open questions
 
 1. **Who owns assembly resolution at CoreCLR startup, and which runtime
