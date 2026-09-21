@@ -135,11 +135,15 @@ only when that group's evidence exists. Name the source for every new fact.
   `RuntimeShader` stay the implementation, reached through JNI on the
   `Surface` from `ANativeWindow_toSurface`; the real `setContentView` is never
   called over `NativeActivity`'s content view.
-- QuickPS supplies literal Android mechanisms (JNI through its function-table
-  call, NDK exports, pull-based input and looper waits) and never runs
-  PowerShell from a native callback. Only the Pwsh compatibility assembly uses
-  `Android.*` and `Java.*` names, and only it invokes script delegates, which
-  it does on the main thread as the baseline does.- Before modifying `Read-ElfImage`, the SysV ELF hash implementation, or the
+- Layering. QuickPS Android mechanisms are literal and policy-free: NDK
+  exports, JNI function-table dispatch, looper and input primitives, the
+  choreographer binding. The Pwsh compatibility assembly owns the
+  `[UnmanagedCallersOnly]` callbacks installed in the `NativeActivity`
+  callback table and passed to `AChoreographer`, turns them into the
+  Xamarin-shaped `Touch`, `KeyPress` and `PostOnAnimation`, and invokes the
+  frozen script's delegates on the main thread. No hand-written native stub
+  sits between the callback and managed code. Only the compatibility
+  assembly uses `Android.*` and `Java.*` names.- Before modifying `Read-ElfImage`, the SysV ELF hash implementation, or the
   emitted ELF hash-table structure, add and pass a permanent multi-bucket hash
   self-test that covers successful chained lookups and missing-symbol lookups.
 
@@ -147,7 +151,11 @@ only when that group's evidence exists. Name the source for every new fact.
 
 Verify each on hardware before relying on it.
 
-- The exact runtime properties `coreclr_initialize` needs without the .NET for
+- To prove at gate 2c, then promote: QuickPS's function-table call performs
+  JNI on Android, shown by `GetVersion`, `FindClass`, `GetMethodID` and one
+  `Call*MethodA` with a `jvalue[]`, using slot numbers from a pinned Android 14
+  `jni.h`; `QuickPS/src/Native.ps1` runs unchanged under the owned CoreCLR host;
+  its `CallingConvention.StdCall` attribute is harmless on arm64, x64 and arm32.- The exact runtime properties `coreclr_initialize` needs without the .NET for
   Android host.
 - Whether `libSystem.Security.Cryptography.Native.Android.so` must be
   initialized with the Java VM before hashing or TLS work.
