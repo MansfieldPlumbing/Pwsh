@@ -74,12 +74,13 @@ only when that group's evidence exists. Name the source for every new fact.
   other change.
 - The payload is the names in `lib/arm64-v8a.lean-assembly-order.txt`, pinned
   by digest; its length (96) is the assembly count every step checks.
-- With `-Admission NativeActivity`, `libpwsh-host.so` (x86-64 and arm64)
+- With `-Admission NativeActivity`, `libpwsh-host.so` (x86-64, arm64, and arm32 in
+  Thumb-2)
   starts CoreCLR: `DT_NEEDED` libc, liblog, libcoreclr and the store library;
   three runtime properties as the pinned .NET for Android host sets them; an
   `external_assembly_probe` that walks a table read back from the store; then
   `coreclr_create_delegate` for `NativeHost.Admit`. Its code passes the
-  per-ISA decoder, a control-flow ABI checker (SysV AMD64 or AAPCS64) and the
+  per-ISA decoder, a control-flow ABI checker (SysV AMD64, AAPCS64 or AAPCS32) and the
   emitter controls in Step 6. It requires `Admit` to return 0x50575348,
   then calls `NativeHost.RunPowerShell` through a second delegate
   and logs what it returns. `-TraceAssemblyProbe` (x86-64, diagnostic) logs each
@@ -89,6 +90,11 @@ only when that group's evidence exists. Name the source for every new fact.
   reads the final store library as it is mapped and requires every image to
   start 16-byte aligned and every fat method header to fall 4-byte aligned
   (131,709 fat headers in the lean payload).
+- The arm32 host is Thumb-2, as the NDK builds the pinned arm32 .NET for Android
+  host (its exported functions carry the Thumb bit); `libpsl-native` stays A32.
+  Pointer-sized fields take the target's size, and `internalDataPath`'s offset
+  comes from `native_activity.h`. Exported function values and the relocated
+  `external_assembly_probe` pointer carry bit 0; the build checks both.
 - The NativeActivity APK packages the emitted `libpsl-native.so`, so CoreCLR's
   default native probing finds it in the APK's library directory.
 - The payload has no cmdlet modules (`Microsoft.PowerShell.Commands.*`), so
@@ -112,6 +118,10 @@ only when that group's evidence exists. Name the source for every new fact.
 - The x86-64 encoder's forms (34 cases) and the A64 encoder's forms (23 cases,
   with branch and `adrp` targets resolved) disassemble as intended in MSVC
   `dumpbin`, used as a diagnostic only.
+- The T32 encoder's forms (35 cases, branch targets and PC-relative sequences
+  included) match the bytes LLVM 23.1.1's integrated assembler emits for the same
+  instructions. `dumpbin` no longer supports ARM32, so `clang` is the diagnostic
+  oracle here, kept out of tree and never used to produce output.
 - `-Debug` compares the emitted type-map name and `classes.dex` against a .NET
   SDK reference build.
 
@@ -159,6 +169,11 @@ only when that group's evidence exists. Name the source for every new fact.
   returned 0x50575348` about half a second after `Admit`; the process was
   alive 40 seconds later and the crash buffer held nothing for it. The Xamarin
   arm64 build stayed byte-identical.
+- Gates 2a, 2b and 2c, arm32 device (API 34): the Thumb-2 host and the aligned
+  arm32 store logged every marker on the main thread and `RunPowerShell returned
+  0x50575348`; the process was alive 40 seconds later and the crash buffer held
+  nothing for it. The Xamarin arm32 build stayed byte-identical. Gate 2c holds on
+  all three backends.
 - During those runs SMA also asked the probe for
   `System.Management.Automation.dll` by its full path under the app's files
   directory. The probe has no entry by path, so it declined; execution
@@ -234,7 +249,7 @@ only when that group's evidence exists. Name the source for every new fact.
 
 Verify each on hardware before relying on it.
 
-- Not yet proven: gates 2a, 2b and 2c on arm32; the 40
+- Not yet proven: the 40
   store assemblies the tested startup path did not request, served in place.
 - To prove at gate 2c, then promote: QuickPS's function-table call performs
   JNI on Android, shown by `GetVersion`, `FindClass`, `GetMethodID` and one

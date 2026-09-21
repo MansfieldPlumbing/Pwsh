@@ -4636,13 +4636,15 @@ function New-ElfCodeLibrary {
         # slots at At receive the address of Target (a Data, WritableData or
         # function label) through the target's RELATIVE relocation.
         [System.Collections.IDictionary] $WritableData = @{},
-        [int] $PageSize = 16384
+        [int] $PageSize = 16384,
+        # The instruction set of Functions; the target's own when empty.
+        [string] $InstructionSet = ''
     )
 
     $elf = Get-ElfConstants
     $L = Get-ElfLayout -Class $script:Target.ElfClass
     $w = $L.Word
-    $isa = Get-InstructionSet
+    $isa = if ($InstructionSet) { Get-InstructionSet -Isa $InstructionSet } else { Get-InstructionSet }
     $form = $script:Target.RelocationForm
     $relocationEntry = Get-ElfRelocationEntrySize -Layout $L -Form $form
     $relocationTags = Get-ElfRelocationTags -Form $form
@@ -4747,7 +4749,7 @@ function New-ElfCodeLibrary {
         $symbolIndex[$name] = $index++
     }
     foreach ($name in $exports) {
-        Write-ElfSymbol $image $L ($dynsymOffset + $L.Symbol * $index) $strings.Offset[$name] $functionOffset[$name] $functionSize[$name] $functionInfo 1
+        Write-ElfSymbol $image $L ($dynsymOffset + $L.Symbol * $index) $strings.Offset[$name] ($functionOffset[$name] + $isa.StateBit) $functionSize[$name] $functionInfo 1
         $symbolIndex[$name] = $index++
     }
     [System.Array]::Copy($hashBytes, 0, $image, $hashOffset, $hashBytes.Length)
@@ -4771,7 +4773,10 @@ function New-ElfCodeLibrary {
             foreach ($pointer in @($entry.Pointers)) {
                 if (-not $address.ContainsKey($pointer.Target)) { throw "Writable '$label' points at undefined label '$($pointer.Target)'." }
                 if ($pointer.At + $w -gt $writableBytes.Length) { throw "Writable '$label' has a pointer slot past its end." }
-                Write-ElfRelocation $image $L ($relocationOffset + $relocationEntry * $relocationIndex) $form ($writableOffset[$label] + $pointer.At) 0 $elf[$script:Target.RelativeRelocation] $address[$pointer.Target]
+                # A symbol-less RELATIVE relocation carries the whole value, so a
+                # pointer to a function carries its instruction set's state bit.
+                $value = $address[$pointer.Target] + $(if ($Functions.Contains($pointer.Target)) { $isa.StateBit } else { 0 })
+                Write-ElfRelocation $image $L ($relocationOffset + $relocationEntry * $relocationIndex) $form ($writableOffset[$label] + $pointer.At) 0 $elf[$script:Target.RelativeRelocation] $value
                 $relocationIndex++
             }
         }
@@ -4828,6 +4833,8 @@ function New-ElfCodeLibrary {
         DataAt    = $address
         Labels    = $labels
         Functions = $Functions
+        Isa       = $isa.Id
+        StateBit  = $isa.StateBit
     }
 }
 
@@ -5180,7 +5187,7 @@ function Test-ElfCodeLibrary {
     $bytes = [byte[]]$Library.Bytes
     $image = Read-ElfImage -Image $bytes
     Assert-ElfTargetHeader -Parsed $image -Name $Library.Soname
-    $isa = Get-InstructionSet
+    $isa = Get-InstructionSet -Isa $Library.Isa
 
     $executable = @($image.Segments | Where-Object { $_.Type -eq $elf['PT_LOAD'] -and ($_.Flags -band $elf['PF_X']) })
     if ($executable.Count -ne 1) { throw "$($Library.Soname) must have exactly one executable segment." }
@@ -5205,9 +5212,9 @@ function Test-ElfCodeLibrary {
     foreach ($name in $Library.Exports.PSBase.Keys) {
         $symbol = $image.Resolved[$name]
         if (-not $symbol -or $symbol.Section -eq 0) { throw "Export '$name' does not resolve." }
-        if ($symbol.Value -ne $Library.Exports[$name]) { throw "Export '$name' resolves to $($symbol.Value), expected $($Library.Exports[$name])." }
-        if ($symbol.Value % $isa.Alignment) { throw "Export '$name' is not aligned to a $($isa.Name) instruction." }
-        $pc = [long]$symbol.Value
+        if ($symbol.Value -ne $Library.Exports[$name] + $isa.StateBit) { throw "Export '$name' resolves to $($symbol.Value), expected $($Library.Exports[$name] + $isa.StateBit)." }
+        $pc = [long]$symbol.Value - $isa.StateBit
+        if ($pc % $isa.Alignment) { throw "Export '$name' is not aligned to a $($isa.Name) instruction." }
         foreach ($step in $Library.Functions[$name]) {
             $pc += & $isa.Verify -Image $bytes -Pc $pc -Step $step -DataAt $Library.DataAt -SlotImport $slotImport -Labels $Library.Labels[$name] -Name $name
             $steps++
@@ -5276,14 +5283,323 @@ function Test-XamarinAppLibrary {
     }
 }
 
+# ==============================================================================
+# Thumb-2 (T32) machine code
+#
+# The arm32 NativeActivity host is Thumb-2, as the NDK builds the pinned .NET for
+# Android arm32 host (its exported functions carry the Thumb bit). Only the
+# forms that host needs. A 32-bit instruction is two little-endian halfwords,
+# first halfword first. Field layouts follow the Arm A-profile architecture
+# reference (T32 encodings); LLVM 23.1.1's integrated assembler is the
+# out-of-tree cross-check. libpsl-native stays A32; calls between the two
+# interwork through blx and loads into pc.
+#
+# Calling convention: AAPCS32, soft-float (lib/ARM.cpp). Arguments r0-r3 then
+# the stack at [sp], [sp, #4], ...; result r0; r4-r11 callee-saved; r12 (ip)
+# free to clobber, used for calls through the GOT; lr holds the return
+# address; sp 8-byte aligned at every call. Variadic calls take no extra setup.
+# Code addresses carry state in bit 0 (1 = Thumb) wherever the ABI treats them
+# as code pointers: exported STT_FUNC values and relocated function pointers.
+# ==============================================================================
+
+function Get-T32Halfwords {
+    # MOVW/MOVT: imm16 = imm4:i:imm3:imm8.
+    param([Parameter(Mandatory)][uint32] $Base, [Parameter(Mandatory)][int] $Rd, [Parameter(Mandatory)][uint32] $Imm16)
+    $imm4 = ($Imm16 -shr 12) -band 0xF; $i = ($Imm16 -shr 11) -band 1; $imm3 = ($Imm16 -shr 8) -band 7; $imm8 = $Imm16 -band 0xFF
+    @([uint16]($Base -bor ($i -shl 10) -bor $imm4), [uint16](($imm3 -shl 12) -bor ($Rd -shl 8) -bor $imm8))
+}
+
+function New-T32Branch {
+    # B.W (T4, imm24 = S:I1:I2:imm10:imm11, J1 = NOT(I1 XOR S)) and B<c>.W (T3,
+    # imm20 = S:J2:J1:imm6:imm11). Distance is from the instruction address + 4.
+    param([ValidateSet('b', 'beq', 'bne', 'bhs')][string] $Op, [long] $Distance)
+    if ($Distance % 2) { throw "$Op distance $Distance is odd." }
+    if ($Op -eq 'b') {
+        if ($Distance -lt -16777216 -or $Distance -gt 16777214) { throw "b.w distance $Distance out of range." }
+        $v = [long]($Distance -band 0x1FFFFFF)
+        $s = ($v -shr 24) -band 1; $i1 = ($v -shr 23) -band 1; $i2 = ($v -shr 22) -band 1
+        $j1 = (-bnot ($i1 -bxor $s)) -band 1; $j2 = (-bnot ($i2 -bxor $s)) -band 1
+        return @([uint16](0xF000 -bor ($s -shl 10) -bor (($v -shr 12) -band 0x3FF)), [uint16](0x9000 -bor ($j1 -shl 13) -bor ($j2 -shl 11) -bor (($v -shr 1) -band 0x7FF)))
+    }
+    if ($Distance -lt -1048576 -or $Distance -gt 1048574) { throw "$Op.w distance $Distance out of range." }
+    $cond = switch ($Op) { 'beq' { 0 } 'bne' { 1 } 'bhs' { 2 } }
+    $v = [long]($Distance -band 0x1FFFFF)
+    $s = ($v -shr 20) -band 1; $j2 = ($v -shr 19) -band 1; $j1 = ($v -shr 18) -band 1
+    @([uint16](0xF000 -bor ($s -shl 10) -bor ($cond -shl 6) -bor (($v -shr 12) -band 0x3F)), [uint16](0x8000 -bor ($j1 -shl 13) -bor ($j2 -shl 11) -bor (($v -shr 1) -band 0x7FF)))
+}
+
+function Get-T32RegisterList {
+    param([Parameter(Mandatory)][int[]] $Registers, [Parameter(Mandatory)][int] $Extra)
+    $list = 0; $flag = 0
+    foreach ($r in $Registers) {
+        if ($r -eq $Extra) { $flag = 1 } elseif ($r -ge 0 -and $r -le 7) { $list = $list -bor (1 -shl $r) } else { throw "r$r cannot be in a 16-bit push or pop." }
+    }
+    @($list, $flag)
+}
+
+function Get-T32StepLength {
+    param([Parameter(Mandatory)] $Step)
+    switch ($Step.Op) {
+        'label' { 0 }
+        { $_ -in 'push', 'pop', 'sub-sp', 'add-sp', 'mov', 'movs', 'cmp', 'cmp-imm', 'adds', 'adds-imm' } { 2 }
+        { $_ -in 'movw', 'movt', 'ldr', 'str', 'b', 'beq', 'bne', 'bhs' } { 4 }
+        'lea-data' { 10 }
+        { $_ -in 'load-data', 'load-got' } { 14 }
+        { $_ -in 'call-import', 'call-data' } { 16 }
+        default { throw "Unknown T32 step '$($Step.Op)'." }
+    }
+}
+
+function New-T32Step {
+    # Halfwords for one step at Pc, as bytes. Target is the label address for
+    # branches, the data address for data steps and the GOT slot for imports.
+    # A PC-relative address is movw/movt of (Target - (add + 4)), then
+    # add Rd, pc, the sequence clang emits with -mexecute-only.
+    param([Parameter(Mandatory)] $Step, [long] $Pc, [long] $Target)
+    $pcRelative = {
+        param([int] $Rd, [long] $At)
+        $value = [uint32](($Target - ($At + 8 + 4)) -band 0xFFFFFFFFL)
+        (Get-T32Halfwords 0xF240 $Rd ($value -band 0xFFFF)) + (Get-T32Halfwords 0xF2C0 $Rd ($value -shr 16)) +
+            @([uint16](0x4400 -bor ((($Rd -shr 3) -band 1) -shl 7) -bor (15 -shl 3) -bor ($Rd -band 7)))
+    }
+    $ldrw = { param([int] $Rt, [int] $Rn, [int] $Imm) if ($Imm -lt 0 -or $Imm -gt 4095) { throw "ldr.w offset $Imm out of range." }; @([uint16](0xF8D0 -bor $Rn), [uint16](($Rt -shl 12) -bor $Imm)) }
+    $low = { param([int[]] $Regs) foreach ($r in $Regs) { if ($r -lt 0 -or $r -gt 7) { throw "$($Step.Op) needs r0-r7, not r$r." } } }
+    $hw = switch ($Step.Op) {
+        'label'    { @() }
+        'push'     { $rl = Get-T32RegisterList $Step.Registers 14; @([uint16](0xB400 -bor ($rl[1] -shl 8) -bor $rl[0])) }
+        'pop'      { $rl = Get-T32RegisterList $Step.Registers 15; @([uint16](0xBC00 -bor ($rl[1] -shl 8) -bor $rl[0])) }
+        { $_ -in 'sub-sp', 'add-sp' } {
+            if ($Step.Imm % 4 -or $Step.Imm -lt 0 -or $Step.Imm -gt 508) { throw "$($Step.Op) #$($Step.Imm) is not a multiple of 4 in [0, 508]." }
+            @([uint16]($(if ($Step.Op -eq 'sub-sp') { 0xB080 } else { 0xB000 }) -bor ($Step.Imm / 4)))
+        }
+        'mov'      { @([uint16](0x4600 -bor ((($Step.Rd -shr 3) -band 1) -shl 7) -bor ($Step.Rm -shl 3) -bor ($Step.Rd -band 7))) }
+        'movs'     { & $low @($Step.Rd); if ($Step.Imm -lt 0 -or $Step.Imm -gt 255) { throw "movs #$($Step.Imm) out of range." }; @([uint16](0x2000 -bor ($Step.Rd -shl 8) -bor $Step.Imm)) }
+        'movw'     { Get-T32Halfwords 0xF240 $Step.Rd ([uint32]$Step.Imm) }
+        'movt'     { Get-T32Halfwords 0xF2C0 $Step.Rd ([uint32]$Step.Imm) }
+        'cmp'      { & $low @($Step.Rn, $Step.Rm); @([uint16](0x4280 -bor ($Step.Rm -shl 3) -bor $Step.Rn)) }
+        'cmp-imm'  { & $low @($Step.Rn); if ($Step.Imm -lt 0 -or $Step.Imm -gt 255) { throw "cmp #$($Step.Imm) out of range." }; @([uint16](0x2800 -bor ($Step.Rn -shl 8) -bor $Step.Imm)) }
+        'adds'     { & $low @($Step.Rd, $Step.Rn, $Step.Rm); @([uint16](0x1800 -bor ($Step.Rm -shl 6) -bor ($Step.Rn -shl 3) -bor $Step.Rd)) }
+        'adds-imm' { & $low @($Step.Rd); if ($Step.Imm -lt 0 -or $Step.Imm -gt 255) { throw "adds #$($Step.Imm) out of range." }; @([uint16](0x3000 -bor ($Step.Rd -shl 8) -bor $Step.Imm)) }
+        'ldr'      { & $ldrw $Step.Rt $Step.Rn $Step.Offset }
+        'str'      { if ($Step.Offset -lt 0 -or $Step.Offset -gt 4095) { throw "str.w offset out of range." }; @([uint16](0xF8C0 -bor $Step.Rn), [uint16](($Step.Rt -shl 12) -bor $Step.Offset)) }
+        { $_ -in 'b', 'beq', 'bne', 'bhs' } { New-T32Branch -Op $Step.Op -Distance ($Target - ($Pc + 4)) }
+        'lea-data' { & $pcRelative $Step.Rd $Pc }
+        { $_ -in 'load-data', 'load-got' } { (& $pcRelative $Step.Rd $Pc) + (& $ldrw $Step.Rd $Step.Rd 0) }
+        { $_ -in 'call-import', 'call-data' } { (& $pcRelative 12 $Pc) + (& $ldrw 12 12 0) + @([uint16](0x4780 -bor (12 -shl 3))) }
+        default    { throw "Unknown T32 step '$($Step.Op)'." }
+    }
+    [byte[]]@($hw | ForEach-Object { [BitConverter]::GetBytes([uint16]$_) } | ForEach-Object { $_ })
+}
+
+function Read-T32Instruction {
+    # Independent decode of the forms above from their fixed bits. Returns the
+    # form and its operands, and Length 2 or 4.
+    param([Parameter(Mandatory)][uint16] $First, [uint16] $Second = 0)
+    $one = { param($o) $o | Add-Member Length 2 -PassThru }
+    $two = { param($o) $o | Add-Member Length 4 -PassThru }
+    if (($First -band 0xFE00) -eq 0xB400) { return & $one ([pscustomobject]@{ Op = 'push'; Registers = @(0..7 | Where-Object { $First -band (1 -shl $_) }) + @(if ($First -band 0x100) { 14 }) }) }
+    if (($First -band 0xFE00) -eq 0xBC00) { return & $one ([pscustomobject]@{ Op = 'pop'; Registers = @(0..7 | Where-Object { $First -band (1 -shl $_) }) + @(if ($First -band 0x100) { 15 }) }) }
+    if (($First -band 0xFF80) -eq 0xB080) { return & $one ([pscustomobject]@{ Op = 'sub-sp'; Imm = 4 * ($First -band 0x7F) }) }
+    if (($First -band 0xFF80) -eq 0xB000) { return & $one ([pscustomobject]@{ Op = 'add-sp'; Imm = 4 * ($First -band 0x7F) }) }
+    if (($First -band 0xFF00) -eq 0x4600) { return & $one ([pscustomobject]@{ Op = 'mov'; Rd = (($First -shr 4) -band 8) -bor ($First -band 7); Rm = ($First -shr 3) -band 0xF }) }
+    if (($First -band 0xFF00) -eq 0x4400) { return & $one ([pscustomobject]@{ Op = 'add-reg'; Rd = (($First -shr 4) -band 8) -bor ($First -band 7); Rm = ($First -shr 3) -band 0xF }) }
+    if (($First -band 0xFF87) -eq 0x4780) { return & $one ([pscustomobject]@{ Op = 'blx'; Rm = ($First -shr 3) -band 0xF }) }
+    if (($First -band 0xFFC0) -eq 0x4280) { return & $one ([pscustomobject]@{ Op = 'cmp'; Rn = $First -band 7; Rm = ($First -shr 3) -band 7 }) }
+    if (($First -band 0xF800) -eq 0x2000) { return & $one ([pscustomobject]@{ Op = 'movs'; Rd = ($First -shr 8) -band 7; Imm = $First -band 0xFF }) }
+    if (($First -band 0xF800) -eq 0x2800) { return & $one ([pscustomobject]@{ Op = 'cmp-imm'; Rn = ($First -shr 8) -band 7; Imm = $First -band 0xFF }) }
+    if (($First -band 0xF800) -eq 0x3000) { return & $one ([pscustomobject]@{ Op = 'adds-imm'; Rd = ($First -shr 8) -band 7; Imm = $First -band 0xFF }) }
+    if (($First -band 0xFE00) -eq 0x1800) { return & $one ([pscustomobject]@{ Op = 'adds'; Rd = $First -band 7; Rn = ($First -shr 3) -band 7; Rm = ($First -shr 6) -band 7 }) }
+    if (($First -band 0xFBF0) -eq 0xF240 -or ($First -band 0xFBF0) -eq 0xF2C0) {
+        if ($Second -band 0x8000) { throw ('T32 0x{0:X4} {1:X4} is not MOVW/MOVT.' -f $First, $Second) }
+        $imm = (($First -band 0xF) -shl 12) -bor ((($First -shr 10) -band 1) -shl 11) -bor ((($Second -shr 12) -band 7) -shl 8) -bor ($Second -band 0xFF)
+        return & $two ([pscustomobject]@{ Op = $(if ($First -band 0x80) { 'movt' } else { 'movw' }); Rd = ($Second -shr 8) -band 0xF; Imm = [uint32]$imm })
+    }
+    if (($First -band 0xFFF0) -eq 0xF8D0) { return & $two ([pscustomobject]@{ Op = 'ldr'; Rn = $First -band 0xF; Rt = ($Second -shr 12) -band 0xF; Offset = $Second -band 0xFFF }) }
+    if (($First -band 0xFFF0) -eq 0xF8C0) { return & $two ([pscustomobject]@{ Op = 'str'; Rn = $First -band 0xF; Rt = ($Second -shr 12) -band 0xF; Offset = $Second -band 0xFFF }) }
+    if (($First -band 0xF800) -eq 0xF000 -and ($Second -band 0xD000) -eq 0x9000) {
+        $s = ($First -shr 10) -band 1; $j1 = ($Second -shr 13) -band 1; $j2 = ($Second -shr 11) -band 1
+        $i1 = (-bnot ($j1 -bxor $s)) -band 1; $i2 = (-bnot ($j2 -bxor $s)) -band 1
+        $v = ($s -shl 24) -bor ($i1 -shl 23) -bor ($i2 -shl 22) -bor (($First -band 0x3FF) -shl 12) -bor (($Second -band 0x7FF) -shl 1)
+        if ($s) { $v -= 0x2000000 }
+        return & $two ([pscustomobject]@{ Op = 'b'; Distance = [long]$v })
+    }
+    if (($First -band 0xF800) -eq 0xF000 -and ($Second -band 0xD000) -eq 0x8000) {
+        $cond = ($First -shr 6) -band 0xF
+        $s = ($First -shr 10) -band 1; $j1 = ($Second -shr 13) -band 1; $j2 = ($Second -shr 11) -band 1
+        $v = ($s -shl 20) -bor ($j2 -shl 19) -bor ($j1 -shl 18) -bor (($First -band 0x3F) -shl 12) -bor (($Second -band 0x7FF) -shl 1)
+        if ($s) { $v -= 0x200000 }
+        $op = switch ($cond) { 0 { 'beq' } 1 { 'bne' } 2 { 'bhs' } default { throw "T32 condition $cond is not used here." } }
+        return & $two ([pscustomobject]@{ Op = $op; Distance = [long]$v })
+    }
+    throw ('Unrecognized T32 instruction 0x{0:X4} 0x{1:X4}.' -f $First, $Second)
+}
+
+function Test-T32Step {
+    # Decodes the step at Pc and checks it against the intended step, including
+    # every PC-relative target. Returns the step's length.
+    param([Parameter(Mandatory)][byte[]] $Image, [Parameter(Mandatory)][long] $Pc, [Parameter(Mandatory)] $Step,
+          $DataAt, $SlotImport, [hashtable] $Labels, [string] $Name)
+    $at = $Pc
+    $next = { $first = [BitConverter]::ToUInt16($Image, [int]$script:t32At); $second = if ($script:t32At + 2 -lt $Image.Length) { [BitConverter]::ToUInt16($Image, [int]$script:t32At + 2) } else { 0 }; $d = Read-T32Instruction -First $first -Second $second; $script:t32At += $d.Length; $d }
+    $script:t32At = $Pc
+    $pcRelative = {
+        param([int] $Rd)
+        $w = & $next; $t = & $next; $a = & $next
+        if ($w.Op -ne 'movw' -or $t.Op -ne 'movt' -or $a.Op -ne 'add-reg' -or $w.Rd -ne $Rd -or $t.Rd -ne $Rd -or $a.Rd -ne $Rd -or $a.Rm -ne 15) { throw "$Name at ${Pc}: expected movw/movt/add pc into r$Rd." }
+        [long]((($script:t32At - 2 + 4) + ([long]$t.Imm -shl 16 -bor $w.Imm)) -band 0xFFFFFFFFL)
+    }
+    $ok = switch ($Step.Op) {
+        'label'    { $true }
+        { $_ -in 'push', 'pop' } { $d = & $next; $d.Op -eq $Step.Op -and (@($d.Registers) -join ',') -eq (@($Step.Registers | Sort-Object) -join ',') }
+        { $_ -in 'sub-sp', 'add-sp' } { $d = & $next; $d.Op -eq $Step.Op -and $d.Imm -eq $Step.Imm }
+        'mov'      { $d = & $next; $d.Op -eq 'mov' -and $d.Rd -eq $Step.Rd -and $d.Rm -eq $Step.Rm }
+        { $_ -in 'movs', 'movw', 'movt' } { $d = & $next; $d.Op -eq $Step.Op -and $d.Rd -eq $Step.Rd -and $d.Imm -eq [uint32]$Step.Imm }
+        'cmp'      { $d = & $next; $d.Op -eq 'cmp' -and $d.Rn -eq $Step.Rn -and $d.Rm -eq $Step.Rm }
+        'cmp-imm'  { $d = & $next; $d.Op -eq 'cmp-imm' -and $d.Rn -eq $Step.Rn -and $d.Imm -eq $Step.Imm }
+        'adds'     { $d = & $next; $d.Op -eq 'adds' -and $d.Rd -eq $Step.Rd -and $d.Rn -eq $Step.Rn -and $d.Rm -eq $Step.Rm }
+        'adds-imm' { $d = & $next; $d.Op -eq 'adds-imm' -and $d.Rd -eq $Step.Rd -and $d.Imm -eq $Step.Imm }
+        { $_ -in 'ldr', 'str' } { $d = & $next; $d.Op -eq $Step.Op -and $d.Rt -eq $Step.Rt -and $d.Rn -eq $Step.Rn -and $d.Offset -eq $Step.Offset }
+        { $_ -in 'b', 'beq', 'bne', 'bhs' } { $d = & $next; $d.Op -eq $Step.Op -and ($Pc + 4 + $d.Distance) -eq $Labels[$Step.Label] }
+        'lea-data' { (& $pcRelative $Step.Rd) -eq $DataAt[$Step.Data] }
+        'load-data' { $target = & $pcRelative $Step.Rd; $l = & $next; $target -eq $DataAt[$Step.Data] -and $l.Op -eq 'ldr' -and $l.Rt -eq $Step.Rd -and $l.Rn -eq $Step.Rd -and $l.Offset -eq 0 }
+        'load-got' { $target = & $pcRelative $Step.Rd; $l = & $next; $SlotImport[$target] -ceq $Step.Import -and $l.Op -eq 'ldr' -and $l.Rt -eq $Step.Rd -and $l.Rn -eq $Step.Rd -and $l.Offset -eq 0 }
+        { $_ -in 'call-import', 'call-data' } {
+            $target = & $pcRelative 12; $l = & $next; $x = & $next
+            $where = if ($Step.Op -eq 'call-import') { $SlotImport[$target] -ceq $Step.Import } else { $target -eq $DataAt[$Step.Data] }
+            $where -and $l.Op -eq 'ldr' -and $l.Rt -eq 12 -and $l.Rn -eq 12 -and $l.Offset -eq 0 -and $x.Op -eq 'blx' -and $x.Rm -eq 12
+        }
+    }
+    if (-not $ok) { throw "$Name at ${Pc}: the decoded bytes do not match step $($Step.Op)." }
+    $length = Get-T32StepLength -Step $Step
+    if ($script:t32At - $Pc -ne $length) { throw "$Name at ${Pc}: step $($Step.Op) decoded as $($script:t32At - $Pc) bytes, expected $length." }
+    $length
+}
+
+function Test-T32CallAbi {
+    <#
+        Checks a T32 step program against AAPCS32 over its control-flow graph:
+        arguments r0-r3 set, and stacked arguments stored at [sp, #4k], on every
+        path to a call; a call keeps only r4-r11 and defines r0; sp stays 8-byte
+        aligned at calls and returns to its entry value at the exit; equal stack
+        depth at joins; a function that calls or writes r4-r11 pushes them with
+        lr in its first step and leaves only through the matching pop into pc;
+        every block reachable.
+    #>
+    param([Parameter(Mandatory)][object[]] $Steps, [int] $Parameters = 0, [string] $Name = 'function')
+
+    $calleeSaved = 4..11
+    $branches = @('b', 'beq', 'bne', 'bhs')
+    $calls = @('call-import', 'call-data')
+    $labelIndex = @{}
+    for ($i = 0; $i -lt $Steps.Count; $i++) {
+        if ($Steps[$i]['Op'] -eq 'label') {
+            if ($labelIndex.ContainsKey($Steps[$i]['Name'])) { throw "$Name defines label '$($Steps[$i]['Name'])' twice." }
+            $labelIndex[$Steps[$i]['Name']] = $i
+        }
+    }
+    foreach ($step in $Steps) { if ($step['Op'] -in $branches -and -not $labelIndex.ContainsKey($step['Label'])) { throw "$Name branches to undefined label '$($step['Label'])'." } }
+
+    $saved = if ($Steps.Count -and $Steps[0]['Op'] -eq 'push') { @($Steps[0]['Registers']) } else { @() }
+    $makesCalls = @($Steps | Where-Object { $_['Op'] -in $calls }).Count -gt 0
+    if ($makesCalls -and 14 -notin $saved) { throw "$Name calls without pushing lr in its first step." }
+    $restore = @($saved | ForEach-Object { if ($_ -eq 14) { 15 } else { $_ } } | Sort-Object)
+    for ($i = 1; $i -lt $Steps.Count; $i++) {
+        $step = $Steps[$i]
+        if ($step['Op'] -eq 'push') { throw "$Name pushes after its first step." }
+        if ($step['Op'] -eq 'pop' -and (@($step['Registers'] | Sort-Object) -join ',') -ne ($restore -join ',')) { throw "$Name pops {$(@($step['Registers']) -join ',')}, not the {$($restore -join ',')} its prologue saved." }
+        $written = if ($step['Op'] -in 'str', 'cmp', 'cmp-imm') { $null } elseif ($step['Op'] -in 'ldr') { $step['Rt'] } else { $step['Rd'] }
+        if ($null -ne $written -and $written -in $calleeSaved -and $written -notin $saved) { throw "$Name writes callee-saved r$written without pushing it." }
+        if ($null -ne $written -and $written -in 13, 15) { throw "$Name writes r$written directly." }
+    }
+
+    $leaders = [System.Collections.Generic.SortedSet[int]]::new()
+    [void]$leaders.Add(0)
+    for ($i = 0; $i -lt $Steps.Count; $i++) {
+        if ($Steps[$i]['Op'] -eq 'label') { [void]$leaders.Add($i) }
+        if ($Steps[$i]['Op'] -in ($branches + @('pop')) -and $i + 1 -lt $Steps.Count) { [void]$leaders.Add($i + 1) }
+    }
+    $starts = @($leaders)
+    $blockOf = @{}
+    for ($b = 0; $b -lt $starts.Count; $b++) {
+        $end = if ($b + 1 -lt $starts.Count) { $starts[$b + 1] } else { $Steps.Count }
+        for ($i = $starts[$b]; $i -lt $end; $i++) { $blockOf[$i] = $b }
+    }
+    $copy = { param($s) [pscustomobject]@{ Depth = $s.Depth; Written = [System.Collections.Generic.HashSet[int]]::new($s.Written); Slots = [System.Collections.Generic.HashSet[int]]::new($s.Slots) } }
+    $entry = [pscustomobject]@{ Depth = 0; Written = [System.Collections.Generic.HashSet[int]]::new(); Slots = [System.Collections.Generic.HashSet[int]]::new() }
+    for ($a = 0; $a -lt $Parameters; $a++) { [void]$entry.Written.Add($a) }
+    $inState = @{ 0 = $entry }
+    $queue = [System.Collections.Generic.Queue[int]]::new(); $queue.Enqueue(0)
+    $flow = {
+        param([int] $target, $state)
+        if (-not $inState.ContainsKey($target)) { $inState[$target] = & $copy $state; $queue.Enqueue($target); return }
+        $current = $inState[$target]
+        if ($current.Depth -ne $state.Depth) { throw "$Name reaches block $target with stack depths $($current.Depth) and $($state.Depth)." }
+        $before = $current.Written.Count + $current.Slots.Count
+        $current.Written.IntersectWith($state.Written); $current.Slots.IntersectWith($state.Slots)
+        if ($current.Written.Count + $current.Slots.Count -ne $before) { $queue.Enqueue($target) }
+    }
+    $guard = 0
+    while ($queue.Count -gt 0) {
+        if (++$guard -gt 10000) { throw "${Name}: control-flow analysis did not converge." }
+        $b = $queue.Dequeue()
+        $state = & $copy $inState[$b]
+        $end = if ($b + 1 -lt $starts.Count) { $starts[$b + 1] } else { $Steps.Count }
+        $fallsThrough = $true
+        for ($i = $starts[$b]; $i -lt $end; $i++) {
+            $step = $Steps[$i]
+            switch ($step['Op']) {
+                'label'  { }
+                'push'   { $state.Depth += 4 * @($step['Registers']).Count }
+                'sub-sp' { $state.Depth += $step['Imm']; $state.Slots.Clear() }
+                'add-sp' { $state.Depth -= $step['Imm']; $state.Slots.Clear() }
+                'str'    { if ($step['Rn'] -eq 13) { [void]$state.Slots.Add($step['Offset']) } }
+                'cmp'    { } 'cmp-imm' { }
+                'pop'    {
+                    $state.Depth -= 4 * @($step['Registers']).Count
+                    if ($state.Depth -ne 0) { throw "$Name leaves with sp $($state.Depth) bytes below entry." }
+                    $fallsThrough = $false
+                }
+                { $_ -in $calls } {
+                    $callee = "$($step['Import'])$($step['Data'])"
+                    if ($state.Depth % 8 -ne 0) { throw "$Name calls $callee with sp $($state.Depth) bytes below entry, not 8-byte aligned." }
+                    $count = [int]$step['Args']
+                    for ($a = 0; $a -lt [Math]::Min(4, $count); $a++) { if (-not $state.Written.Contains($a)) { throw "$Name calls $callee without setting r$a on every path." } }
+                    for ($a = 4; $a -lt $count; $a++) { if (-not $state.Slots.Contains(4 * ($a - 4))) { throw "$Name calls $callee without storing argument $($a + 1) at [sp, #$(4 * ($a - 4))] on every path." } }
+                    $state.Written.IntersectWith([int[]]$calleeSaved); [void]$state.Written.Add(0)
+                    $state.Slots.Clear()
+                }
+                { $_ -in 'beq', 'bne', 'bhs' } { & $flow $blockOf[$labelIndex[$step['Label']]] $state }
+                'b' { & $flow $blockOf[$labelIndex[$step['Label']]] $state; $fallsThrough = $false }
+                default { $r = if ($step['Op'] -eq 'ldr') { $step['Rt'] } else { $step['Rd'] }; if ($null -ne $r) { [void]$state.Written.Add($r) } }
+            }
+        }
+        if ($fallsThrough -and $b + 1 -lt $starts.Count) { & $flow ($b + 1) $state }
+        if ($fallsThrough -and $b + 1 -ge $starts.Count) { throw "$Name runs off its end without pop into pc." }
+    }
+    for ($b = 0; $b -lt $starts.Count; $b++) {
+        if (-not $inState.ContainsKey($b)) {
+            $end = if ($b + 1 -lt $starts.Count) { $starts[$b + 1] } else { $Steps.Count }
+            if (@($Steps[$starts[$b]..($end - 1)] | Where-Object { $_['Op'] -ne 'label' }).Count) { throw "$Name has unreachable code at step $($starts[$b])." }
+        }
+    }
+}
+
 function Get-InstructionSet {
     # The selected target's instruction set, as the operations the shared ELF
     # code-library writer and reader call. Everything machine-specific stays in
-    # that instruction set's own section.
-    switch ($script:Target.Isa) {
-        'A64' { return [pscustomobject]@{ Name = 'A64'; Alignment = 4; Length = ${function:Get-A64StepLength}; Encode = ${function:New-A64Step}; Verify = ${function:Test-A64Step} } }
-        'X64' { return [pscustomobject]@{ Name = 'x86-64'; Alignment = 1; Length = ${function:Get-X64StepLength}; Encode = ${function:New-X64Step}; Verify = ${function:Test-X64Step} } }
-        'A32' { return [pscustomobject]@{ Name = 'A32'; Alignment = 4; Length = ${function:Get-A32StepLength}; Encode = ${function:New-A32Step}; Verify = ${function:Test-A32Step} } }
+    # that instruction set's own section. A library may name its own (the arm32
+    # host is T32 beside A32 libpsl-native). StateBit is bit 0 of a code
+    # address in that instruction set: 1 for Thumb, as ELF STT_FUNC values and
+    # function pointers carry it (AAELF32, AAPCS32).
+    param([string] $Isa = $script:Target.Isa)
+    switch ($Isa) {
+        'A64' { return [pscustomobject]@{ Id = 'A64'; Name = 'A64'; Alignment = 4; StateBit = 0; Length = ${function:Get-A64StepLength}; Encode = ${function:New-A64Step}; Verify = ${function:Test-A64Step} } }
+        'X64' { return [pscustomobject]@{ Id = 'X64'; Name = 'x86-64'; Alignment = 1; StateBit = 0; Length = ${function:Get-X64StepLength}; Encode = ${function:New-X64Step}; Verify = ${function:Test-X64Step} } }
+        'A32' { return [pscustomobject]@{ Id = 'A32'; Name = 'A32'; Alignment = 4; StateBit = 0; Length = ${function:Get-A32StepLength}; Encode = ${function:New-A32Step}; Verify = ${function:Test-A32Step} } }
+        'T32' {
+            if ($script:Target.Machine -ne 'EM_ARM') { throw 'T32 code needs the ARM target.' }
+            return [pscustomobject]@{ Id = 'T32'; Name = 'T32'; Alignment = 2; StateBit = 1; Length = ${function:Get-T32StepLength}; Encode = ${function:New-T32Step}; Verify = ${function:Test-T32Step} }
+        }
         default { throw "No instruction set for target $Architecture." }
     }
 }
@@ -6324,6 +6640,26 @@ function Get-HostRuntimeContractLayout {
     [pscustomobject]@{ Size = $members.Count * $PointerSize; Offsets = $offsets; Members = @($members) }
 }
 
+function Get-NativeActivityFieldOffset {
+    # The offset of a field of ANativeActivity (lib/native_activity.h). Every
+    # member before the ones read here is a pointer: struct and JavaVM, JNIEnv
+    # pointers, and jobject, a JNI reference the size of a pointer (jni.h, not
+    # pinned). Anything else before the field throws.
+    param([Parameter(Mandatory)][string] $Field, [Parameter(Mandatory)][ValidateSet(4, 8)][int] $PointerSize)
+    $text = [System.Text.Encoding]::UTF8.GetString((Import-LibSourceBytes -Path 'native_activity.h'))
+    $body = [regex]::Match($text, 'typedef struct ANativeActivity \{(.*?)\} ANativeActivity;', 'Singleline')
+    if (-not $body.Success) { throw 'native_activity.h does not declare ANativeActivity.' }
+    $offset = 0
+    foreach ($line in ($body.Groups[1].Value -split "`n")) {
+        $member = [regex]::Match($line, '^\s*(?<type>[A-Za-z_][\w\s]*?\*?)\s*(?<name>\w+);\s*$')
+        if (-not $member.Success) { continue }
+        if ($member.Groups['name'].Value -ceq $Field) { return $offset }
+        if ($member.Groups['type'].Value -notmatch '\*$' -and $member.Groups['type'].Value.Trim() -cne 'jobject') { throw "ANativeActivity.$($member.Groups['name'].Value), before $Field, is not a pointer." }
+        $offset += $PointerSize
+    }
+    throw "ANativeActivity has no field '$Field'."
+}
+
 function New-NativeHostLibrary {
     <#
         Gate 2a: libpwsh-host.so owns CoreCLR start-up. ANativeActivity_onCreate
@@ -6345,7 +6681,9 @@ function New-NativeHostLibrary {
         [Parameter(Mandatory)][string] $StoreSymbol,
         [int] $PageSize = 16384
     )
-    if ($Architecture -notin 'x64', 'arm64') { throw "Gate 2a is implemented for x64 and arm64; $Architecture follows after gates 2b and 2c." }
+    # Pointer-sized fields follow the target: 4 bytes on arm32, 8 elsewhere.
+    $ps = if ($script:Target.ElfClass -eq 32) { 4 } else { 8 }
+    $pointerBytes = { param([long] $Value) [byte[]]([BitConverter]::GetBytes([uint64]$Value)[0..($ps - 1)]) }
 
     $info = Get-AndroidLogPriority -Name 'ANDROID_LOG_INFO'
     $errorPriority = Get-AndroidLogPriority -Name 'ANDROID_LOG_ERROR'
@@ -6375,7 +6713,7 @@ function New-NativeHostLibrary {
         $data['fmtProbeHit'] = & $ascii 'PROBE hit:     %s'
         $data['fmtProbeMiss'] = & $ascii 'PROBE miss:    %s'
     }
-    if ($Architecture -in 'x64', 'arm64') {
+    if ($Architecture -in 'x64', 'arm64', 'arm32') {
         # Gates 2b/2c: after Admit holds, the host calls RunPowerShell.
         $data['runMethodName'] = & $ascii 'RunPowerShell'
         $data['fmtAdmitWrong'] = & $ascii 'GATE2A Admit returned 0x%08x, expected 0x50575348'
@@ -6387,30 +6725,31 @@ function New-NativeHostLibrary {
 
     # host_runtime_contract, laid out from the pinned header: zero except its
     # size and external_assembly_probe.
-    $layout = Get-HostRuntimeContractLayout -PointerSize 8
+    $layout = Get-HostRuntimeContractLayout -PointerSize $ps
     $contract = [byte[]]::new($layout.Size)
-    [System.Array]::Copy([BitConverter]::GetBytes([uint64]$layout.Size), 0, $contract, $layout.Offsets['size'], 8)
+    [System.Array]::Copy((& $pointerBytes $layout.Size), 0, $contract, $layout.Offsets['size'], $ps)
     $probeOffset = $layout.Offsets['external_assembly_probe']
-    # The probe table: name pointer, data offset in the store, data size; a
-    # zero name pointer ends it.
-    $table = [byte[]]::new(24 * ($StoreEntries.Count + 1))
+    # The probe table: name pointer, data offset in the store, data size, each
+    # pointer-sized; a zero name pointer ends it.
+    $record = 3 * $ps
+    $table = [byte[]]::new($record * ($StoreEntries.Count + 1))
     $tablePointers = for ($i = 0; $i -lt $StoreEntries.Count; $i++) {
-        [System.Array]::Copy([BitConverter]::GetBytes([uint64]$StoreEntries[$i].Offset), 0, $table, 24 * $i + 8, 8)
-        [System.Array]::Copy([BitConverter]::GetBytes([uint64]$StoreEntries[$i].Size), 0, $table, 24 * $i + 16, 8)
-        @{ At = 24 * $i; Target = "assembly$i" }
+        [System.Array]::Copy((& $pointerBytes $StoreEntries[$i].Offset), 0, $table, $record * $i + $ps, $ps)
+        [System.Array]::Copy((& $pointerBytes $StoreEntries[$i].Size), 0, $table, $record * $i + 2 * $ps, $ps)
+        @{ At = $record * $i; Target = "assembly$i" }
     }
     $writable = [ordered]@{
         baseDirectory = [byte[]]::new(512)
         contractText  = [byte[]]::new(32)
-        hostHandle    = [byte[]]::new(8)
+        hostHandle    = [byte[]]::new($ps)
         domainId      = [byte[]]::new(8)
-        admit         = [byte[]]::new(8)
-        propertyKeys   = @{ Bytes = [byte[]]::new(24); Pointers = @(@{ At = 0; Target = 'keyContract' }, @{ At = 8; Target = 'keyRid' }, @{ At = 16; Target = 'keyBase' }) }
-        propertyValues = @{ Bytes = [byte[]]::new(24); Pointers = @(@{ At = 0; Target = 'contractText' }, @{ At = 8; Target = 'rid' }, @{ At = 16; Target = 'baseDirectory' }) }
+        admit         = [byte[]]::new($ps)
+        propertyKeys   = @{ Bytes = [byte[]]::new(3 * $ps); Pointers = @(@{ At = 0; Target = 'keyContract' }, @{ At = $ps; Target = 'keyRid' }, @{ At = 2 * $ps; Target = 'keyBase' }) }
+        propertyValues = @{ Bytes = [byte[]]::new(3 * $ps); Pointers = @(@{ At = 0; Target = 'contractText' }, @{ At = $ps; Target = 'rid' }, @{ At = 2 * $ps; Target = 'baseDirectory' }) }
         contract      = @{ Bytes = $contract; Pointers = @(@{ At = $probeOffset; Target = 'pwsh_assembly_probe' }) }
         probeTable    = @{ Bytes = $table; Pointers = @($tablePointers) }
     }
-    if ($Architecture -in 'x64', 'arm64') { $writable['runPowerShell'] = [byte[]]::new(8) }
+    $writable['runPowerShell'] = [byte[]]::new($ps)
     if ($Architecture -eq 'arm64') {
         # 2^32 - 0x50575348. CMP (immediate) holds 12 bits, so the A64 host adds
         # this to Admit's result and tests the low word for zero instead.
@@ -6546,6 +6885,132 @@ function New-NativeHostLibrary {
 
     Test-A64CallAbi -Steps $onCreate -Parameters 3 -Name 'ANativeActivity_onCreate'
     Test-A64CallAbi -Steps $probe -Parameters 3 -Name 'pwsh_assembly_probe'
+    }
+    elseif ($Architecture -eq 'arm32') {
+    # AAPCS32 in Thumb-2: arguments r0-r3 then [sp], [sp, #4], ...; result r0;
+    # r4-r11 callee-saved; r12 scratch for calls through the GOT; sp 8-byte
+    # aligned at calls. push {r4-r6, lr} and a 16-byte outgoing area keep sp
+    # aligned and hold up to three stacked arguments (coreclr_initialize has
+    # seven, coreclr_create_delegate six).
+    $internalDataPath = Get-NativeActivityFieldOffset -Field 'internalDataPath' -PointerSize $ps
+    $logFailure = { param([string] $label, [string] $format) @(
+        @{ Op = 'label'; Name = $label },
+        @{ Op = 'mov'; Rd = 3; Rm = 0 },
+        @{ Op = 'movs'; Rd = 0; Imm = $errorPriority },
+        @{ Op = 'lea-data'; Rd = 1; Data = 'tag' },
+        @{ Op = 'lea-data'; Rd = 2; Data = $format },
+        @{ Op = 'call-import'; Import = '__android_log_print'; Args = 4; Variadic = $true },
+        @{ Op = 'b'; Label = 'done' }) }
+    $logInfo = { param([string] $format, [bool] $withValue) @(
+        if ($withValue) { @{ Op = 'mov'; Rd = 3; Rm = 0 } }
+        @{ Op = 'movs'; Rd = 0; Imm = $info },
+        @{ Op = 'lea-data'; Rd = 1; Data = 'tag' },
+        @{ Op = 'lea-data'; Rd = 2; Data = $format },
+        @{ Op = 'call-import'; Import = '__android_log_print'; Args = $(if ($withValue) { 4 } else { 3 }); Variadic = $true }) }
+    # coreclr_create_delegate(*hostHandle, *domainId, "Pwsh", type, method, slot)
+    $createDelegate = { param([string] $method, [string] $slot, [string] $failed) @(
+        @{ Op = 'lea-data'; Rd = 0; Data = $method },
+        @{ Op = 'str'; Rt = 0; Rn = 13; Offset = 0 },
+        @{ Op = 'lea-data'; Rd = 0; Data = $slot },
+        @{ Op = 'str'; Rt = 0; Rn = 13; Offset = 4 },
+        @{ Op = 'load-data'; Rd = 0; Data = 'hostHandle' },
+        @{ Op = 'load-data'; Rd = 1; Data = 'domainId' },
+        @{ Op = 'lea-data'; Rd = 2; Data = 'assemblyName' },
+        @{ Op = 'lea-data'; Rd = 3; Data = 'typeName' },
+        @{ Op = 'call-import'; Import = 'coreclr_create_delegate'; Args = 6 },
+        @{ Op = 'cmp-imm'; Rn = 0; Imm = 0 },
+        @{ Op = 'bne'; Label = $failed }) }
+    $onCreate = @(
+        @{ Op = 'push'; Registers = @(4, 5, 6, 14) },
+        @{ Op = 'sub-sp'; Imm = 16 },
+        @{ Op = 'mov'; Rd = 4; Rm = 0 },                                  # r4 = activity
+        # snprintf(baseDirectory, 512, "%s/", activity->internalDataPath)
+        @{ Op = 'lea-data'; Rd = 0; Data = 'baseDirectory' },
+        @{ Op = 'movw'; Rd = 1; Imm = 512 },
+        @{ Op = 'lea-data'; Rd = 2; Data = 'fmtDirectory' },
+        @{ Op = 'ldr'; Rt = 3; Rn = 4; Offset = $internalDataPath },
+        @{ Op = 'call-import'; Import = 'snprintf'; Args = 4; Variadic = $true },
+        @{ Op = 'movw'; Rd = 1; Imm = 512 },
+        @{ Op = 'cmp'; Rn = 0; Rm = 1 },
+        @{ Op = 'bhs'; Label = 'directoryFailed' },
+        # snprintf(contractText, 32, "%p", &contract)
+        @{ Op = 'lea-data'; Rd = 0; Data = 'contractText' },
+        @{ Op = 'movs'; Rd = 1; Imm = 32 },
+        @{ Op = 'lea-data'; Rd = 2; Data = 'fmtPointer' },
+        @{ Op = 'lea-data'; Rd = 3; Data = 'contract' },
+        @{ Op = 'call-import'; Import = 'snprintf'; Args = 4; Variadic = $true },
+        @{ Op = 'cmp-imm'; Rn = 0; Imm = 32 },
+        @{ Op = 'bhs'; Label = 'contractFailed' },
+        # coreclr_initialize(package, "Pwsh", 3, keys, values, &hostHandle, &domainId)
+        @{ Op = 'lea-data'; Rd = 0; Data = 'propertyValues' },
+        @{ Op = 'str'; Rt = 0; Rn = 13; Offset = 0 },
+        @{ Op = 'lea-data'; Rd = 0; Data = 'hostHandle' },
+        @{ Op = 'str'; Rt = 0; Rn = 13; Offset = 4 },
+        @{ Op = 'lea-data'; Rd = 0; Data = 'domainId' },
+        @{ Op = 'str'; Rt = 0; Rn = 13; Offset = 8 },
+        @{ Op = 'lea-data'; Rd = 0; Data = 'packageName' },
+        @{ Op = 'lea-data'; Rd = 1; Data = 'domainName' },
+        @{ Op = 'movs'; Rd = 2; Imm = 3 },
+        @{ Op = 'lea-data'; Rd = 3; Data = 'propertyKeys' },
+        @{ Op = 'call-import'; Import = 'coreclr_initialize'; Args = 7 },
+        @{ Op = 'cmp-imm'; Rn = 0; Imm = 0 },
+        @{ Op = 'bne'; Label = 'initFailed' }
+    ) + (& $createDelegate 'methodName' 'admit' 'delegateFailed') + @(
+        # Admit() must return 'PWSH'.
+        @{ Op = 'call-data'; Data = 'admit'; Args = 0 },
+        @{ Op = 'movw'; Rd = 1; Imm = 0x5348 },
+        @{ Op = 'movt'; Rd = 1; Imm = 0x5057 },
+        @{ Op = 'cmp'; Rn = 0; Rm = 1 },
+        @{ Op = 'bne'; Label = 'admitWrong' }
+    ) + (& $logInfo 'fmtAdmit' $true) + (& $createDelegate 'runMethodName' 'runPowerShell' 'runDelegateFailed') + (& $logInfo 'fmtBegin' $false) + @(
+        @{ Op = 'call-data'; Data = 'runPowerShell'; Args = 0 }
+    ) + (& $logInfo 'fmtRun' $true) + @(
+        @{ Op = 'b'; Label = 'done' }
+    ) + (& $logFailure 'directoryFailed' 'fmtDirectory2') + (& $logFailure 'contractFailed' 'fmtContract') + (& $logFailure 'initFailed' 'fmtInit') + (& $logFailure 'delegateFailed' 'fmtDelegate') +
+        (& $logFailure 'admitWrong' 'fmtAdmitWrong') + (& $logFailure 'runDelegateFailed' 'fmtRunDelegate') + @(
+        @{ Op = 'label'; Name = 'done' },
+        @{ Op = 'add-sp'; Imm = 16 },
+        @{ Op = 'pop'; Registers = @(4, 5, 6, 15) })
+
+    # bool pwsh_assembly_probe(const char* path, void** data_start, int64_t* size)
+    # r4 path, r5 data_start, r6 size, r7 table cursor. *size is 64-bit: its
+    # high word is written zero.
+    $probe = @(
+        @{ Op = 'push'; Registers = @(4, 5, 6, 7, 14) },
+        @{ Op = 'sub-sp'; Imm = 4 },
+        @{ Op = 'mov'; Rd = 4; Rm = 0 },
+        @{ Op = 'mov'; Rd = 5; Rm = 1 },
+        @{ Op = 'mov'; Rd = 6; Rm = 2 },
+        @{ Op = 'lea-data'; Rd = 7; Data = 'probeTable' },
+        @{ Op = 'label'; Name = 'next' },
+        @{ Op = 'ldr'; Rt = 1; Rn = 7; Offset = 0 },
+        @{ Op = 'cmp-imm'; Rn = 1; Imm = 0 },
+        @{ Op = 'beq'; Label = 'missing' },
+        @{ Op = 'mov'; Rd = 0; Rm = 4 },
+        @{ Op = 'call-import'; Import = 'strcmp'; Args = 2 },
+        @{ Op = 'cmp-imm'; Rn = 0; Imm = 0 },
+        @{ Op = 'beq'; Label = 'found' },
+        @{ Op = 'adds-imm'; Rd = 7; Imm = $record },
+        @{ Op = 'b'; Label = 'next' },
+        @{ Op = 'label'; Name = 'found' },
+        @{ Op = 'load-got'; Rd = 0; Import = $StoreSymbol },
+        @{ Op = 'ldr'; Rt = 1; Rn = 7; Offset = $ps },
+        @{ Op = 'adds'; Rd = 0; Rn = 0; Rm = 1 },
+        @{ Op = 'str'; Rt = 0; Rn = 5; Offset = 0 },
+        @{ Op = 'ldr'; Rt = 1; Rn = 7; Offset = 2 * $ps },
+        @{ Op = 'str'; Rt = 1; Rn = 6; Offset = 0 },
+        @{ Op = 'movs'; Rd = 2; Imm = 0 },
+        @{ Op = 'str'; Rt = 2; Rn = 6; Offset = 4 },
+        @{ Op = 'movs'; Rd = 0; Imm = 1 },
+        @{ Op = 'b'; Label = 'out' },
+        @{ Op = 'label'; Name = 'missing' },
+        @{ Op = 'movs'; Rd = 0; Imm = 0 },
+        @{ Op = 'label'; Name = 'out' },
+        @{ Op = 'add-sp'; Imm = 4 },
+        @{ Op = 'pop'; Registers = @(4, 5, 6, 7, 15) })
+
+    Test-T32CallAbi -Steps $onCreate -Parameters 3 -Name 'ANativeActivity_onCreate'
+    Test-T32CallAbi -Steps $probe -Parameters 3 -Name 'pwsh_assembly_probe'
     }
     else {
     # System V AMD64: rax 0, rcx 1, rdx 2, rbx 3, rsp 4, rbp 5, rsi 6, rdi 7, r8 8, r9 9, r12-r14 12-14.
@@ -6700,20 +7165,23 @@ function New-NativeHostLibrary {
     }
 
     $functions = [ordered]@{ 'ANativeActivity_onCreate' = $onCreate; 'pwsh_assembly_probe' = $probe }
+    $hostIsa = if ($Architecture -eq 'arm32') { 'T32' } else { '' }
     $library = New-ElfCodeLibrary -Soname 'libpwsh-host.so' -Needed @('libc.so', 'liblog.so', 'libcoreclr.so', $StoreLibrary) `
-        -Functions $functions -Data $data -WritableData $writable -PageSize $PageSize
+        -Functions $functions -Data $data -WritableData $writable -PageSize $PageSize -InstructionSet $hostIsa
     $report = Test-ElfCodeLibrary -Library $library
 
     # The contract as emitted: size, and every member zero but the probe, whose
     # slot is relocated to pwsh_assembly_probe.
     $contractAt = $library.DataAt['contract']
-    if ([BitConverter]::ToUInt64($library.Bytes, $contractAt + $layout.Offsets['size']) -ne $layout.Size) { throw 'The emitted host_runtime_contract.size is not the pinned structure size.' }
+    $readPointer = { param([long] $At) if ($ps -eq 8) { [long][BitConverter]::ToUInt64($library.Bytes, $At) } else { [long][BitConverter]::ToUInt32($library.Bytes, $At) } }
+    if ((& $readPointer ($contractAt + $layout.Offsets['size'])) -ne $layout.Size) { throw 'The emitted host_runtime_contract.size is not the pinned structure size.' }
     foreach ($member in $layout.Members) {
         if ($member -in 'size', 'external_assembly_probe') { continue }
-        if ([BitConverter]::ToUInt64($library.Bytes, $contractAt + $layout.Offsets[$member]) -ne 0) { throw "host_runtime_contract.$member is not zero." }
+        if ((& $readPointer ($contractAt + $layout.Offsets[$member])) -ne 0) { throw "host_runtime_contract.$member is not zero." }
     }
+    # The probe is a code pointer: it carries the host instruction set's state bit.
     $probeSlot = @((Read-ElfImage -Image $library.Bytes).Relocations | Where-Object { $_.Offset -eq $contractAt + $probeOffset })
-    if ($probeSlot.Count -ne 1 -or $probeSlot[0].Addend -ne $library.Exports['pwsh_assembly_probe']) { throw 'host_runtime_contract.external_assembly_probe is not relocated to pwsh_assembly_probe.' }
+    if ($probeSlot.Count -ne 1 -or $probeSlot[0].Addend -ne $library.Exports['pwsh_assembly_probe'] + $library.StateBit) { throw 'host_runtime_contract.external_assembly_probe is not relocated to pwsh_assembly_probe.' }
     [pscustomobject]@{ Library = $library; Report = $report }
 }
 
@@ -6778,6 +7246,29 @@ function Test-NativeEmitterControls {
     }
     if (@($library.Exports.PSBase.Keys).Count -ne 2) { throw 'Emitter control: functions named Keys and Count were not both exported.' }
     $controls = 2
+
+    if ($script:Target.Machine -eq 'EM_ARM') {
+        # The arm32 host is T32 (AAPCS32).
+        $save = @{ Op = 'push'; Registers = @(4, 14) }
+        $restore = @{ Op = 'pop'; Registers = @(4, 15) }
+        $call = { param([int] $count) @{ Op = 'call-import'; Import = 'f'; Args = $count } }
+        Test-T32CallAbi -Steps @($save, @{ Op = 'lea-data'; Rd = 0; Data = 'a' }, (& $call 1), $restore) -Name 'control'
+        $cases = [ordered]@{
+            'call without pushing lr'      = @(@{ Op = 'lea-data'; Rd = 0; Data = 'a' }, (& $call 1), @{ Op = 'pop'; Registers = @(15) })
+            'argument set on one branch'   = @($save, @{ Op = 'cmp-imm'; Rn = 1; Imm = 0 }, @{ Op = 'beq'; Label = 'join' }, @{ Op = 'lea-data'; Rd = 0; Data = 'a' }, @{ Op = 'label'; Name = 'join' }, (& $call 1), $restore)
+            'misaligned call'              = @(@{ Op = 'push'; Registers = @(4, 5, 14) }, @{ Op = 'lea-data'; Rd = 0; Data = 'a' }, (& $call 1), @{ Op = 'pop'; Registers = @(4, 5, 15) })
+            'stacked argument not stored'  = @($save, @{ Op = 'sub-sp'; Imm = 8 }, @{ Op = 'movs'; Rd = 0; Imm = 0 }, @{ Op = 'movs'; Rd = 1; Imm = 0 }, @{ Op = 'movs'; Rd = 2; Imm = 0 }, @{ Op = 'movs'; Rd = 3; Imm = 0 }, (& $call 5), @{ Op = 'add-sp'; Imm = 8 }, $restore)
+            'unsaved callee-saved write'   = @($save, @{ Op = 'mov'; Rd = 5; Rm = 0 }, $restore)
+            'pop differs from push'        = @($save, @{ Op = 'pop'; Registers = @(5, 15) })
+            'unreachable code'             = @($save, $restore, @{ Op = 'movs'; Rd = 0; Imm = 0 }, $restore)
+        }
+        foreach ($case in $cases.PSBase.Keys) {
+            $rejected = $false
+            try { Test-T32CallAbi -Steps $cases[$case] -Name 'control' } catch { $rejected = $true }
+            if (-not $rejected) { throw "T32 ABI control '$case' was accepted." }
+            $controls++
+        }
+    }
 
     if ($script:Target.Isa -eq 'A64') {
         $frame = @{ Op = 'stp-pre'; Rt = 29; Rt2 = 30; Offset = -16 }
