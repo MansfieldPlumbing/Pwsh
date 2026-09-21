@@ -41,7 +41,7 @@ PowerShell.
 | Process and runtime start | `MonoRuntimeProvider` → `libmonodroid` → `coreclr_initialize` | emitted host `.so` exporting `ANativeActivity_onCreate`, calling `coreclr_initialize` and `coreclr_create_delegate` | C API + runtime | REPLACE | main thread, once per process | gates 1 and 2 below |
 | Activity | Java peer `MainActivity` (`classes2.dex`), `n_onCreate` via RegisterNatives | `android.app.NativeActivity`, a framework class; no DEX | C API | REPLACE | NativeActivity callbacks on main | app launches with no DEX |
 | Managed entry | six-opcode `OnCreate` shim → `AdmitActivity(Activity)` | `[UnmanagedCallersOnly]` entry taking `ANativeActivity*`, reached by `coreclr_create_delegate` | runtime | REPLACE | main thread | host reaches the runspace |
-| Runspace and `Profile.ps1` | `CreateDefault2`, `UseCurrentThread`, `Open`, `ExternalScript` | the same SMA calls on the Android main thread, as gate 2c ran them | PowerShell + C API | KEEP | main thread | `Profile.ps1` runs on all three targets |
+| Runspace and `Profile.ps1` | `CreateDefault2`, `UseCurrentThread`, `Open`, `ExternalScript` | the same SMA calls; gates 2c and 2d ran them on the Android main thread, where CanvasDemo runs in the baseline | PowerShell + C API | KEEP | main thread in the baseline | `Profile.ps1` runs on all three targets |
 | `JavaSystem.LoadLibrary("psl-native")` | required only because monodroid waits for a Java-side load | dropped; default `dlopen` probing | none | DELETE | none | SMA startup logging works without it |
 
 ## 2. Files and identity

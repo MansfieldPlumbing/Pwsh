@@ -252,9 +252,10 @@ only when that group's evidence exists. Name the source for every new fact.
   AST resolved against the pinned Mono.Android metadata and from a traced run
   on the Xamarin baseline. Do not build Java peer tracking, arbitrary Java
   subclassing, type maps or the Java.Interop object model.
-- The script keeps running on the Android main thread, as in the baseline.
-  JNI calls use `activity->env` only on that thread; any other thread attaches
-  through `activity->vm`. Android's own `Canvas`, `Bitmap`, `Paint` and AGSL
+- In the Xamarin baseline, CanvasDemo runs on the Android main thread: the host
+  runs `Profile.ps1` in a `UseCurrentThread` runspace there, and the script's
+  delegates are invoked there. `activity->env` belongs to the main thread; any
+  other thread attaches through `activity->vm`. Android's own `Canvas`, `Bitmap`, `Paint` and AGSL
   `RuntimeShader` stay the implementation, reached through JNI on the
   `Surface` from `ANativeWindow_toSurface`; the real `setContentView` is never
   called over `NativeActivity`'s content view.
@@ -264,7 +265,8 @@ only when that group's evidence exists. Name the source for every new fact.
   `[UnmanagedCallersOnly]` callbacks installed in the `NativeActivity`
   callback table and passed to `AChoreographer`, turns them into the
   Xamarin-shaped `Touch`, `KeyPress` and `PostOnAnimation`, and invokes the
-  frozen script's delegates on the main thread. No hand-written native stub
+  frozen script's delegates where CanvasDemo expects them (in the baseline, on
+  the main thread). No hand-written native stub
   sits between the callback and managed code. Only the compatibility
   assembly uses `Android.*` and `Java.*` names.
 - Before modifying `Read-ElfImage`, the SysV ELF hash implementation, or the
