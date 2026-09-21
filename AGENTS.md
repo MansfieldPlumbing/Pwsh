@@ -80,7 +80,17 @@ only when that group's evidence exists. Name the source for every new fact.
   `external_assembly_probe` that walks a table read back from the store; then
   `coreclr_create_delegate` for `NativeHost.Admit`. Its code passes the
   per-ISA decoder, a control-flow ABI checker (SysV AMD64 or AAPCS64) and the
-  emitter controls in Step 6.
+  emitter controls in Step 6. On x86-64 it requires `Admit` to return
+  0x50575348, then calls `NativeHost.RunPowerShell` through a second delegate
+  and logs what it returns. `-TraceAssemblyProbe` (x86-64, diagnostic) logs each
+  probe request exactly as CoreCLR spells it, and whether the store has it.
+- The NativeActivity store starts every image on a 16-byte boundary with zero
+  padding; the Xamarin store keeps the upstream layout byte for byte. Step 6
+  reads the final store library as it is mapped and requires every image to
+  start 16-byte aligned and every fat method header to fall 4-byte aligned
+  (131,709 fat headers in the lean payload).
+- The NativeActivity APK packages the emitted `libpsl-native.so`, so CoreCLR's
+  default native probing finds it in the APK's library directory.
 - The payload has no cmdlet modules (`Microsoft.PowerShell.Commands.*`), so
   `Get-ChildItem` and `Get-Process` are absent, and no Roslyn
   (`Microsoft.CodeAnalysis.*`), so `Add-Type -TypeDefinition` and
@@ -124,6 +134,39 @@ only when that group's evidence exists. Name the source for every new fact.
   with an independently emitted A64 host, logged `GATE2A Admit returned
   0x50575348`; the process stayed alive and the crash buffer held nothing for
   it. The Xamarin arm64 build from the same script stayed byte-identical.
+- Gate 2a exercised only tiny method headers and ReadyToRun CoreLib code, so
+  it did not show that arbitrary IL runs from the original, unaligned store.
+  CoreCLR decodes a fat method header only when it is 4-byte aligned on a
+  64-bit host (`corhlpr.cpp` `DecoderInit` at v11.0.0-rc.1.26425.128); on a
+  32-bit host that check is a debug assert only. The .NET for Android host
+  never met it because it copies each assembly into `malloc`ed memory
+  (`lib/assembly-store.cc`). Served in place from the unaligned store, a fat
+  method failed as `InvalidProgramException` on the x86_64 emulator, while
+  ILVerify 10.0.12 and the Windows JIT accepted the same bytes.
+- Gates 2b and 2c, x86_64 emulator (API 36), with the aligned store: CoreCLR
+  loaded System.Management.Automation and 55 other assemblies in place from
+  the read-only mapped store (56 of the 96, those the tested startup path
+  requested); the packaged `libpsl-native.so` satisfied the native library
+  that `Open` reaches; `CreateDefault2`, `CreateRunspace` with
+  `UseCurrentThread`, `Open`, `DefaultRunspace` and the script `0x50575348`
+  all ran on the main thread, and `RunPowerShell` returned 0x50575348 after
+  `Admit` held in the same process. The process was alive 40 seconds later and
+  the crash buffer was empty, with and without `-TraceAssemblyProbe`. The
+  Xamarin x86_64 build stayed byte-identical.
+- During those runs SMA also asked the probe for
+  `System.Management.Automation.dll` by its full path under the app's files
+  directory. The probe has no entry by path, so it declined; execution
+  continued, and the assembly was already loaded by name. A probe miss is not
+  an assembly-resolution failure.
+- `UseCurrentThread` puts the runspace and its pipelines on the Android main
+  thread; SMA still starts threads of its own. `LocalConnection` keeps a static
+  named-pipe listener, whose thread starts during `Open` and logs through
+  `libpsl-native`. An exception there escapes every managed entry the host
+  calls and aborts the process, so acceptance requires the success marker,
+  the process alive after it, and an empty crash buffer. Without
+  `libpsl-native.so` in the APK, PowerShell's own native resolver
+  (`NativeDllHandler`) threw on that thread, because an assembly served from
+  memory has an empty `Location`.
 - The arm32 host rejected a store whose version word carried the 64-bit flag;
   emitter and reader had agreed on it (arm32 device).
 
@@ -148,6 +191,14 @@ only when that group's evidence exists. Name the source for every new fact.
   assembly satisfies the CanvasDemo contract; 2f the frozen bytes run with
   Mono.Android, Mono.Android.Runtime, Java.Interop, libmonodroid,
   libxamarin-app, Xamarin DEX and type maps absent.
+- Every gate runs on three backends: x86-64 on the emulator finds the next
+  boundary; arm64 on the S23 confirms it on a physical device; arm32 must pass
+  before the gate is called portable. Each backend is independent evidence:
+  a failure on x86-64 or arm64 may not reproduce on arm32, and an arm32 pass
+  does not waive a 64-bit invariant (a misaligned fat method header is fatal
+  on 64-bit CoreCLR and passes unchecked on 32-bit). Port each narrow gate to
+  arm64 and arm32 as soon as it passes on x86-64, before building the next
+  layer; `Profile.ps1` waits until gate 2c passes on all three.
 - Compatibility is scoped by the frozen workload, not by namespace. Defining
   `Android.Graphics.Bitmap` obliges exactly the constructors, members, return
   values, lifetime and interactions the frozen script reaches, taken from its
@@ -177,8 +228,8 @@ only when that group's evidence exists. Name the source for every new fact.
 
 Verify each on hardware before relying on it.
 
-- Not yet proven for Gate 2a: the arm32 host; SMA and a runspace under the
-  owned host (2c); serving the whole payload from the read-only mapped store.
+- Not yet proven: gates 2b and 2c on arm64 and arm32; gate 2a on arm32; the 40
+  store assemblies the tested startup path did not request, served in place.
 - To prove at gate 2c, then promote: QuickPS's function-table call performs
   JNI on Android, shown by `GetVersion`, `FindClass`, `GetMethodID` and one
   `Call*MethodA` with a `jvalue[]`, using slot numbers from a pinned Android 14

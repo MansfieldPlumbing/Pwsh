@@ -50,6 +50,10 @@ param(
     [switch] $ValidateManifest,
     [string] $Aapt2Path = '',
 
+    # Diagnostic, NativeActivity on x86_64 only: the host's assembly probe logs
+    # each path CoreCLR asks for, exactly as given, and whether the store has it.
+    [switch] $TraceAssemblyProbe,
+
 
     # Minimal:  Assembly set, IL only, no ReadyToRun (R2R) code.
     # Standard: every runtime assembly the packages ship, R2R code included.
@@ -3581,11 +3585,77 @@ function New-PwshActivityAssemblyBytes {
         $main.CreateType() | Out-Null
 
         if ($Admission -eq 'NativeActivity') {
-            # Gate 2a: the managed entry the emitted native host reaches through
-            # coreclr_create_delegate. It touches no Android type, so
-            # Mono.Android is never loaded; it returns 'PWSH' (0x50575348).
+            # The managed entries the emitted native host reaches through
+            # coreclr_create_delegate. They touch no Android type, so Mono.Android
+            # is never loaded. RunPowerShell (gates 2b and 2c) opens a runspace on
+            # the calling (main) thread, runs a script whose value is 'PWSH'
+            # (0x50575348) and returns that value, or the HResult of the first
+            # exception.
+            # Boundary markers go to logcat through liblog, bound by P/Invoke.
+            $logType = $module.DefineType('Dev.MansfieldPlumbing.Pwsh.NativeLog',
+                [Reflection.TypeAttributes]'NotPublic,Abstract,Sealed,BeforeFieldInit')
+            $logWrite = $logType.DefinePInvokeMethod('__android_log_write', 'liblog.so',
+                [Reflection.MethodAttributes]'Public,Static,PinvokeImpl,HideBySig', [Reflection.CallingConventions]::Standard,
+                [int], [type[]]@([int], [string], [string]),
+                [Runtime.InteropServices.CallingConvention]::Cdecl, [Runtime.InteropServices.CharSet]::Ansi)
+            $logWrite.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)
+            $logType.CreateType() | Out-Null
+            $infoPriority = Get-AndroidLogPriority -Name 'ANDROID_LOG_INFO'
+            $errorPriority = Get-AndroidLogPriority -Name 'ANDROID_LOG_ERROR'
+            $log = { param([int] $Priority, [Linq.Expressions.Expression] $Text)
+                New-StaticCall $logWrite @((New-ClrConstant $Priority ([int])), (New-ClrConstant 'Pwsh' ([string])), $Text) }
+            $mark = { param([string] $Text) & $log $infoPriority (New-ClrConstant $Text ([string])) }
+
+            $rs = [Management.Automation.Runspaces.RunspaceFactory]
+            $runspaceType = [Management.Automation.Runspaces.Runspace]
+            $issVar = [Linq.Expressions.Expression]::Variable([Management.Automation.Runspaces.InitialSessionState], 'iss')
+            $runspaceVar = [Linq.Expressions.Expression]::Variable($runspaceType, 'runspace')
+            $shellVar = [Linq.Expressions.Expression]::Variable([powershell], 'shell')
+            $resultVar = [Linq.Expressions.Expression]::Variable([int], 'result')
+            $errorVar = [Linq.Expressions.Expression]::Variable([Exception], 'error')
+            $invoke = @([powershell].GetMethods() | Where-Object { $_.Name -eq 'Invoke' -and -not $_.IsGenericMethodDefinition -and $_.GetParameters().Count -eq 0 })
+            if ($invoke.Count -ne 1) { throw "PowerShell.Invoke(): $($invoke.Count) non-generic parameterless overloads." }
+            $results = New-ClrCall $shellVar $invoke[0]
+            $first = [Linq.Expressions.Expression]::Property($results, 'Item', [Linq.Expressions.Expression[]]@(New-ClrConstant 0 ([int])))
+            $firstValue = [Linq.Expressions.Expression]::Unbox(
+                (New-ClrProperty $first (Get-ExactProperty ([psobject]) 'BaseObject')), [int])
+            $try = New-ClrBlock @() @(
+                (New-StaticCall ([Management.Automation.PowerShellAssemblyLoadContextInitializer].GetMethod(
+                    'SetPowerShellAssemblyLoadContext', [Reflection.BindingFlags]'Public,Static', $null, [type[]]@([string]), $null)) @(
+                    (New-ClrProperty $null (Get-ExactProperty ([AppContext]) 'BaseDirectory')))),
+                (& $mark 'GATE2B managed resolution complete'),
+                (& $mark 'GATE2C CreateDefault2'),
+                (New-ClrAssign $issVar (New-StaticCall (Get-ExactMethod ([Management.Automation.Runspaces.InitialSessionState]) 'CreateDefault2' @()))),
+                (& $mark 'GATE2C CreateRunspace'),
+                (New-ClrAssign $runspaceVar (New-StaticCall (Get-ExactMethod $rs 'CreateRunspace' @([Management.Automation.Runspaces.InitialSessionState])) @($issVar))),
+                (New-ClrAssign (New-ClrProperty $runspaceVar (Get-ExactProperty $runspaceType 'ThreadOptions')) `
+                    (New-ClrConstant ([Management.Automation.Runspaces.PSThreadOptions]::UseCurrentThread) ([Management.Automation.Runspaces.PSThreadOptions]))),
+                (& $mark 'GATE2C Open'),
+                (New-ClrCall $runspaceVar (Get-ExactMethod $runspaceType 'Open' @())),
+                (New-ClrAssign (New-ClrProperty $null (Get-ExactProperty $runspaceType 'DefaultRunspace')) $runspaceVar),
+                (& $mark 'GATE2C DefaultRunspace set'),
+                (New-ClrAssign $shellVar (New-StaticCall (Get-ExactMethod ([powershell]) 'Create' @($runspaceType)) @($runspaceVar))),
+                (New-ClrCall $shellVar (Get-ExactMethod ([powershell]) 'AddScript' @([string])) @((New-ClrConstant '0x50575348' ([string])))),
+                (New-ClrAssign $resultVar $firstValue),
+                (& $log $infoPriority (New-StaticCall (Get-ExactMethod ([string]) 'Concat' @([string], [string])) @(
+                    (New-ClrConstant 'GATE2C script result 0x' ([string])),
+                    (New-ClrCall $resultVar (Get-ExactMethod ([int]) 'ToString' @([string])) @((New-ClrConstant 'x8' ([string]))))))),
+                $resultVar)
             $nativeHostType = $module.DefineType('Dev.MansfieldPlumbing.Pwsh.NativeHost',
                 [Reflection.TypeAttributes]'Public,Abstract,Sealed,BeforeFieldInit')
+            # Run holds every SMA reference. Admit references none, so a load or
+            # JIT failure of Run surfaces as an exception inside Admit's try.
+            $run = Add-PersistedMethod $nativeHostType 'Run' ([Reflection.MethodAttributes]'Private,Static,HideBySig') ([int]) @() `
+                ([Func[int]]) @() (New-ClrBlock @($issVar, $runspaceVar, $shellVar, $resultVar) @($try))
+            # RunPowerShell returns the HResult of any exception, and the native
+            # host logs it. The handler makes no call, so no managed logging or
+            # P/Invoke lies on the failure path.
+            $catch = [Linq.Expressions.Expression]::Catch($errorVar,
+                (New-ClrProperty $errorVar (Get-ExactProperty ([Exception]) 'HResult')))
+            [void](Add-PersistedMethod $nativeHostType 'RunPowerShell' ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([int]) @() `
+                ([Func[int]]) @() ([Linq.Expressions.Expression]::TryCatch((New-StaticCall $run), $catch)))
+            # Gate 2a, kept as an in-process invariant: the host calls it first
+            # and requires 'PWSH' (0x50575348) before it calls RunPowerShell.
             [void](Add-PersistedMethod $nativeHostType 'Admit' ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([int]) @() `
                 ([Func[int]]) @() ([Linq.Expressions.Expression]::Constant([int]0x50575348, [int])))
             $nativeHostType.CreateType() | Out-Null
@@ -3737,7 +3807,10 @@ function Get-ContractStructureSize {
 function New-AssemblyStoreBytes {
     param(
         [Parameter(Mandatory)][System.Collections.IDictionary] $SelectedAssemblies,
-        [Parameter(Mandatory)][pscustomobject] $Contract
+        [Parameter(Mandatory)][pscustomobject] $Contract,
+        # Each image starts at a multiple of this, zero-padded. 1 reproduces
+        # the upstream layout (images end to end).
+        [ValidateSet(1, 16)][int] $DataAlignment = 1
     )
 
     $headerSize = Get-ContractStructureSize -Contract $Contract -StructureName 'AssemblyStoreHeader'
@@ -3775,6 +3848,7 @@ function New-AssemblyStoreBytes {
         $candidate = $SelectedAssemblies[$name]
         $bytes = [byte[]]$candidate.Bytes
         $payloads.Add($bytes)
+        $cursor = [uint32](($cursor + $DataAlignment - 1) -band -bnot ($DataAlignment - 1))
 
         $descriptors.Add([pscustomobject]@{
             MappingIndex     = $descriptorIndex
@@ -3845,9 +3919,14 @@ function New-AssemblyStoreBytes {
             throw "Assembly store metadata ended at $($stream.Position); the descriptors declare data starting at $dataStart."
         }
 
-        # ASSEMBLY DATA
-        foreach ($payload in $payloads) {
-            Write-ByteSpan -Writer $writer -Bytes $payload
+        # ASSEMBLY DATA, each image at its descriptor's offset; the gap before
+        # it is zero padding.
+        for ($i = 0; $i -lt $payloads.Count; $i++) {
+            $writer.Flush()
+            $gap = [long]$descriptors[$i].DataOffset - $stream.Position
+            if ($gap -lt 0 -or $gap -ge $DataAlignment) { throw "Assembly $i would start at $($stream.Position); its descriptor declares $($descriptors[$i].DataOffset)." }
+            if ($gap -gt 0) { Write-ByteSpan -Writer $writer -Bytes ([byte[]]::new($gap)) }
+            Write-ByteSpan -Writer $writer -Bytes $payloads[$i]
         }
         $writer.Flush()
         return $stream.ToArray()
@@ -3862,7 +3941,8 @@ function Test-AssemblyStoreBytes {
     param(
         [Parameter(Mandatory)][byte[]] $StoreBytes,
         [Parameter(Mandatory)][System.Collections.IDictionary] $SelectedAssemblies,
-        [Parameter(Mandatory)][pscustomobject] $Contract
+        [Parameter(Mandatory)][pscustomobject] $Contract,
+        [ValidateSet(1, 16)][int] $DataAlignment = 1
     )
 
     $headerSize = Get-ContractStructureSize -Contract $Contract -StructureName 'AssemblyStoreHeader'
@@ -3990,6 +4070,24 @@ function Test-AssemblyStoreBytes {
         $storedDigest.Dispose()
     }
 
+    # Layout, read from the descriptors alone: each image starts on the
+    # alignment with a PE 'MZ' signature, images do not overlap, every gap is
+    # zero padding shorter than the alignment, and the last image ends the store.
+    $layout = @(for ($i = 0; $i -lt $entryCount; $i++) {
+        $descriptorOffset = $descriptorStart + ($i * $descriptorSize)
+        [pscustomobject]@{ Index = $i; Offset = [long][BitConverter]::ToUInt32($StoreBytes, $descriptorOffset + 4); Size = [long][BitConverter]::ToUInt32($StoreBytes, $descriptorOffset + 8) }
+    }) | Sort-Object Offset
+    $previousEnd = [long]$cursor
+    foreach ($region in $layout) {
+        if ($region.Offset % $DataAlignment) { throw "Assembly '$($names[$region.Index])' starts at $($region.Offset), not a multiple of $DataAlignment." }
+        if ($region.Offset -lt $previousEnd) { throw "Assembly '$($names[$region.Index])' at $($region.Offset) overlaps the bytes before it, which end at $previousEnd." }
+        if ($region.Offset - $previousEnd -ge $DataAlignment) { throw "Assembly '$($names[$region.Index])' is preceded by $($region.Offset - $previousEnd) bytes of padding." }
+        for ($k = $previousEnd; $k -lt $region.Offset; $k++) { if ($StoreBytes[$k] -ne 0) { throw "Padding byte $k before '$($names[$region.Index])' is not zero." } }
+        if ($StoreBytes[$region.Offset] -ne 0x4D -or $StoreBytes[$region.Offset + 1] -ne 0x5A) { throw "Assembly '$($names[$region.Index])' does not start with a PE signature." }
+        $previousEnd = $region.Offset + $region.Size
+    }
+    if ($previousEnd -ne $StoreBytes.Length) { throw "The last assembly ends at $previousEnd; the store is $($StoreBytes.Length) bytes." }
+
     $entries = for ($i = 0; $i -lt $entryCount; $i++) {
         $descriptorOffset = $descriptorStart + ($i * $descriptorSize)
         [pscustomobject]@{
@@ -4008,12 +4106,62 @@ function Test-AssemblyStoreBytes {
     }
 }
 
+function Test-StoreImageAlignment {
+    # Reads the final store library the way the loader maps it and CoreCLR
+    # decodes it: the payload symbol's address plus each entry's offset is the
+    # image's address, up to the page-aligned load bias. Every image must start
+    # 16-byte aligned, and every fat method header (ECMA-335 II.25.4.3) inside
+    # it must land 4-byte aligned, the condition corhlpr.cpp DecoderInit checks.
+    param(
+        [Parameter(Mandatory)][byte[]] $LibraryBytes,
+        [Parameter(Mandatory)][string] $SymbolName,
+        [Parameter(Mandatory)][object[]] $Entries
+    )
+    $elf = Read-ElfImage -Image $LibraryBytes
+    $store = @($elf.Symbols | Where-Object { $_.Name -ceq $SymbolName })
+    if ($store.Count -ne 1) { throw "The store library defines '$SymbolName' $($store.Count) times." }
+    $segment = @($elf.Segments | Where-Object { $_.Type -eq 1 -and $store[0].Value -ge $_.Address -and $store[0].Value -lt $_.Address + $_.FileSize })
+    if ($segment.Count -ne 1) { throw "'$SymbolName' lies in $($segment.Count) loadable segments." }
+    $fat = 0; $tiny = 0
+    foreach ($entry in $Entries) {
+        $address = [long]$store[0].Value + $entry.Offset
+        $fileOffset = [long]$segment[0].Offset + ($address - $segment[0].Address)
+        if ($address % 16) { throw "'$($entry.Name)' is mapped at library address 0x$('{0:X}' -f $address), not 16-byte aligned." }
+        $pe = [System.Reflection.PortableExecutable.PEReader]::new([System.IO.MemoryStream]::new($LibraryBytes, [int]$fileOffset, [int]$entry.Size, $false))
+        try {
+            $metadata = [System.Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe)
+            $sections = $pe.PEHeaders.SectionHeaders
+            foreach ($handle in $metadata.MethodDefinitions) {
+                $rva = $metadata.GetMethodDefinition($handle).RelativeVirtualAddress
+                if ($rva -eq 0) { continue }
+                $section = $pe.PEHeaders.GetContainingSectionIndex($rva)
+                if ($section -lt 0) { throw "'$($entry.Name)' has a method body at RVA 0x$('{0:X}' -f $rva) outside every section." }
+                $inImage = [long]$rva - $sections[$section].VirtualAddress + $sections[$section].PointerToRawData
+                $flags = $LibraryBytes[$fileOffset + $inImage] -band 3
+                if ($flags -eq 2) { $tiny++; continue }
+                if ($flags -ne 3) { throw "'$($entry.Name)' has a method header at RVA 0x$('{0:X}' -f $rva) that is neither tiny nor fat." }
+                if (($address + $inImage) % 4) { throw "'$($entry.Name)' has a fat method header at RVA 0x$('{0:X}' -f $rva) mapped at 0x$('{0:X}' -f ($address + $inImage)), not 4-byte aligned." }
+                $fat++
+            }
+        }
+        finally { $pe.Dispose() }
+    }
+    [pscustomobject]@{ Images = $Entries.Count; FatMethods = $fat; TinyMethods = $tiny }
+}
+
 function Invoke-StoreStep {
 
     $contract = Get-AndroidNativeContract
     $selected = $script:BuildContext.SelectedAssemblies
-    $storeBytes = New-AssemblyStoreBytes -SelectedAssemblies $selected -Contract $contract
-    $report = Test-AssemblyStoreBytes -StoreBytes $storeBytes -SelectedAssemblies $selected -Contract $contract
+    # NativeActivity serves images to CoreCLR in place, without the copy the
+    # .NET for Android host makes (lib/assembly-store.cc), so this layout owns
+    # their alignment: every image starts on a 16-byte boundary. CoreCLR needs
+    # a fat method header 4-byte aligned on 64-bit hosts (corhlpr.cpp
+    # DecoderInit); 16 is the store's own invariant, above that. The Xamarin
+    # store keeps the upstream layout, byte for byte.
+    $alignment = if ($Admission -eq 'NativeActivity') { 16 } else { 1 }
+    $storeBytes = New-AssemblyStoreBytes -SelectedAssemblies $selected -Contract $contract -DataAlignment $alignment
+    $report = Test-AssemblyStoreBytes -StoreBytes $storeBytes -SelectedAssemblies $selected -Contract $contract -DataAlignment $alignment
 
     $outputDirectory = Join-Path $OutputDirectory $script:Target.Abi
     if (-not (Test-Path -LiteralPath $outputDirectory -PathType Container)) {
@@ -6221,6 +6369,20 @@ function New-NativeHostLibrary {
         fmtDirectory2 = & $ascii 'GATE2A base directory does not fit (%d)'
         fmtContract  = & $ascii 'GATE2A contract pointer does not fit (%d)'
     }
+    if ($TraceAssemblyProbe) {
+        if ($Architecture -ne 'x64') { throw '-TraceAssemblyProbe is implemented for x86_64 only.' }
+        $data['fmtProbeRequest'] = & $ascii 'PROBE request: %s'
+        $data['fmtProbeHit'] = & $ascii 'PROBE hit:     %s'
+        $data['fmtProbeMiss'] = & $ascii 'PROBE miss:    %s'
+    }
+    if ($Architecture -eq 'x64') {
+        # Gates 2b/2c run on x86_64 first; the arm64 host stays the gate 2a host.
+        $data['runMethodName'] = & $ascii 'RunPowerShell'
+        $data['fmtAdmitWrong'] = & $ascii 'GATE2A Admit returned 0x%08x, expected 0x50575348'
+        $data['fmtRunDelegate'] = & $ascii 'GATE2B coreclr_create_delegate RunPowerShell failed 0x%08x'
+        $data['fmtBegin'] = & $ascii 'GATE2B begin'
+        $data['fmtRun'] = & $ascii 'GATE2B RunPowerShell returned 0x%08x'
+    }
     for ($i = 0; $i -lt $StoreEntries.Count; $i++) { $data["assembly$i"] = & $ascii $StoreEntries[$i].Name }
 
     # host_runtime_contract, laid out from the pinned header: zero except its
@@ -6248,6 +6410,7 @@ function New-NativeHostLibrary {
         contract      = @{ Bytes = $contract; Pointers = @(@{ At = $probeOffset; Target = 'pwsh_assembly_probe' }) }
         probeTable    = @{ Bytes = $table; Pointers = @($tablePointers) }
     }
+    if ($Architecture -eq 'x64') { $writable['runPowerShell'] = [byte[]]::new(8) }
 
     if ($Architecture -eq 'arm64') {
     # AAPCS64: arguments x0-x7 (all seven coreclr_initialize arguments fit),
@@ -6412,20 +6575,56 @@ function New-NativeHostLibrary {
         @{ Op = 'jnz'; Label = 'delegateFailed' },
         # Admit(); __android_log_print(INFO, "Pwsh", "GATE2A Admit returned 0x%08x", result)
         @{ Op = 'call-data'; Data = 'admit'; Args = 0 },
+        @{ Op = 'cmp32-imm'; Reg = 0; Imm = 0x50575348 },
+        @{ Op = 'jnz'; Label = 'admitWrong' },
         @{ Op = 'mov32'; Dst = 1; Src = 0 },
         @{ Op = 'movimm32'; Dst = 7; Imm = $info },
         @{ Op = 'lea-data'; Dst = 6; Data = 'tag' },
         @{ Op = 'lea-data'; Dst = 2; Data = 'fmtAdmit' },
         @{ Op = 'xor32'; Dst = 0 },
         @{ Op = 'call-import'; Import = '__android_log_print'; Args = 4; Variadic = $true },
+        # Gates 2b/2c, only after gate 2a held in this process:
+        # coreclr_create_delegate(hostHandle, domainId, "Pwsh", type, "RunPowerShell", &runPowerShell)
+        @{ Op = 'load64-data'; Dst = 7; Data = 'hostHandle' },
+        @{ Op = 'load32-data'; Dst = 6; Data = 'domainId' },
+        @{ Op = 'lea-data'; Dst = 2; Data = 'assemblyName' },
+        @{ Op = 'lea-data'; Dst = 1; Data = 'typeName' },
+        @{ Op = 'lea-data'; Dst = 8; Data = 'runMethodName' },
+        @{ Op = 'lea-data'; Dst = 9; Data = 'runPowerShell' },
+        @{ Op = 'call-import'; Import = 'coreclr_create_delegate'; Args = 6 },
+        @{ Op = 'test32'; Reg = 0 },
+        @{ Op = 'jnz'; Label = 'runDelegateFailed' },
+        # __android_log_write(INFO, "Pwsh", "GATE2B begin"); RunPowerShell(); log its result
+        @{ Op = 'movimm32'; Dst = 7; Imm = $info },
+        @{ Op = 'lea-data'; Dst = 6; Data = 'tag' },
+        @{ Op = 'lea-data'; Dst = 2; Data = 'fmtBegin' },
+        @{ Op = 'xor32'; Dst = 0 },
+        @{ Op = 'call-import'; Import = '__android_log_print'; Args = 3; Variadic = $true },
+        @{ Op = 'call-data'; Data = 'runPowerShell'; Args = 0 },
+        @{ Op = 'mov32'; Dst = 1; Src = 0 },
+        @{ Op = 'movimm32'; Dst = 7; Imm = $info },
+        @{ Op = 'lea-data'; Dst = 6; Data = 'tag' },
+        @{ Op = 'lea-data'; Dst = 2; Data = 'fmtRun' },
+        @{ Op = 'xor32'; Dst = 0 },
+        @{ Op = 'call-import'; Import = '__android_log_print'; Args = 4; Variadic = $true },
         @{ Op = 'jmp'; Label = 'done' }
-    ) + (& $logFailure 'directoryFailed' 'fmtDirectory2') + (& $logFailure 'contractFailed' 'fmtContract') + (& $logFailure 'initFailed' 'fmtInit') + (& $logFailure 'delegateFailed' 'fmtDelegate') + @(
+    ) + (& $logFailure 'directoryFailed' 'fmtDirectory2') + (& $logFailure 'contractFailed' 'fmtContract') + (& $logFailure 'initFailed' 'fmtInit') + (& $logFailure 'delegateFailed' 'fmtDelegate') +
+        (& $logFailure 'admitWrong' 'fmtAdmitWrong') + (& $logFailure 'runDelegateFailed' 'fmtRunDelegate') + @(
         @{ Op = 'label'; Name = 'done' },
         @{ Op = 'add-rsp'; Imm = 8 },
         @{ Op = 'pop'; Reg = 3 },
         @{ Op = 'pop'; Reg = 5 },
         @{ Op = 'ret' })
 
+    # Diagnostic: __android_log_print(INFO, "Pwsh", format, path), path in r12.
+    # Nothing is emitted unless -TraceAssemblyProbe.
+    $traceProbe = { param([string] $format) if (-not $TraceAssemblyProbe) { return @() } @(
+        @{ Op = 'movimm32'; Dst = 7; Imm = $info },
+        @{ Op = 'lea-data'; Dst = 6; Data = 'tag' },
+        @{ Op = 'lea-data'; Dst = 2; Data = $format },
+        @{ Op = 'mov64'; Dst = 1; Src = 12 },
+        @{ Op = 'xor32'; Dst = 0 },
+        @{ Op = 'call-import'; Import = '__android_log_print'; Args = 4; Variadic = $true }) }
     # bool pwsh_assembly_probe(const char* path, void** data_start, int64_t* size)
     $probe = @(
         @{ Op = 'push'; Reg = 3 },
@@ -6435,7 +6634,7 @@ function New-NativeHostLibrary {
         @{ Op = 'sub-rsp'; Imm = 8 },
         @{ Op = 'mov64'; Dst = 12; Src = 7 },
         @{ Op = 'mov64'; Dst = 13; Src = 6 },
-        @{ Op = 'mov64'; Dst = 14; Src = 2 },
+        @{ Op = 'mov64'; Dst = 14; Src = 2 }) + (& $traceProbe 'fmtProbeRequest') + @(
         @{ Op = 'lea-data'; Dst = 3; Data = 'probeTable' },
         @{ Op = 'label'; Name = 'next' },
         @{ Op = 'load64-base'; Dst = 6; Base = 3; Disp = 0 },
@@ -6452,10 +6651,10 @@ function New-NativeHostLibrary {
         @{ Op = 'add64-base'; Dst = 0; Base = 3; Disp = 8 },
         @{ Op = 'store64-base'; Src = 0; Base = 13; Disp = 0 },
         @{ Op = 'load64-base'; Dst = 0; Base = 3; Disp = 16 },
-        @{ Op = 'store64-base'; Src = 0; Base = 14; Disp = 0 },
+        @{ Op = 'store64-base'; Src = 0; Base = 14; Disp = 0 }) + (& $traceProbe 'fmtProbeHit') + @(
         @{ Op = 'movimm32'; Dst = 0; Imm = 1 },
         @{ Op = 'jmp'; Label = 'out' },
-        @{ Op = 'label'; Name = 'missing' },
+        @{ Op = 'label'; Name = 'missing' }) + (& $traceProbe 'fmtProbeMiss') + @(
         @{ Op = 'xor32'; Dst = 0 },
         @{ Op = 'label'; Name = 'out' },
         @{ Op = 'add-rsp'; Imm = 8 },
@@ -6630,6 +6829,9 @@ function Invoke-NativeStep {
     }
 
     if ($Admission -eq 'NativeActivity') {
+        $aligned = Test-StoreImageAlignment -LibraryBytes ([byte[]]$library.Bytes) -SymbolName $symbol -Entries $script:BuildContext.AssemblyStore.Entries
+        Write-Host ('[PASS] Store alignment: {0} images start 16-byte aligned in the mapped library; {1} fat method headers fall 4-byte aligned, {2} tiny.' -f
+            $aligned.Images, $aligned.FatMethods, $aligned.TinyMethods) -ForegroundColor Green
         $nativeHost = New-NativeHostLibrary -StoreEntries $script:BuildContext.AssemblyStore.Entries -StoreLibrary $soname -StoreSymbol $symbol -PageSize $pageSize
         $hostPath = Join-Path $outputDirectory 'libpwsh-host.so'
         if ($PSCmdlet.ShouldProcess($hostPath, 'Write libpwsh-host')) {
@@ -6639,22 +6841,22 @@ function Invoke-NativeStep {
         Write-Host ('[PASS] libpwsh-host.so emitted: {0} bytes, exports {1}, {2} imports through a BIND_NOW GOT, a {3}-entry assembly probe table, {4} instructions decoded back and checked.' -f
             $nativeHost.Report.ImageSize, ($nativeHost.Library.Exports.PSBase.Keys -join ' and '), $nativeHost.Report.Imports, $script:BuildContext.AssemblyStore.Entries.Count, $nativeHost.Report.Steps) -ForegroundColor Green
     }
-    else {
-        # libpsl-native: SMA resolves it by name during startup logging.
-        $psl = switch ($Architecture) {
-            'arm64' { New-PslNativeLibrary -PageSize $pageSize }
-            'x64'   { New-PslNativeLibraryX64 -PageSize $pageSize }
-            'arm32' { New-PslNativeLibraryArm32 -PageSize $pageSize }
-            default { throw "No libpsl-native section for $Architecture." }
-        }
-        $pslPath = Join-Path $outputDirectory 'libpsl-native.so'
-        if ($PSCmdlet.ShouldProcess($pslPath, 'Write libpsl-native')) {
-            Write-BuildFile -Intermediate -Path $pslPath -Bytes $psl.Library.Bytes
-        }
-        $script:BuildContext.PslNative = [pscustomobject]@{ Path = $pslPath; Bytes = $psl.Library.Bytes }
-        Write-Host ('[PASS] libpsl-native.so emitted: {0} bytes, {1} exports, {2} libc imports through a BIND_NOW GOT, {3} instructions decoded back and checked.' -f
-            $psl.Report.ImageSize, $psl.Report.Exports, $psl.Report.Imports, $psl.Report.Steps) -ForegroundColor Green
+    # libpsl-native: SMA resolves it by name during startup logging. Both
+    # admissions package it; with the NativeActivity host, CoreCLR's default
+    # probing finds it in the APK's library directory.
+    $psl = switch ($Architecture) {
+        'arm64' { New-PslNativeLibrary -PageSize $pageSize }
+        'x64'   { New-PslNativeLibraryX64 -PageSize $pageSize }
+        'arm32' { New-PslNativeLibraryArm32 -PageSize $pageSize }
+        default { throw "No libpsl-native section for $Architecture." }
     }
+    $pslPath = Join-Path $outputDirectory 'libpsl-native.so'
+    if ($PSCmdlet.ShouldProcess($pslPath, 'Write libpsl-native')) {
+        Write-BuildFile -Intermediate -Path $pslPath -Bytes $psl.Library.Bytes
+    }
+    $script:BuildContext.PslNative = [pscustomobject]@{ Path = $pslPath; Bytes = $psl.Library.Bytes }
+    Write-Host ('[PASS] libpsl-native.so emitted: {0} bytes, {1} exports, {2} libc imports through a BIND_NOW GOT, {3} instructions decoded back and checked.' -f
+        $psl.Report.ImageSize, $psl.Report.Exports, $psl.Report.Imports, $psl.Report.Steps) -ForegroundColor Green
 
     Write-Host (('[PASS] Step 6 complete: {0} emitted as an ' + $script:Target.Machine + ' ET_DYN image of {1} bytes, carrying the store at offset {2} under the ''{3}'' symbol with {4} bytes of ELF overhead. Resolved through the emitted hash table exactly as dlsym would. SHA-256 {5}') -f
         $soname,
@@ -7555,6 +7757,7 @@ function Invoke-AssembleStep {
         & $add 'res/mipmap/ic_launcher.png' (Import-LibSourceBytes -Path 'ic_launcher.png') $true 4
         & $add "lib/$abi/libpwsh-host.so" ([byte[]]$script:BuildContext.NativeHost.Bytes) $false 0
         & $add "lib/$abi/libassembly-store.so" ([byte[]]$script:BuildContext.StoreLibrary.Bytes) $false 0
+        & $add "lib/$abi/libpsl-native.so" ([byte[]]$script:BuildContext.PslNative.Bytes) $false 0
         # The .NET runtime's native components, from the verified runtime pack.
         foreach ($name in 'libcoreclr.so', 'libclrjit.so', 'libSystem.Native.so', 'libSystem.Globalization.Native.so', 'libSystem.IO.Compression.Native.so', 'libSystem.Security.Cryptography.Native.Android.so') {
             & $add "lib/$abi/$name" (Get-NativePayload -PackageId $runtimePack -EntryPath "runtimes/$($script:Target.Rid)/native/$name") $false 0
