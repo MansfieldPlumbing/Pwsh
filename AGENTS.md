@@ -95,6 +95,16 @@ only when that group's evidence exists. Name the source for every new fact.
   Pointer-sized fields take the target's size, and `internalDataPath`'s offset
   comes from `native_activity.h`. Exported function values and the relocated
   `external_assembly_probe` pointer carry bit 0; the build checks both.
+- After the gate 2c script, `RunPowerShell` runs the gate 2d path: the
+  product's case-insensitive `Profile.ps1` lookup (`FindProfile`, one generator
+  for the Xamarin program type and `NativeHost`) over `internalDataPath`, then
+  `$PSScriptRoot`, `GetCommand` as an `ExternalScript`, `Invoke` in the same
+  FullLanguage, `UseCurrentThread` runspace, and the product's `HadErrors` rule.
+  Its catch logs the exception's type and message before returning the HResult.
+- `-Debuggable` (NativeActivity, diagnostic) adds `android:debuggable="true"`
+  (0x0101000f, `public-final.xml`) so `adb shell run-as` can place files in the
+  app's private files directory. Without it the manifest carries no trace of
+  `debuggable`, which the admission check enforces.
 - The NativeActivity APK packages the emitted `libpsl-native.so`, so CoreCLR's
   default native probing finds it in the APK's library directory.
 - The payload has no cmdlet modules (`Microsoft.PowerShell.Commands.*`), so
@@ -174,6 +184,22 @@ only when that group's evidence exists. Name the source for every new fact.
   0x50575348`; the process was alive 40 seconds later and the crash buffer held
   nothing for it. The Xamarin arm32 build stayed byte-identical. Gate 2c holds on
   all three backends.
+- Gate 2d, profile execution substrate: proven on the x86_64 emulator, the
+  Samsung Galaxy S23 (arm64) and the arm32 device, with controlled profile
+  fixtures placed through `run-as` in a `-Debuggable` build. The owned host
+  performs the product's case-insensitive `Profile.ps1` discovery, establishes
+  `$PSScriptRoot`, resolves the file as an external script, executes it in the
+  existing FullLanguage, `UseCurrentThread` runspace, applies the existing
+  `HadErrors` rule, preserves runspace state afterward, and handles the
+  missing-profile case: no profile logged `START_MISSING`; `PROFILE.ps1` ran and
+  left state a second pipeline read back; a divide-by-zero profile took the
+  `HadErrors` path and returned 0x80131509. Each time the process was alive 40
+  seconds later with an empty crash buffer. `$Activity`, the recovery UI and the
+  animation callback remain gate 2e concerns. The Xamarin builds and the
+  release NativeActivity manifest stayed byte-identical.
+- The current payload contains no cmdlet modules, so commands such as
+  `Join-Path` and `Write-Error` are unavailable in this `CreateDefault2`
+  runspace. Profile fixtures use the language and .NET only.
 - During those runs SMA also asked the probe for
   `System.Management.Automation.dll` by its full path under the app's files
   directory. The probe has no entry by path, so it declined; execution
@@ -249,8 +275,14 @@ only when that group's evidence exists. Name the source for every new fact.
 
 Verify each on hardware before relying on it.
 
-- Not yet proven: the 40
-  store assemblies the tested startup path did not request, served in place.
+- The repository has no separate production `Profile.ps1` payload. The frozen
+  `scripts/CanvasDemo.ps1` is the real application workload that occupies that
+  role. Its exact-byte execution through the gate 2d path is therefore proven at
+  gate 2f, after gate 2e provides the required Android compatibility surface.
+- Not yet proven: Activity-dependent startup behavior; the compatibility
+  surface CanvasDemo requires; the recovery screen; the animation callback;
+  exact frozen CanvasDemo execution without Xamarin; the 40 store assemblies no
+  proven path has requested, served in place.
 - To prove at gate 2c, then promote: QuickPS's function-table call performs
   JNI on Android, shown by `GetVersion`, `FindClass`, `GetMethodID` and one
   `Call*MethodA` with a `jvalue[]`, using slot numbers from a pinned Android 14

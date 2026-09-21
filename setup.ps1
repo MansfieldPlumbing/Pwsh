@@ -54,6 +54,11 @@ param(
     # each path CoreCLR asks for, exactly as given, and whether the store has it.
     [switch] $TraceAssemblyProbe,
 
+    # Diagnostic, NativeActivity only: android:debuggable="true", so that
+    # adb shell run-as can place files such as Profile.ps1 in the app's private
+    # files directory. Without it the manifest is the release one, unchanged.
+    [switch] $Debuggable,
+
 
     # Minimal:  Assembly set, IL only, no ReadyToRun (R2R) code.
     # Standard: every runtime assembly the packages ship, R2R code included.
@@ -2546,6 +2551,45 @@ function Add-RecoveryScreenMethods {
     $State['showRecoveryMethod'] = $showRecoveryMethod
 }
 
+function New-FindProfileMethod {
+    # FindProfile(files, index, fallback): the first of files whose name is
+    # Profile.ps1 ignoring case, else fallback. The Xamarin program type and the
+    # NativeActivity NativeHost both define it from this one generator.
+    param([Parameter(Mandatory)][Reflection.Emit.TypeBuilder] $Owner, [Parameter(Mandatory)][Reflection.MethodAttributes] $Attributes)
+    # Profile.ps1 is found whatever its letter case. PowerShell does not care
+    # about case and neither does this menu; only Android's filesystem does.
+    $getFiles = Get-ExactMethod ([IO.Directory]) 'GetFiles' @([string]) ([Reflection.BindingFlags]'Public,Static')
+    $getFileName = Get-ExactMethod ([IO.Path]) 'GetFileName' @([string]) ([Reflection.BindingFlags]'Public,Static')
+    $ignoreCaseEquals = Get-ExactMethod ([string]) 'Equals' @([string], [string], [StringComparison]) ([Reflection.BindingFlags]'Public,Static')
+    $candidateFiles = [Linq.Expressions.Expression]::Parameter([string[]], 'files')
+    $candidateIndex = [Linq.Expressions.Expression]::Parameter([int], 'index')
+    $candidateFallback = [Linq.Expressions.Expression]::Parameter([string], 'fallback')
+    $findProfileMethod = $Owner.DefineMethod(
+        'FindProfile', $Attributes, [string], [Type[]]@([string[]], [int], [string]))
+
+    $candidate = [Linq.Expressions.Expression]::ArrayIndex($candidateFiles, $candidateIndex)
+    $findProfileBody = [Linq.Expressions.Expression]::Condition(
+        ([Linq.Expressions.Expression]::GreaterThanOrEqual(
+            $candidateIndex, [Linq.Expressions.Expression]::ArrayLength($candidateFiles))),
+        $candidateFallback,
+        ([Linq.Expressions.Expression]::Condition(
+            (New-StaticCall $ignoreCaseEquals @(
+                (New-StaticCall $getFileName @($candidate)),
+                (New-ClrConstant 'Profile.ps1' ([string])),
+                (New-ClrConstant ([StringComparison]::OrdinalIgnoreCase) ([StringComparison])))),
+            $candidate,
+            (New-StaticCall $findProfileMethod @(
+                $candidateFiles,
+                ([Linq.Expressions.Expression]::Add($candidateIndex, (New-ClrConstant 1 ([int])))),
+                $candidateFallback)))))
+    $null = Write-MicrosoftLambdaToMethodBuilder `
+        (New-ClrLambda ([Func``4].MakeGenericType([string[]], [int], [string], [string])) `
+            $findProfileBody @($candidateFiles, $candidateIndex, $candidateFallback)) `
+        $findProfileMethod
+
+    [pscustomobject]@{ Method = $findProfileMethod; GetFiles = $getFiles; GetFileName = $getFileName }
+}
+
 function Add-RecoverySupportMethods {
     # The distress beacon, the case-insensitive Profile.ps1 lookup, and toasts.
     # Part of New-AndroidHostTypes; the statements keep their emission order.
@@ -2574,35 +2618,10 @@ function Add-RecoverySupportMethods {
     $writeDistressMethod = Add-PersistedMethod $programType 'WriteDistress' $privateStatic ([void]) `
         @([string]) ([Action``1].MakeGenericType([string])) @($distressMessage) $writeDistressBody
 
-    # Profile.ps1 is found whatever its letter case. PowerShell does not care
-    # about case and neither does this menu; only Android's filesystem does.
-    $getFiles = Get-ExactMethod ([IO.Directory]) 'GetFiles' @([string]) ([Reflection.BindingFlags]'Public,Static')
-    $getFileName = Get-ExactMethod ([IO.Path]) 'GetFileName' @([string]) ([Reflection.BindingFlags]'Public,Static')
-    $ignoreCaseEquals = Get-ExactMethod ([string]) 'Equals' @([string], [string], [StringComparison]) ([Reflection.BindingFlags]'Public,Static')
-    $candidateFiles = [Linq.Expressions.Expression]::Parameter([string[]], 'files')
-    $candidateIndex = [Linq.Expressions.Expression]::Parameter([int], 'index')
-    $candidateFallback = [Linq.Expressions.Expression]::Parameter([string], 'fallback')
-    $findProfileMethod = $programType.DefineMethod(
-        'FindProfile', $privateStatic, [string], [Type[]]@([string[]], [int], [string]))
-    $candidate = [Linq.Expressions.Expression]::ArrayIndex($candidateFiles, $candidateIndex)
-    $findProfileBody = [Linq.Expressions.Expression]::Condition(
-        ([Linq.Expressions.Expression]::GreaterThanOrEqual(
-            $candidateIndex, [Linq.Expressions.Expression]::ArrayLength($candidateFiles))),
-        $candidateFallback,
-        ([Linq.Expressions.Expression]::Condition(
-            (New-StaticCall $ignoreCaseEquals @(
-                (New-StaticCall $getFileName @($candidate)),
-                (New-ClrConstant 'Profile.ps1' ([string])),
-                (New-ClrConstant ([StringComparison]::OrdinalIgnoreCase) ([StringComparison])))),
-            $candidate,
-            (New-StaticCall $findProfileMethod @(
-                $candidateFiles,
-                ([Linq.Expressions.Expression]::Add($candidateIndex, (New-ClrConstant 1 ([int])))),
-                $candidateFallback)))))
-    $null = Write-MicrosoftLambdaToMethodBuilder `
-        (New-ClrLambda ([Func``4].MakeGenericType([string[]], [int], [string], [string])) `
-            $findProfileBody @($candidateFiles, $candidateIndex, $candidateFallback)) `
-        $findProfileMethod
+    $findProfile = New-FindProfileMethod -Owner $programType -Attributes $privateStatic
+    $getFiles = $findProfile.GetFiles
+    $getFileName = $findProfile.GetFileName
+    $findProfileMethod = $findProfile.Method
 
     $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
     $homeRoot = New-ClrProperty (New-ClrProperty $a $filesDirProperty) $absolutePathProperty
@@ -3612,6 +3631,11 @@ function New-PwshActivityAssemblyBytes {
             $runspaceVar = [Linq.Expressions.Expression]::Variable($runspaceType, 'runspace')
             $shellVar = [Linq.Expressions.Expression]::Variable([powershell], 'shell')
             $resultVar = [Linq.Expressions.Expression]::Variable([int], 'result')
+            $filesVar = [Linq.Expressions.Expression]::Variable([string], 'files')
+            $profileVar = [Linq.Expressions.Expression]::Variable([string], 'profile')
+            $profileShell = [Linq.Expressions.Expression]::Variable([powershell], 'profileShell')
+            $stateShell = [Linq.Expressions.Expression]::Variable([powershell], 'stateShell')
+            $startCommand = [Linq.Expressions.Expression]::Variable([Management.Automation.CommandInfo], 'startCommand')
             $errorVar = [Linq.Expressions.Expression]::Variable([Exception], 'error')
             $invoke = @([powershell].GetMethods() | Where-Object { $_.Name -eq 'Invoke' -and -not $_.IsGenericMethodDefinition -and $_.GetParameters().Count -eq 0 })
             if ($invoke.Count -ne 1) { throw "PowerShell.Invoke(): $($invoke.Count) non-generic parameterless overloads." }
@@ -3619,6 +3643,54 @@ function New-PwshActivityAssemblyBytes {
             $first = [Linq.Expressions.Expression]::Property($results, 'Item', [Linq.Expressions.Expression[]]@(New-ClrConstant 0 ([int])))
             $firstValue = [Linq.Expressions.Expression]::Unbox(
                 (New-ClrProperty $first (Get-ExactProperty ([psobject]) 'BaseObject')), [int])
+            $nativeHostType = $module.DefineType('Dev.MansfieldPlumbing.Pwsh.NativeHost',
+                [Reflection.TypeAttributes]'Public,Abstract,Sealed,BeforeFieldInit')
+            $concat = Get-ExactMethod ([string]) 'Concat' @([string], [string])
+            $hexText = { param($value) New-ClrCall $value (Get-ExactMethod ([int]) 'ToString' @([string])) @((New-ClrConstant 'x8' ([string]))) }
+            # Gate 2d substrate: Profile.ps1 through the product's path, less
+            # what needs an Activity ($Activity, recovery UI, animation), which
+            # waits for gate 2e. The files directory is internalDataPath, the
+            # base directory the host passes without its trailing separator;
+            # FindProfile is the product's case-insensitive lookup.
+            $nativeFind = New-FindProfileMethod -Owner $nativeHostType -Attributes ([Reflection.MethodAttributes]'Private,Static,HideBySig')
+            $sessionState = New-ClrProperty $runspaceVar (Get-ExactProperty $runspaceType 'SessionStateProxy')
+            $profileErrors = New-ClrProperty (New-ClrProperty $profileShell (Get-ExactProperty ([powershell]) 'Streams')) (Get-ExactProperty ([Management.Automation.PSDataStreams]) 'Error')
+            $errorCollection = (Get-ExactProperty ([Management.Automation.PSDataStreams]) 'Error').PropertyType
+            $firstError = [Linq.Expressions.Expression]::MakeIndex($profileErrors, $errorCollection.GetProperty('Item', [type[]]@([int])), [Linq.Expressions.Expression[]]@((New-ClrConstant 0 ([int]))))
+            $stateResults = New-ClrCall $stateShell $invoke[0]
+            $stateValue = [Linq.Expressions.Expression]::Unbox((New-ClrProperty ([Linq.Expressions.Expression]::Property($stateResults, 'Item', [Linq.Expressions.Expression[]]@(New-ClrConstant 0 ([int])))) (Get-ExactProperty ([psobject]) 'BaseObject')), [int])
+            $profilePhase = New-ClrBlock @() @(
+                (New-ClrAssign $filesVar (New-StaticCall (Get-ExactMethod ([IO.Path]) 'TrimEndingDirectorySeparator' @([string])) @((New-ClrProperty $null (Get-ExactProperty ([AppContext]) 'BaseDirectory'))))),
+                (New-ClrAssign $profileVar (New-StaticCall $nativeFind.Method @(
+                    (New-StaticCall $nativeFind.GetFiles @($filesVar)),
+                    (New-ClrConstant 0 ([int])),
+                    (New-StaticCall (Get-ExactMethod ([IO.Path]) 'Combine' @([string], [string])) @($filesVar, (New-ClrConstant 'Profile.ps1' ([string]))))))),
+                [Linq.Expressions.Expression]::IfThenElse(
+                    (New-StaticCall (Get-ExactMethod ([IO.File]) 'Exists' @([string])) @($profileVar)),
+                    (New-ClrBlock @() @(
+                        (& $log $infoPriority (New-StaticCall $concat @((New-ClrConstant 'GATE2D found ' ([string])), (New-StaticCall $nativeFind.GetFileName @($profileVar))))),
+                        (New-ClrCall $sessionState (Get-ExactMethod ([Management.Automation.Runspaces.SessionStateProxy]) 'SetVariable' @([string], [object])) @(
+                            (New-ClrConstant 'PSScriptRoot' ([string])), [Linq.Expressions.Expression]::Convert($filesVar, [object]))),
+                        (New-ClrAssign $startCommand (New-ClrCall (New-ClrProperty $sessionState (Get-ExactProperty ([Management.Automation.Runspaces.SessionStateProxy]) 'InvokeCommand')) `
+                            (Get-ExactMethod ([Management.Automation.CommandInvocationIntrinsics]) 'GetCommand' @([string], [Management.Automation.CommandTypes])) @(
+                                $profileVar, (New-ClrConstant ([Management.Automation.CommandTypes]::ExternalScript) ([Management.Automation.CommandTypes]))))),
+                        (New-ClrAssign $profileShell (New-StaticCall (Get-ExactMethod ([powershell]) 'Create' @($runspaceType)) @($runspaceVar))),
+                        (New-ClrCall $profileShell (Get-ExactMethod ([powershell]) 'AddCommand' @([Management.Automation.CommandInfo])) @($startCommand)),
+                        (& $mark 'GATE2D START_INVOKE_BEGIN'),
+                        (New-ClrCall $profileShell $invoke[0]),
+                        (& $mark 'GATE2D START_INVOKE_END'),
+                        [Linq.Expressions.Expression]::IfThen(
+                            (New-ClrProperty $profileShell (Get-ExactProperty ([powershell]) 'HadErrors')),
+                            [Linq.Expressions.Expression]::Throw((New-ClrNew ([InvalidOperationException].GetConstructor([type[]]@([string]))) @(
+                                [Linq.Expressions.Expression]::Condition(
+                                    [Linq.Expressions.Expression]::GreaterThan((New-ClrProperty $profileErrors (Get-ExactProperty $errorCollection 'Count')), (New-ClrConstant 0 ([int]))),
+                                    (New-ClrCall $firstError (Get-ExactMethod ([Management.Automation.ErrorRecord]) 'ToString' @())),
+                                    (New-ClrConstant 'Profile.ps1 reported one or more PowerShell errors.' ([string]))))))),
+                        # State the profile left in the runspace, read by a second pipeline.
+                        (New-ClrAssign $stateShell (New-StaticCall (Get-ExactMethod ([powershell]) 'Create' @($runspaceType)) @($runspaceVar))),
+                        (New-ClrCall $stateShell (Get-ExactMethod ([powershell]) 'AddScript' @([string])) @((New-ClrConstant '[int]$global:Gate2d' ([string])))),
+                        (& $log $infoPriority (New-StaticCall $concat @((New-ClrConstant 'GATE2D profile state 0x' ([string])), (& $hexText $stateValue)))))),
+                    (& $mark 'GATE2D START_MISSING')))
             $try = New-ClrBlock @() @(
                 (New-StaticCall ([Management.Automation.PowerShellAssemblyLoadContextInitializer].GetMethod(
                     'SetPowerShellAssemblyLoadContext', [Reflection.BindingFlags]'Public,Static', $null, [type[]]@([string]), $null)) @(
@@ -3626,6 +3698,8 @@ function New-PwshActivityAssemblyBytes {
                 (& $mark 'GATE2B managed resolution complete'),
                 (& $mark 'GATE2C CreateDefault2'),
                 (New-ClrAssign $issVar (New-StaticCall (Get-ExactMethod ([Management.Automation.Runspaces.InitialSessionState]) 'CreateDefault2' @()))),
+                (New-ClrAssign (New-ClrProperty $issVar (Get-ExactProperty ([Management.Automation.Runspaces.InitialSessionState]) 'LanguageMode')) `
+                    (New-ClrConstant ([Management.Automation.PSLanguageMode]::FullLanguage) ([Management.Automation.PSLanguageMode]))),
                 (& $mark 'GATE2C CreateRunspace'),
                 (New-ClrAssign $runspaceVar (New-StaticCall (Get-ExactMethod $rs 'CreateRunspace' @([Management.Automation.Runspaces.InitialSessionState])) @($issVar))),
                 (New-ClrAssign (New-ClrProperty $runspaceVar (Get-ExactProperty $runspaceType 'ThreadOptions')) `
@@ -3640,18 +3714,26 @@ function New-PwshActivityAssemblyBytes {
                 (& $log $infoPriority (New-StaticCall (Get-ExactMethod ([string]) 'Concat' @([string], [string])) @(
                     (New-ClrConstant 'GATE2C script result 0x' ([string])),
                     (New-ClrCall $resultVar (Get-ExactMethod ([int]) 'ToString' @([string])) @((New-ClrConstant 'x8' ([string]))))))),
+                $profilePhase,
                 $resultVar)
-            $nativeHostType = $module.DefineType('Dev.MansfieldPlumbing.Pwsh.NativeHost',
-                [Reflection.TypeAttributes]'Public,Abstract,Sealed,BeforeFieldInit')
             # Run holds every SMA reference. Admit references none, so a load or
             # JIT failure of Run surfaces as an exception inside Admit's try.
             $run = Add-PersistedMethod $nativeHostType 'Run' ([Reflection.MethodAttributes]'Private,Static,HideBySig') ([int]) @() `
-                ([Func[int]]) @() (New-ClrBlock @($issVar, $runspaceVar, $shellVar, $resultVar) @($try))
+                ([Func[int]]) @() (New-ClrBlock @($issVar, $runspaceVar, $shellVar, $resultVar, $filesVar, $profileVar, $profileShell, $stateShell, $startCommand) @($try))
             # RunPowerShell returns the HResult of any exception, and the native
-            # host logs it. The handler makes no call, so no managed logging or
-            # P/Invoke lies on the failure path.
-            $catch = [Linq.Expressions.Expression]::Catch($errorVar,
-                (New-ClrProperty $errorVar (Get-ExactProperty ([Exception]) 'HResult')))
+            # host logs it. The handler first logs the exception's type and
+            # message (not ToString, which pulls in stack-trace machinery), inside
+            # its own try, so the HResult comes back even if that logging fails.
+            $describe = New-StaticCall (Get-ExactMethod ([string]) 'Concat' @([string], [string], [string], [string])) @(
+                (New-ClrConstant 'GATE2B exception ' ([string])),
+                (New-ClrProperty (New-ClrCall $errorVar (Get-ExactMethod ([object]) 'GetType' @())) (Get-ExactProperty ([type]) 'FullName')),
+                (New-ClrConstant ': ' ([string])),
+                (New-ClrProperty $errorVar (Get-ExactProperty ([Exception]) 'Message')))
+            $catch = [Linq.Expressions.Expression]::Catch($errorVar, (New-ClrBlock @() @(
+                [Linq.Expressions.Expression]::TryCatch(
+                    (New-ClrBlock @() @((& $log $errorPriority $describe), [Linq.Expressions.Expression]::Empty())),
+                    [Linq.Expressions.Expression]::Catch([Exception], [Linq.Expressions.Expression]::Empty())),
+                (New-ClrProperty $errorVar (Get-ExactProperty ([Exception]) 'HResult')))))
             [void](Add-PersistedMethod $nativeHostType 'RunPowerShell' ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([int]) @() `
                 ([Func[int]]) @() ([Linq.Expressions.Expression]::TryCatch((New-StaticCall $run), $catch)))
             # Gate 2a, kept as an in-process invariant: the host calls it first
@@ -7201,6 +7283,11 @@ function Assert-NativeAdmissionApk {
     if (@($manifest.Strings | Where-Object { $_ -like '*MonoRuntimeProvider*' }).Count) { throw 'The NativeActivity manifest string pool names MonoRuntimeProvider.' }
     $application = @($manifest.Elements | Where-Object Name -eq 'application')[0]
     if ($application.Attributes['hasCode'] -ne 0) { throw 'The NativeActivity manifest does not set android:hasCode="false".' }
+    # android:debuggable is present exactly when -Debuggable asked for it.
+    if ($Debuggable) {
+        if (-not $application.Attributes.Contains('debuggable') -or $application.Attributes['debuggable'] -eq 0) { throw 'The -Debuggable manifest does not set android:debuggable="true".' }
+    }
+    elseif ($application.Attributes.Contains('debuggable') -or @($manifest.Strings) -ccontains 'debuggable') { throw 'The release NativeActivity manifest carries android:debuggable.' }
     $activity = @($manifest.Elements | Where-Object Name -eq 'activity')
     if ($activity.Count -ne 1 -or $activity[0].Attributes['name'] -cne 'android.app.NativeActivity') { throw 'The manifest activity is not android.app.NativeActivity.' }
     $libName = @($manifest.Elements | Where-Object { $_.Name -eq 'meta-data' -and $_.Attributes['name'] -ceq 'android.app.lib_name' })
@@ -7443,7 +7530,7 @@ function Test-AndroidAttributeIds {
     $text = Import-LibSourceText -Path 'public-final.xml'
     $expected = [ordered]@{
         'theme' = 0x01010000; 'label' = 0x01010001; 'icon' = 0x01010002
-        'name' = 0x01010003; 'hasCode' = 0x0101000C; 'exported' = 0x01010010; 'authorities' = 0x01010018
+        'name' = 0x01010003; 'hasCode' = 0x0101000C; 'debuggable' = 0x0101000F; 'exported' = 0x01010010; 'authorities' = 0x01010018
         'initOrder' = 0x0101001A; 'launchMode' = 0x0101001D; 'value' = 0x01010024
         'resource' = 0x01010025; 'drawable' = 0x01010199; 'minSdkVersion' = 0x0101020C
         'versionCode' = 0x0101021B; 'versionName' = 0x0101021C
@@ -9475,9 +9562,14 @@ function New-BinaryAxmlManifest {
     # NativeActivity admission adds only its own strings, so the Xamarin
     # manifest stays byte-identical to the proven one.
     $native = $Admission -eq 'NativeActivity'
+    if ($Debuggable -and -not $native) { throw '-Debuggable applies to -Admission NativeActivity only.' }
     if ($native) {
         $attrNames += 'hasCode'                        # ResID: 0x0101000C
         $resIds += 0x0101000C
+        if ($Debuggable) {
+            $attrNames += 'debuggable'                 # ResID: 0x0101000F
+            $resIds += 0x0101000F
+        }
         $otherStrings = @($otherStrings | Where-Object { $_ -notin 'mono.MonoRuntimeProvider', $providerAuthority, 'provider' })
         $otherStrings += @('android.app.NativeActivity', 'android.app.lib_name', $NativeLibraryName)
         $activityFullName = 'android.app.NativeActivity'
@@ -9686,7 +9778,11 @@ function New-BinaryAxmlManifest {
     )
     # Attributes are written in resource-id order; hasCode (0x0101000C)
     # follows name (0x01010003).
-    if ($native) { $appAttrs = @($appAttrs[0..2]) + @((Attr-Bool 'hasCode' $false)) + @($appAttrs[3..4]) }
+    # debuggable (0x0101000F) follows hasCode.
+    if ($native) {
+        $flags = @((Attr-Bool 'hasCode' $false)) + @(if ($Debuggable) { (Attr-Bool 'debuggable' $true) })
+        $appAttrs = @($appAttrs[0..2]) + $flags + @($appAttrs[3..4])
+    }
     Write-StartElem 'application' $appAttrs 12
 
     $activityAttrs = @(

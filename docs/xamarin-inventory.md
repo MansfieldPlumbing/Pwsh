@@ -41,7 +41,7 @@ PowerShell.
 | Process and runtime start | `MonoRuntimeProvider` → `libmonodroid` → `coreclr_initialize` | emitted host `.so` exporting `ANativeActivity_onCreate`, calling `coreclr_initialize` and `coreclr_create_delegate` | C API + runtime | REPLACE | main thread, once per process | gates 1 and 2 below |
 | Activity | Java peer `MainActivity` (`classes2.dex`), `n_onCreate` via RegisterNatives | `android.app.NativeActivity`, a framework class; no DEX | C API | REPLACE | NativeActivity callbacks on main | app launches with no DEX |
 | Managed entry | six-opcode `OnCreate` shim → `AdmitActivity(Activity)` | `[UnmanagedCallersOnly]` entry taking `ANativeActivity*`, reached by `coreclr_create_delegate` | runtime | REPLACE | main thread | host reaches the runspace |
-| Runspace and `Profile.ps1` | `CreateDefault2`, `UseCurrentThread`, `Open`, `ExternalScript` | the same SMA calls on a dedicated PowerShell thread blocking in `ALooper_pollOnce` | PowerShell + C API | KEEP | runspace thread, never main | `Profile.ps1` runs on all three targets |
+| Runspace and `Profile.ps1` | `CreateDefault2`, `UseCurrentThread`, `Open`, `ExternalScript` | the same SMA calls on the Android main thread, as gate 2c ran them | PowerShell + C API | KEEP | main thread | `Profile.ps1` runs on all three targets |
 | `JavaSystem.LoadLibrary("psl-native")` | required only because monodroid waits for a Java-side load | dropped; default `dlopen` probing | none | DELETE | none | SMA startup logging works without it |
 
 ## 2. Files and identity
@@ -133,7 +133,16 @@ stood in the way, and neither was Xamarin: the store placed images at
 unaligned offsets, which CoreCLR tolerates only because the .NET for Android
 host copies every assembly, and the NativeActivity APK lacked
 `libpsl-native.so`. The NativeActivity store now aligns every image to 16
-bytes and the APK carries `libpsl-native.so`. `Profile.ps1` (gate 2d) is next.
+bytes and the APK carries `libpsl-native.so`. Gate 2e, the Android compatibility surface, is next.
+
+## Gate 2d result
+
+The profile execution substrate passed on all three backends with controlled
+fixtures: the product's case-insensitive lookup, `$PSScriptRoot`, execution as
+an external script in the existing runspace, the `HadErrors` rule, state kept
+afterward, and the missing-profile case. The Activity-dependent parts wait for
+gate 2e. CanvasDemo is the workload in the `Profile.ps1` role; its exact bytes
+run at gate 2f.
 
 ## Open questions
 
