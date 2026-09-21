@@ -63,6 +63,10 @@ only when that group's evidence exists. Name the source for every new fact.
 - `libpsl-native.so` has 21 exports for every target, reaches libc through a
   GOT with `DT_NEEDED libc.so` and `DT_FLAGS BIND_NOW`, and every instruction
   is decoded back by an independent decoder (`Test-ElfCodeLibrary*`).
+- The store library reserves eight dynamic entries on ELF64 targets and seven
+  on ELF32 (`New-ElfPayloadLibrary`). The difference is deliberate: both sizes
+  reproduce bytes proven on hardware. Do not make them agree as part of any
+  other change.
 - The payload is the names in `lib/arm64-v8a.lean-assembly-order.txt`, pinned
   by digest; its length (96) is the assembly count every step checks.
 - The payload has no cmdlet modules (`Microsoft.PowerShell.Commands.*`), so
@@ -109,6 +113,8 @@ Verify each on hardware before relying on it.
 - Whether `libSystem.Security.Cryptography.Native.Android.so` must be
   initialized with the Java VM before hashing or TLS work.
 - How the host resolves the per-install native library directory.
+- Whether the ELF32 store library should reserve eight dynamic entries like
+  ELF64. Changing it alters proven arm32 bytes, so it needs its own device run.
 - `Read-ElfImage` resolves symbols through the SysV hash table with its own
   hash function, but every emitted table has one bucket, so that function is
   not yet exercised. A self-test with a multi-bucket table would cover it.
