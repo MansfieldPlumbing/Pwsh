@@ -9,7 +9,7 @@
   "sources": [
     {
       "path": "arm64-v8a.lean-assembly-order.txt",
-      "sha256": "2B49ACC6DFD0A0485F3C2DA65C08F0C728FF29C5DE602F069D604858AA0014D7",
+      "sha256": "75C97740B3A93C04636CB109D1C2990D0C123D290C9246BC43FF5F37EEF377CB",
       "url": null,
       "role": "Ordered 96-name lean assembly payload. Architecture-neutral IL, used for every target."
     },
