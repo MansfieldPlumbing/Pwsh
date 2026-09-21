@@ -143,7 +143,8 @@ only when that group's evidence exists. Name the source for every new fact.
   Xamarin-shaped `Touch`, `KeyPress` and `PostOnAnimation`, and invokes the
   frozen script's delegates on the main thread. No hand-written native stub
   sits between the callback and managed code. Only the compatibility
-  assembly uses `Android.*` and `Java.*` names.- Before modifying `Read-ElfImage`, the SysV ELF hash implementation, or the
+  assembly uses `Android.*` and `Java.*` names.
+- Before modifying `Read-ElfImage`, the SysV ELF hash implementation, or the
   emitted ELF hash-table structure, add and pass a permanent multi-bucket hash
   self-test that covers successful chained lookups and missing-symbol lookups.
 
@@ -155,7 +156,8 @@ Verify each on hardware before relying on it.
   JNI on Android, shown by `GetVersion`, `FindClass`, `GetMethodID` and one
   `Call*MethodA` with a `jvalue[]`, using slot numbers from a pinned Android 14
   `jni.h`; `QuickPS/src/Native.ps1` runs unchanged under the owned CoreCLR host;
-  its `CallingConvention.StdCall` attribute is harmless on arm64, x64 and arm32.- The exact runtime properties `coreclr_initialize` needs without the .NET for
+  its `CallingConvention.StdCall` attribute is harmless on arm64, x64 and arm32.
+- The exact runtime properties `coreclr_initialize` needs without the .NET for
   Android host.
 - Whether `libSystem.Security.Cryptography.Native.Android.so` must be
   initialized with the Java VM before hashing or TLS work.
