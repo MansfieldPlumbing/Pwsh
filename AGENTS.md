@@ -109,3 +109,6 @@ Verify each on hardware before relying on it.
 - Whether `libSystem.Security.Cryptography.Native.Android.so` must be
   initialized with the Java VM before hashing or TLS work.
 - How the host resolves the per-install native library directory.
+- `Read-ElfImage` resolves symbols through the SysV hash table with its own
+  hash function, but every emitted table has one bucket, so that function is
+  not yet exercised. A self-test with a multi-bucket table would cover it.
