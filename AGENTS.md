@@ -2,6 +2,33 @@
 
 Keep this repository narrow and evidence-led.
 
+## Stance: the rules govern evidence, not technique
+
+These rules exist to keep every claim true. They do not rank techniques.
+Emitted machine code, direct system calls, raw kernel interfaces, replacing a
+runtime component, and racing a production compiler are all admissible when
+the work is:
+
+1. derived from a pinned specification or source at an exact revision;
+2. checked by an independent implementation used only as an oracle, never as
+   a producer;
+3. proven on hardware with a receipt for the same artifact, on every backend
+   it claims; and
+4. stated with its claim boundary: what it proves and what it does not.
+
+Compilers and runtimes are competitors and oracles, not authorities.
+Kokoro-Hexagon's receipts at commit `250e10dc` record a PowerShell-lowered
+kernel running 2.21–2.30x faster in DSP ticks than Hexagon Clang 19.0.04
+output, bit exact, on SM8550 and SM8635.
+
+When a rule blocks work that meets all four conditions, report the rule and
+propose a precise change to it. Do not refuse silently, and do not work around
+it silently.
+
+## Layout
+
+- `ROADMAP.md` is the single implementation roadmap. A checked item names its
+  gate or receipt.
 - `setup.ps1` is the build. Its steps are nodes in `$script:StepGraph`.
 - `lib/` holds pinned inputs only. Every file is listed in `lib/manifest.json`
   with its SHA-256; `setup.ps1` holds only the manifest's digest.
@@ -26,10 +53,15 @@ Keep this repository narrow and evidence-led.
 - New code must not depend on .NET for Android (Xamarin) types. Android is
   reached through its C APIs or JNI.
 - No tick or polling loops. Work is driven by blocking waits on events.
-- Native code starts the runtime and nothing else. Logic belongs in emitted IL
-  or PowerShell.
+- Native code starts the runtime. Any other native logic enters only through a
+  `ROADMAP.md` gate (Emitted native code: N1–N3): emitted by PowerShell,
+  decoded back and ABI-checked by the build, and measured against RyuJIT with a
+  device receipt on all three backends. Until such a gate passes, logic belongs
+  in emitted IL or PowerShell.
 - Machine code, if emitted, comes from named instruction encoders, never raw
   hex, and is decoded back and checked by the build.
+- Pushes go through `.githooks/pre-push` (`git config core.hooksPath
+  .githooks`), which refuses secrets, key files and personal data.
 - Do not vendor upstream repositories, donor code, graphics work, JavaScript
   parsing work, or unrelated application archaeology here.
 

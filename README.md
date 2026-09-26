@@ -177,7 +177,7 @@ with the pinned copy.
 
 It goes away with the planned move off .NET for Android: the main activity
 becomes `android.app.NativeActivity`, which needs no DEX at all, and any Java
-classes still required are emitted by `setup.ps1`. See `docs/roadmap.md`.
+classes still required are emitted by `setup.ps1`. See `ROADMAP.md`.
 
 ## Layout
 
@@ -185,7 +185,7 @@ classes still required are emitted by `setup.ps1`. See `docs/roadmap.md`.
 setup.ps1         the build
 lib/              pinned specifications, restored on demand, never executed
 lib/manifest.json the root provenance manifest; setup.ps1 holds only its digest
-docs/roadmap.md   where the project is going
+ROADMAP.md        where the project is going, gate by gate
 docs/DEVELOPER.md decisions, proofs, architecture targets, testing
 scripts/          the frozen CellCanvas workload and its reference inventory
 tools/            payload closure probe; pre-push scan for secrets and personal data

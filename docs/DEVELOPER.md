@@ -2,7 +2,7 @@
 
 What a returning developer (or agent) needs before touching `setup.ps1`.
 Rules live in `AGENTS.md`; what the project is lives in `README.md`; where it is
-going lives in `docs/roadmap.md`. This file records decisions, proofs and
+going lives in `ROADMAP.md`. This file records decisions, proofs and
 mechanics that are not obvious from the code.
 
 ## 1. The premise

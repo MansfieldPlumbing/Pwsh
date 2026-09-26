@@ -63,7 +63,7 @@ correctly and cheaply, no other part of the UI has to fit the cell grid.
 This document does not choose a renderer. The repository already records two:
 Android `Canvas` and AGSL reached through JNI, which gate 2e/2f requires for
 CellCanvas (`docs/android-facade.md`), and a Vulkan swapchain on the
-`NativeActivity` window (`docs/roadmap.md` milestone 3). The terminal is built
+`NativeActivity` window (`ROADMAP.md`, UI and platform). The terminal is built
 on whichever of them the owner confirms, using the bridges gate 2e proves.
 
 ## Rules
