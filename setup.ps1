@@ -742,7 +742,7 @@ $script:KeepPackageCache = -not $DeletePackages -and $Packages -eq 'Folder'
 # any of them fails verification before a single byte is parsed.
 $script:RepositoryLibBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/df99fa0859e0ef9e94cb68ec1a704afb15304048/lib/'
 $script:LibRootManifestPath = 'manifest.json'
-$script:LibRootManifestSha256 = 'A2F56D639B685C2C4C6755016CD14F6094D50D3A3F49B6479E48B6B349B556A4'
+$script:LibRootManifestSha256 = '6935434D62D096F1F465C1A3D4855D064ECC200F7FBABC0AA72D22C6A5B97590'
 $script:LibSourceManifest = $null
 
 function Get-LibFileBytes {
@@ -750,7 +750,9 @@ function Get-LibFileBytes {
         [Parameter(Mandatory)][string] $Path,
         [Parameter(Mandatory)][string] $Sha256,
         [string] $Url,
-        [string] $Transport = ''
+        [string] $Transport = '',
+        [string] $Commit = '',
+        [string] $File = ''
     )
 
     $bytes = $null
@@ -783,7 +785,12 @@ function Get-LibFileBytes {
     }
 
     Write-Host ('[ .. ] Restoring lib source: {0}' -f $Path) -ForegroundColor DarkCyan
-    $bytes = Get-UpstreamSourceBytes -Url $address -Transport $(if ([string]::IsNullOrWhiteSpace($Url)) { '' } else { $Transport })
+    $bytes = if ([string]::IsNullOrWhiteSpace($Url)) {
+        Get-UpstreamSourceBytes -Url $address
+    }
+    else {
+        Get-UpstreamSourceBytes -Url $address -Transport $Transport -Commit $Commit -File $File
+    }
 
     $stream = [System.IO.MemoryStream]::new($bytes, $false)
     try { $actual = Get-Sha256Hex -Stream $stream }
@@ -807,23 +814,167 @@ function Get-PinTransport {
     [string]$property.Value
 }
 
-function Get-UpstreamSourceBytes {
-    # Fetches a pinned address and returns the file's bytes. Gitiles
-    # (android.googlesource.com) serves a file at a fixed commit only as base64
-    # (?format=TEXT); 'gitiles-base64' decodes that. The pinned digest is always
-    # over the decoded file bytes.
-    param([Parameter(Mandatory)][string] $Url, [string] $Transport = '')
+function Get-GitPktLine {
+    # One pkt-line: four hex digits giving the total length, then the payload.
+    param([Parameter(Mandatory)][string] $Text)
+    $payload = [Text.Encoding]::UTF8.GetBytes($Text)
+    [byte[]]([Text.Encoding]::ASCII.GetBytes(('{0:x4}' -f ($payload.Length + 4))) + $payload)
+}
 
+function Get-GitObject {
+    # Fetches exactly one object by id over git's smart-HTTP protocol v2 and
+    # returns its type and bytes after checking that they hash to that id.
+    param(
+        [Parameter(Mandatory)][string] $Repository,
+        [Parameter(Mandatory)][string] $Id,
+        [string[]] $Arguments = @()
+    )
+    if ($Id -cnotmatch '^[0-9a-f]{40}$') { throw "Git object id '$Id' is not a full SHA-1." }
+    $request = [IO.MemoryStream]::new()
+    foreach ($line in @('command=fetch')) { $b = Get-GitPktLine "$line`n"; $request.Write($b, 0, $b.Length) }
+    $delim = [Text.Encoding]::ASCII.GetBytes('0001'); $request.Write($delim, 0, 4)
+    foreach ($line in @($Arguments) + @("want $Id", 'no-progress', 'done')) { $b = Get-GitPktLine "$line`n"; $request.Write($b, 0, $b.Length) }
+    $flush = [Text.Encoding]::ASCII.GetBytes('0000'); $request.Write($flush, 0, 4)
+
+    $response = Invoke-WebRequest -Uri ($Repository.TrimEnd('/') + '/git-upload-pack') -Method Post -UseBasicParsing -SkipHttpErrorCheck `
+        -Body $request.ToArray() -ContentType 'application/x-git-upload-pack-request' `
+        -Headers @{ 'Git-Protocol' = 'version=2'; 'Accept' = 'application/x-git-upload-pack-result' }
+    if ([int]$response.StatusCode -ne 200) { throw "git-upload-pack at '$Repository' returned HTTP $([int]$response.StatusCode)." }
+    $bytes = $response.RawContentStream.ToArray()
+
+    # Sections are text pkt-lines until 'packfile'; after it every pkt-line
+    # carries a side-band byte: 1 pack data, 2 progress, 3 fatal error.
+    $pack = [IO.MemoryStream]::new()
+    $inPack = $false
+    $pos = 0
+    while ($pos + 4 -le $bytes.Length) {
+        $length = [Convert]::ToInt32([Text.Encoding]::ASCII.GetString($bytes, $pos, 4), 16)
+        $pos += 4
+        if ($length -lt 4) { if ($length -eq 0 -and $inPack) { break }; continue }
+        $size = $length - 4
+        if ($pos + $size -gt $bytes.Length) { throw 'git-upload-pack response is truncated.' }
+        if (-not $inPack) {
+            $text = [Text.Encoding]::UTF8.GetString($bytes, $pos, $size).TrimEnd("`n")
+            if ($text.StartsWith('ERR ')) { throw "git-upload-pack refused: $($text.Substring(4))" }
+            if ($text -ceq 'packfile') { $inPack = $true }
+        } else {
+            switch ($bytes[$pos]) {
+                1 { $pack.Write($bytes, $pos + 1, $size - 1) }
+                2 { }
+                3 { throw "git-upload-pack error: $([Text.Encoding]::UTF8.GetString($bytes, $pos + 1, $size - 1).Trim())" }
+                default { throw "git-upload-pack sent unknown side-band channel $($bytes[$pos])." }
+            }
+        }
+        $pos += $size
+    }
+    if (-not $inPack) { throw 'git-upload-pack response carried no packfile.' }
+
+    $p = $pack.ToArray()
+    if ($p.Length -lt 32 -or [Text.Encoding]::ASCII.GetString($p, 0, 4) -cne 'PACK') { throw 'Packfile header is missing.' }
+    $version = ([uint32]$p[4] -shl 24) -bor ([uint32]$p[5] -shl 16) -bor ([uint32]$p[6] -shl 8) -bor [uint32]$p[7]
+    $count = ([uint32]$p[8] -shl 24) -bor ([uint32]$p[9] -shl 16) -bor ([uint32]$p[10] -shl 8) -bor [uint32]$p[11]
+    if ($version -notin 2, 3) { throw "Packfile version $version is not supported." }
+    if ($count -ne 1) { throw "Expected exactly one object for $Id; the server sent $count." }
+    $packHash = [Security.Cryptography.IncrementalHash]::CreateHash([Security.Cryptography.HashAlgorithmName]::SHA1)
+    $packHash.AppendData($p, 0, $p.Length - 20)
+    if ([Convert]::ToHexString($packHash.GetHashAndReset()) -cne [Convert]::ToHexString($p, $p.Length - 20, 20)) { throw 'Packfile checksum does not match.' }
+
+    # Object header: type in bits 4-6 of the first byte, size as a
+    # little-endian base-128 varint starting with its low four bits.
+    $i = 12
+    $c = $p[$i++]
+    $type = ($c -shr 4) -band 7
+    [long]$objectSize = $c -band 15
+    $shift = 4
+    while ($c -band 0x80) { $c = $p[$i++]; $objectSize = $objectSize -bor ([long]($c -band 0x7f) -shl $shift); $shift += 7 }
+    $typeName = @{ 1 = 'commit'; 2 = 'tree'; 3 = 'blob'; 4 = 'tag' }[[int]$type]
+    if (-not $typeName) { throw "Object $Id arrived as pack type $type (a delta); only whole objects are accepted." }
+
+    $compressed = [IO.MemoryStream]::new($p, $i, $p.Length - 20 - $i, $false)
+    $inflater = [IO.Compression.ZLibStream]::new($compressed, [IO.Compression.CompressionMode]::Decompress)
+    $data = [IO.MemoryStream]::new()
+    try { $inflater.CopyTo($data) } finally { $inflater.Dispose() }
+    $content = $data.ToArray()
+    if ($content.Length -ne $objectSize) { throw "Object $Id inflated to $($content.Length) bytes; its header says $objectSize." }
+
+    # A git object id is SHA-1 over "<type> <size>\0<content>".
+    $header = [Text.Encoding]::ASCII.GetBytes("$typeName $($content.Length)`0")
+    $hasher = [Security.Cryptography.IncrementalHash]::CreateHash([Security.Cryptography.HashAlgorithmName]::SHA1)
+    $hasher.AppendData($header); $hasher.AppendData($content)
+    $actual = [Convert]::ToHexString($hasher.GetHashAndReset()).ToLowerInvariant()
+    if ($actual -cne $Id) { throw "Object requested as $Id hashes to $actual." }
+    [pscustomobject]@{ Type = $typeName; Content = $content }
+}
+
+function Get-GitPinnedFile {
+    # Walks commit -> root tree -> one tree per directory -> file, fetching one
+    # object per request, so each object's id is proven by its parent.
+    param(
+        [Parameter(Mandatory)][string] $Repository,
+        [Parameter(Mandatory)][string] $Commit,
+        [Parameter(Mandatory)][string] $Path
+    )
+    $object = Get-GitObject -Repository $Repository -Id $Commit -Arguments @('deepen 1', 'filter tree:0')
+    if ($object.Type -cne 'commit') { throw "$Commit is a $($object.Type), not a commit." }
+    $text = [Text.Encoding]::UTF8.GetString($object.Content)
+    if ($text -cnotmatch '^tree ([0-9a-f]{40})\n') { throw "Commit $Commit names no tree." }
+    $id = $Matches[1]
+    $segments = $Path.Split('/')
+    for ($s = 0; $s -lt $segments.Count; $s++) {
+        $tree = Get-GitObject -Repository $Repository -Id $id -Arguments @('filter tree:1')
+        if ($tree.Type -cne 'tree') { throw "Object $id on the path to '$Path' is a $($tree.Type), not a tree." }
+        # Tree entry: "<octal mode> <name>\0" then a 20-byte object id.
+        $b = $tree.Content; $k = 0; $found = $null
+        while ($k -lt $b.Length) {
+            $space = [Array]::IndexOf($b, [byte]0x20, $k)
+            $nul = [Array]::IndexOf($b, [byte]0, $space)
+            $mode = [Text.Encoding]::ASCII.GetString($b, $k, $space - $k)
+            $name = [Text.Encoding]::UTF8.GetString($b, $space + 1, $nul - $space - 1)
+            $entryId = [Convert]::ToHexString($b, $nul + 1, 20).ToLowerInvariant()
+            $k = $nul + 21
+            if ($name -ceq $segments[$s]) { $found = @{ Mode = $mode; Id = $entryId }; break }
+        }
+        if (-not $found) { throw "'$($segments[0..$s] -join '/')' is not in commit $Commit." }
+        $last = $s -eq $segments.Count - 1
+        if ($last -and $found.Mode -notin '100644', '100755') { throw "'$Path' is not a regular file in commit $Commit (mode $($found.Mode))." }
+        if (-not $last -and $found.Mode -ne '40000') { throw "'$($segments[0..$s] -join '/')' is not a directory in commit $Commit." }
+        $id = $found.Id
+    }
+    $blob = Get-GitObject -Repository $Repository -Id $id
+    if ($blob.Type -cne 'blob') { throw "'$Path' resolved to a $($blob.Type), not a blob." }
+    [byte[]]$blob.Content
+}
+
+function Get-UpstreamSourceBytes {
+    # Fetches a pinned source and returns the file's bytes; the caller checks
+    # them against the pinned SHA-256. A plain address is one HTTPS GET.
+    # 'git-v2' reads a file at a pinned commit through git's smart-HTTP
+    # protocol, which android.googlesource.com keeps serving when its web view
+    # does not; every object on the way is checked against its git id.
+    param(
+        [Parameter(Mandatory)][string] $Url,
+        [string] $Transport = '',
+        [string] $Commit = '',
+        [string] $File = ''
+    )
+
+    if ($Transport -ceq 'git-v2') {
+        return Get-GitPinnedFile -Repository $Url -Commit $Commit -Path $File
+    }
+    if (-not [string]::IsNullOrEmpty($Transport)) { throw "Unknown upstream transport '$Transport'." }
     $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -SkipHttpErrorCheck
     if ([int]$response.StatusCode -ne 200) {
         throw "Upstream source '$Url' returned HTTP $([int]$response.StatusCode)."
     }
-    $bytes = $response.RawContentStream.ToArray()
-    if ($Transport -ceq 'gitiles-base64') {
-        return [Convert]::FromBase64String([System.Text.Encoding]::ASCII.GetString($bytes).Trim())
-    }
-    if (-not [string]::IsNullOrEmpty($Transport)) { throw "Unknown upstream transport '$Transport'." }
-    return $bytes
+    return $response.RawContentStream.ToArray()
+}
+
+function Get-PinField {
+    # An optional string field of a provenance pin; empty when absent.
+    param([Parameter(Mandatory)] $Pin, [Parameter(Mandatory)][string] $Name)
+    $property = $Pin.PSObject.Properties[$Name]
+    if ($null -eq $property) { return '' }
+    [string]$property.Value
 }
 
 function Get-LibSourceManifest {
@@ -850,8 +1001,17 @@ function Get-LibSourceManifest {
             throw "Source '$($source.path)' declares a non-HTTPS upstream address."
         }
         $transport = Get-PinTransport -Pin $source
-        if ($transport -and ($transport -cne 'gitiles-base64' -or -not ([string]$source.url).StartsWith('https://android.googlesource.com/', [StringComparison]::Ordinal))) {
-            throw "Source '$($source.path)' declares transport '$transport', which is allowed only as 'gitiles-base64' for android.googlesource.com."
+        if ($transport -and $transport -cne 'git-v2') {
+            throw "Source '$($source.path)' declares unknown transport '$transport'."
+        }
+        if ($transport -ceq 'git-v2') {
+            if ((Get-PinField -Pin $source -Name 'commit') -cnotmatch '^[0-9a-f]{40}$') {
+                throw "Source '$($source.path)' uses git-v2 without a full commit SHA."
+            }
+            $file = Get-PinField -Pin $source -Name 'file'
+            if ([string]::IsNullOrWhiteSpace($file) -or $file.StartsWith('/') -or ($file -split '/') -contains '..') {
+                throw "Source '$($source.path)' uses git-v2 without a relative file path inside the repository."
+            }
         }
     }
     if (@($sources | Group-Object -Property path | Where-Object Count -ne 1).Count -ne 0) {
@@ -918,7 +1078,8 @@ function Import-LibSourceBytes {
     param([Parameter(Mandatory)][string] $Path)
 
     $pin = Get-LibSourcePin -Path $Path
-    return Get-LibFileBytes -Path $Path -Sha256 ([string]$pin.sha256) -Url ([string]$pin.url) -Transport (Get-PinTransport -Pin $pin)
+    return Get-LibFileBytes -Path $Path -Sha256 ([string]$pin.sha256) -Url ([string]$pin.url) -Transport (Get-PinTransport -Pin $pin) `
+        -Commit (Get-PinField -Pin $pin -Name 'commit') -File (Get-PinField -Pin $pin -Name 'file')
 }
 function Import-LibSourceText {
     param([Parameter(Mandatory)][string] $Path)
@@ -971,7 +1132,8 @@ function Invoke-VerifyStep {
             continue
         }
 
-        $remoteBytes = Get-UpstreamSourceBytes -Url ([string]$pin.url) -Transport (Get-PinTransport -Pin $pin)
+        $remoteBytes = Get-UpstreamSourceBytes -Url ([string]$pin.url) -Transport (Get-PinTransport -Pin $pin) `
+            -Commit (Get-PinField -Pin $pin -Name 'commit') -File (Get-PinField -Pin $pin -Name 'file')
         $remoteStream = [System.IO.MemoryStream]::new($remoteBytes, $false)
         try { $remoteHash = Get-Sha256Hex -Stream $remoteStream }
         finally { $remoteStream.Dispose() }

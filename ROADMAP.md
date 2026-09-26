@@ -31,18 +31,17 @@ Ship versions are locked: PowerShell 7.7.0-preview.5 and .NET
   refuses any other repository path.
 - [x] Pre-push scan for secrets, key files and personal data
   (`tools/Test-PendingChanges.ps1`, `.githooks/pre-push`), tested end to end.
-- [x] Upstream pin check (`tools/Test-UpstreamPins.ps1`): 20 of 22 addresses
-  serve their pinned bytes; the two `android.googlesource.com` headers are
-  unreachable (HTTP 503) and so unverified, not failed.
+- [x] Upstream pin check (`tools/Test-UpstreamPins.ps1`): all 22 pinned
+  addresses serve their pinned bytes.
+- [x] Step 1 verifies every upstream pin on every build without a web view:
+  `git-v2` pins read a file at a pinned commit through git's smart-HTTP
+  protocol v2 using `Invoke-WebRequest` alone, one object per request, each
+  checked against its git object id from the pinned commit down to the file.
+  `android.googlesource.com` returned 503 for its web view while serving this
+  protocol; `log.h` and `native_activity.h` verify byte for byte.
 
 ## Next: unblock the build
 
-- [ ] **Step 1 must not depend on a third-party host.** It re-downloads every
-  pinned upstream file on every build and fails on anything but HTTP 200;
-  googlesource returns 503 for `log.h` and `native_activity.h`, whose `lib/`
-  copies already match their digests. Owner decision taken: every build admits
-  `lib/` files by digest; `tools/Test-UpstreamPins.ps1` checks upstream when
-  pins change. The `setup.ps1` edit is pending.
 - [ ] Byte-identical APK proof of the 2026-09-26 refactor: build every target
   under both admissions from `build/baseline-src/` and from the working tree
   and compare SHA-256s.
