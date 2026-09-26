@@ -282,6 +282,15 @@ only when that group's evidence exists. Name the source for every new fact.
   seconds later with an empty crash buffer. `$Activity`, the recovery UI and the
   animation callback remain gate 2e concerns. The Xamarin builds and the
   release NativeActivity manifest stayed byte-identical.
+- Gate 2e admission prerequisite, 2026-09-26: `RunPowerShell(IntPtr)` receives
+  the borrowed `ANativeActivity*` and places it in the runspace as
+  `NativeActivityHandle`. Its first build threw `NullReferenceException` on all
+  three backends: an `IntPtr` constant became a closure-bound constant that a
+  persisted method cannot load (fixed; the build now rejects such constants).
+  With the fix, gates 2a-2d pass again on the x86_64 emulator, the S23 and the
+  onn 4K Plus (arm32, API 34), with the managed host assembly named
+  `Dev.MansfieldPlumbing.Pwsh`: every marker on the main thread, the process
+  alive 40 seconds later, the crash buffer empty.
 - The current payload contains no cmdlet modules, so commands such as
   `Join-Path` and `Write-Error` are unavailable in this `CreateDefault2`
   runspace. Profile fixtures use the language and .NET only.
@@ -394,8 +403,18 @@ Verify each on hardware before relying on it.
   its `CallingConvention.StdCall` attribute is harmless on arm64, x64 and arm32.
 - The exact runtime properties `coreclr_initialize` needs without the .NET for
   Android host.
-- Whether `libSystem.Security.Cryptography.Native.Android.so` must be
-  initialized with the Java VM before hashing or TLS work.
+- Settled 2026-09-26: `libSystem.Security.Cryptography.Native.Android.so`
+  needs Java-side loading before any hashing or TLS. Its `GetJNIEnv`
+  dereferences a `JavaVM*` that only its `JNI_OnLoad` stores (`pal_jni.c:676`,
+  `:689-693`, runtime `ab194157`). Loaded by CoreCLR's P/Invoke, the first
+  `SHA256.HashData` faulted at address 0 (x86_64 emulator). Calling its
+  `JNI_OnLoad` from managed code then aborted on `GetClassGRef: class
+  net/dot/android/crypto/DotnetProxyTrustManager was not found`: `FindClass`
+  resolves through the current Java method's class loader, and uses the
+  app's loader only inside `Runtime.nativeLoad` (art `3c05e56a`,
+  `jni_internal.cc:392-408`). The fix is Java-side `System.loadLibrary` from
+  the emitted `NativeActivity` subclass, with the runtime pack's
+  `libSystem.Security.Cryptography.Native.Android.dex` packaged.
 - How the host resolves the per-install native library directory.
 - Whether the ELF32 store library should reserve eight dynamic entries like
   ELF64. Changing it alters proven arm32 bytes, so it needs its own device run.

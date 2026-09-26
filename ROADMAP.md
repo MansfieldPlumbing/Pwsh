@@ -51,9 +51,10 @@ Ship versions are locked: PowerShell 7.7.0-preview.5 and .NET
   from a copy whose googlesource fetch used `git-v2`, which changes how step 1
   reaches upstream, not the admitted bytes. The baseline already contains the
   gate 2e host change, so this proof does not cover that change.
-- [ ] The gate 2e host change (`RunPowerShell(IntPtr)`, `NativeActivityHandle`)
-  is in `main` unbuilt. Build it, pass the decoder and ABI checkers, and
-  re-prove gates 2a–2d on all three backends, or revert it until then.
+- [x] The gate 2e host change (`RunPowerShell(IntPtr)`, `NativeActivityHandle`)
+  passes gates 2a-2d on the x86_64 emulator, the S23 and the onn 4K Plus
+  (arm32) after its bound-constant fix; the managed host assembly is
+  `Dev.MansfieldPlumbing.Pwsh`.
 
 ## Payload
 
@@ -153,11 +154,21 @@ The win came from specialization to known shapes and layout.
   pointing at script stubs, then freeze the manifest; scripts enable
   components at runtime with `DONT_KILL_APP`. Own-package changes need no
   permission (`docs/ui.md`, traced to `PackageManagerService`).
-- [ ] One emitted DEX subclass of `android.app.NativeActivity`: forwards
-  `onNewIntent` to native code (the base class drops it) and hosts a view whose
-  `InputConnection` carries soft-keyboard text to native code (the base view
-  has none). Owner decision: how that view attaches without `setContentView`
-  over the native content view.
+- [ ] One emitted DEX subclass of `android.app.NativeActivity`, needed before
+  the APK freezes. It loads `System.Security.Cryptography.Native.Android`
+  with `System.loadLibrary` before `super.onCreate`, so its `JNI_OnLoad` runs
+  with the app's class loader (required for any hashing or TLS; see
+  `AGENTS.md` open questions), and ships with the runtime pack's
+  `libSystem.Security.Cryptography.Native.Android.dex`. It forwards
+  `onNewIntent` (the base class drops it) and hosts a view whose
+  `InputConnection` carries soft-keyboard text (the base view has none),
+  attached with `addContentView`.
+- [ ] Private-storage assembly loader in the host, run before `Profile.ps1`:
+  content-addressed `store/<SHA256>.dll`, an `active.tsv` admission list,
+  `previous.tsv` rollback; IL-only, hash and identity checks; load from the
+  verified bytes; `Import-Module -Assembly`. Prototype passes install, update,
+  rollback, tamper and fallback cases on Windows in fresh `CreateDefault2`
+  runspaces. On the device it needs the crypto library initialized first.
 - [ ] Select a 32-bit window buffer format before drawing; `NativeActivity`
   defaults the window to RGB_565.
 - [ ] Service slots: one emitted DEX forwarder per Android base class that
