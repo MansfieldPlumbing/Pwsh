@@ -9,11 +9,12 @@ Keep this repository narrow and evidence-led.
   for Android reference build made in a temporary folder. The reference build
   is removed when `lib/classes.dex` is emitted.
 - `docs/` holds forward-looking design, clearly separated from proofs.
-- The only generated file in the repository is the signed APK beside
-  `setup.ps1` (ignored by git). Intermediates stay in memory unless
-  `-KeepIntermediates` writes them to `..\Build\Pwsh`. `setup.ps1` writes only
-  to locations in its confirmed write plan and fails if anything else in the
-  repository changes during a run.
+- Generated files live only in `build/` at the repository root, which git
+  ignores: the signed APK, and the intermediates when `-KeepIntermediates`
+  writes them; otherwise intermediates stay in memory. The signing key and the
+  package cache never go inside the repository. `setup.ps1` writes only to
+  locations in its confirmed write plan and fails if anything outside
+  `build/` changes in the repository during a run.
 
 ## Rules
 
@@ -72,7 +73,7 @@ only when that group's evidence exists. Name the source for every new fact.
   on ELF32 (`New-ElfPayloadLibrary`). The difference is deliberate: both sizes
   reproduce bytes proven on hardware. Do not make them agree as part of any
   other change.
-- The payload is the names in `lib/arm64-v8a.lean-assembly-order.txt`, pinned
+- The payload is the names in `lib/minimal-assembly-order.txt`, pinned
   by digest; its length (96) is the assembly count every step checks.
 - With `-Admission NativeActivity`, `libpwsh-host.so` (x86-64, arm64, and arm32 in
   Thumb-2)
@@ -89,7 +90,7 @@ only when that group's evidence exists. Name the source for every new fact.
   padding; the Xamarin store keeps the upstream layout byte for byte. Step 6
   reads the final store library as it is mapped and requires every image to
   start 16-byte aligned and every fat method header to fall 4-byte aligned
-  (131,709 fat headers in the lean payload).
+  (131,709 fat headers in the minimal payload).
 - The arm32 host is Thumb-2, as the NDK builds the pinned arm32 .NET for Android
   host (its exported functions carry the Thumb bit); `libpsl-native` stays A32.
   Pointer-sized fields take the target's size, and `internalDataPath`'s offset
@@ -137,7 +138,7 @@ only when that group's evidence exists. Name the source for every new fact.
 
 ### Proven on a device or the emulator
 
-- The x86_64 emulator (API 36) runs CanvasDemo in-process.
+- The x86_64 emulator (API 36) runs CellCanvas in-process.
 - The arm64 phone (Samsung Galaxy S23, API 36) and the arm32 device (API 34)
   start CoreCLR, load the store and reach the host, which stops at
   `START_MISSING` because no `Profile.ps1` is placed.
@@ -225,17 +226,25 @@ only when that group's evidence exists. Name the source for every new fact.
   assemblies. It does not produce native code.
 ## Rules for specific changes
 
-- `scripts/CanvasDemo.ps1` is frozen (SHA-256
+- `scripts/CellCanvas.ps1` is frozen (SHA-256
   `8E96992365A72E81B1A1EEB518AE9052020519EA175EC5465BAC4A989928F3B9`). Xamarin
   is removable implementation; the frozen script is evidence. Remove
   dependencies beneath it. Do not edit it, and do not replace it with a new
-  application API as part of removing Xamarin.
+  application API as part of removing Xamarin. It was renamed from
+  `CanvasDemo.ps1` without changing its bytes, so its own error text still
+  names the old file.
+- CellCanvas is the product's cell-grid surface, the primitive the ANSI
+  terminal is built on. It presents cells through Android `Canvas` per cell or
+  through one packed AGSL `RuntimeShader`. Its animated fill, 120 fps request
+  and `FPS`/`CELL`/`UP`/`SUBMIT`/`TOTAL`/dropped-frame log line are a stress
+  test and benchmark of those presenters, not a rendering design: they do not
+  establish that the terminal redraws every frame.
 - Leaving Xamarin proceeds by gates, each proved alone: 2a CoreCLR runs one
   managed log line from `ANativeActivity_onCreate`; 2b the owned host serves
   assemblies from the existing store; 2c a runspace opens with
   `UseCurrentThread` and `DefaultRunspace` stays set on the main thread; 2d
   `Profile.ps1` runs through the same path as today; 2e an owned compatibility
-  assembly satisfies the CanvasDemo contract; 2f the frozen bytes run with
+  assembly satisfies the CellCanvas contract; 2f the frozen bytes run with
   Mono.Android, Mono.Android.Runtime, Java.Interop, libmonodroid,
   libxamarin-app, Xamarin DEX and type maps absent.
 - Every gate runs on three backends: x86-64 on the emulator finds the next
@@ -252,7 +261,7 @@ only when that group's evidence exists. Name the source for every new fact.
   AST resolved against the pinned Mono.Android metadata and from a traced run
   on the Xamarin baseline. Do not build Java peer tracking, arbitrary Java
   subclassing, type maps or the Java.Interop object model.
-- In the Xamarin baseline, CanvasDemo runs on the Android main thread: the host
+- In the Xamarin baseline, CellCanvas runs on the Android main thread: the host
   runs `Profile.ps1` in a `UseCurrentThread` runspace there, and the script's
   delegates are invoked there. `activity->env` belongs to the main thread; any
   other thread attaches through `activity->vm`. Android's own `Canvas`, `Bitmap`, `Paint` and AGSL
@@ -265,7 +274,7 @@ only when that group's evidence exists. Name the source for every new fact.
   `[UnmanagedCallersOnly]` callbacks installed in the `NativeActivity`
   callback table and passed to `AChoreographer`, turns them into the
   Xamarin-shaped `Touch`, `KeyPress` and `PostOnAnimation`, and invokes the
-  frozen script's delegates where CanvasDemo expects them (in the baseline, on
+  frozen script's delegates where CellCanvas expects them (in the baseline, on
   the main thread). No hand-written native stub
   sits between the callback and managed code. Only the compatibility
   assembly uses `Android.*` and `Java.*` names.
@@ -278,12 +287,12 @@ only when that group's evidence exists. Name the source for every new fact.
 Verify each on hardware before relying on it.
 
 - The repository has no separate production `Profile.ps1` payload. The frozen
-  `scripts/CanvasDemo.ps1` is the real application workload that occupies that
+  `scripts/CellCanvas.ps1` is the real application workload that occupies that
   role. Its exact-byte execution through the gate 2d path is therefore proven at
   gate 2f, after gate 2e provides the required Android compatibility surface.
 - Not yet proven: Activity-dependent startup behavior; the compatibility
-  surface CanvasDemo requires; the recovery screen; the animation callback;
-  exact frozen CanvasDemo execution without Xamarin; the 40 store assemblies no
+  surface CellCanvas requires; the recovery screen; the animation callback;
+  exact frozen CellCanvas execution without Xamarin; the 40 store assemblies no
   proven path has requested, served in place.
 - To prove at gate 2c, then promote: QuickPS's function-table call performs
   JNI on Android, shown by `GetVersion`, `FindClass`, `GetMethodID` and one

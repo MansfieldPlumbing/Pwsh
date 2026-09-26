@@ -43,8 +43,8 @@ Nothing is written before the write plan is shown and confirmed
 
 | What | Default |
 | --- | --- |
-| Signed APK | `<repo>\dev.mansfieldplumbing.pwsh.apk` (named after the Android package; `*.apk` is git-ignored) |
-| Intermediates | nothing, unless `-KeepIntermediates`, then `..\Build\<repo>` |
+| Signed APK | `<repo>\build\dev.mansfieldplumbing.pwsh.apk` (named after the Android package; `build\` is git-ignored) |
+| Intermediates | nothing, unless `-KeepIntermediates`, then `<repo>\build\` |
 | Signing key | `%LOCALAPPDATA%\Pwsh\pwsh-signing.pfx`, reused so installed apps stay upgradable |
 | Package cache | only with `-Packages Folder` |
 
@@ -69,13 +69,15 @@ facade name as a path.
 Runtime packs: `Microsoft.NETCore.App.Runtime.android-<rid>` plus
 `Microsoft.Android.Runtime.CoreCLR.37.android-<rid>`.
 
-Versions are exact and pinned in `lib/manifest.json` under `packageVersions`
-(currently .NET `11.0.0-rc.1.26425.128`, Android `37.0.0-rc.1.2257`,
-PowerShell `7.7.0-preview.4`). There is no floating "newest" resolution.
-`-DotNet`, `-Android` and `-PowerShell` accept exact versions only.
+Packages are pinned in `lib/manifest.json` under `packages`: each entry is
+an exact id, version, RID (for RID-specific packages) and the SHA-512 of the
+`.nupkg`. Step 2 downloads exactly those from NuGet's flat container and
+stops on any hash or nuspec-identity mismatch; nothing is resolved at build
+time. `tools/Get-AssemblyClosure.ps1` resolves a new set and checks it against
+NuGet's catalog when the pins change. Currently .NET `11.0.0-rc.1.26425.128`,
+Android `37.0.0-rc.1.2257`, PowerShell `7.7.0-preview.4`.
 
-Status: `arm64` and `x64` build and run. `arm32` has ELF32 writers for the store,
-`libpsl-native` (A32 encoders) and `libxamarin-app`; it has not run on hardware yet.
+Status: gates 2a to 2d pass on all three targets (see `AGENTS.md`).
 
 Test devices: an x86_64 emulator (API 36), an arm64 phone (API 36) and an
 arm32 streaming device (API 34).
@@ -100,7 +102,7 @@ Facts that decide the design:
 
 ## 5. Payload
 
-`lib/arm64-v8a.lean-assembly-order.txt` is the ordered payload list: **96
+`lib/minimal-assembly-order.txt` is the ordered payload list: **96
 assemblies**, IL only, ReadyToRun images rejected by step 4. It shrinks to
 **93** when `Mono.Android.dll`, `Mono.Android.Runtime.dll` and
 `Java.Interop.dll` leave with the .NET for Android host. The list is
@@ -259,7 +261,7 @@ pwsh -NoProfile -File .\setup.ps1 -c -Step 11 -AcceptWritePlan
 
 # emulator
 C:\bin\android-sdk\emulator\emulator.exe -avd pwsh-api36
-adb install -r .\dev.mansfieldplumbing.pwsh.apk
+adb install -r .\build\dev.mansfieldplumbing.pwsh.apk
 adb shell monkey -p dev.mansfieldplumbing.pwsh -c android.intent.category.LAUNCHER 1
 adb logcat -d | Select-String ' Pwsh '
 ```

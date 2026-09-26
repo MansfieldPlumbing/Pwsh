@@ -7,7 +7,7 @@ capabilities observed in execution are candidates for replacement.
 
 This inventory was taken from what runs today, working inward: the host that
 `setup.ps1` emits (`New-AndroidHostTypes` and its phases), the six-opcode
-`OnCreate` shim, `Profile.ps1`, and CanvasDemo as a workload. CanvasDemo is
+`OnCreate` shim, `Profile.ps1`, and CellCanvas as a workload. CellCanvas is
 evidence of required capabilities, not an architecture to reproduce.
 
 Every **proposed replacement** below is a candidate. None has crossed the
@@ -41,7 +41,7 @@ PowerShell.
 | Process and runtime start | `MonoRuntimeProvider` → `libmonodroid` → `coreclr_initialize` | emitted host `.so` exporting `ANativeActivity_onCreate`, calling `coreclr_initialize` and `coreclr_create_delegate` | C API + runtime | REPLACE | main thread, once per process | gates 1 and 2 below |
 | Activity | Java peer `MainActivity` (`classes2.dex`), `n_onCreate` via RegisterNatives | `android.app.NativeActivity`, a framework class; no DEX | C API | REPLACE | NativeActivity callbacks on main | app launches with no DEX |
 | Managed entry | six-opcode `OnCreate` shim → `AdmitActivity(Activity)` | `[UnmanagedCallersOnly]` entry taking `ANativeActivity*`, reached by `coreclr_create_delegate` | runtime | REPLACE | main thread | host reaches the runspace |
-| Runspace and `Profile.ps1` | `CreateDefault2`, `UseCurrentThread`, `Open`, `ExternalScript` | the same SMA calls; gates 2c and 2d ran them on the Android main thread, where CanvasDemo runs in the baseline | PowerShell + C API | KEEP | main thread in the baseline | `Profile.ps1` runs on all three targets |
+| Runspace and `Profile.ps1` | `CreateDefault2`, `UseCurrentThread`, `Open`, `ExternalScript` | the same SMA calls; gates 2c and 2d ran them on the Android main thread, where CellCanvas runs in the baseline | PowerShell + C API | KEEP | main thread in the baseline | `Profile.ps1` runs on all three targets |
 | `JavaSystem.LoadLibrary("psl-native")` | required only because monodroid waits for a Java-side load | dropped; default `dlopen` probing | none | DELETE | none | SMA startup logging works without it |
 
 ## 2. Files and identity
@@ -52,19 +52,19 @@ PowerShell.
 | Package identity | `Context.PackageName` | build-time constant; `setup.ps1` emits the manifest | none | REPLACE | recovery text shows it |
 | Device facts | `Build.Manufacturer`, `Model`, `VERSION.Release`, `SdkInt`, `SupportedAbis` | `__system_property_get`, `ANativeActivity->sdkVersion` | C API | RECOVERY-ONLY | diagnostic text matches today's |
 | Native library directory | resolved by monodroid | candidate: `dladdr` on a host symbol. Unproven: with APK-backed loading the path may name the APK, not a directory of sibling libraries | C API | REPLACE | the path the host derives loads `libpsl-native` and the runtime libraries on all three targets |
-| Logging | `Android.Util.Log` (host and CanvasDemo) | `__android_log_write` through emitted `calli` stubs in `Pwsh.Native.dll` | C API | KEEP | log lines appear under the same tag |
+| Logging | `Android.Util.Log` (host and CellCanvas) | `__android_log_write` through emitted `calli` stubs in `Pwsh.Native.dll` | C API | KEEP | log lines appear under the same tag |
 
-## 3. Console surface (CanvasDemo as evidence)
+## 3. Console surface (CellCanvas as evidence)
 
-| Capability | CanvasDemo today | Proposed replacement | Mechanism | Class | Threading | Removal gate |
+| Capability | CellCanvas today | Proposed replacement | Mechanism | Class | Threading | Removal gate |
 | --- | --- | --- | --- | --- | --- | --- |
 | Window | `SurfaceView`, `SurfaceHolder`, `SetContentView`, `RunOnUiThread` | `ANativeWindow` from `onNativeWindowCreated` / `onNativeWindowDestroyed` | C API | REPLACE | callbacks on main; drawing on the console thread | console draws on all three targets |
-| Rendering | `LockHardwareCanvas`, AGSL `RuntimeShader`, `Bitmap`, `ByteBuffer` | Vulkan on the `ANativeWindow`; the packed-cell shader as SPIR-V compiled at build time | C API | REPLACE | console thread | grid output matches CanvasDemo |
+| Rendering | `LockHardwareCanvas`, AGSL `RuntimeShader`, `Bitmap`, `ByteBuffer` | Vulkan on the `ANativeWindow`; the packed-cell shader as SPIR-V compiled at build time | C API | REPLACE | console thread | grid output matches CellCanvas |
 | Glyph atlas | `Typeface` and `Paint` rasterize glyphs into a bitmap | `AFont` / `ASystemFontIterator` locate the font; rasterizing has no NDK C API | JNI at startup only, or an owned rasterizer | REPLACE | once before the first frame | atlas bytes match today's |
 | Frame pacing | `PostOnAnimation`, `Java.Lang.Runnable`, `RecoveryProgram` animation callback | `AChoreographer_postFrameCallback64` | C API | REPLACE | console thread's looper | stable frame loop |
 | Frame rate | `Surface.SetFrameRate`, `RequestedFrameRate` (API 35) | `ANativeWindow_setFrameRate` | C API | REPLACE | console thread | request accepted in the log |
 | Performance hint | `PerformanceHintManager.CreateHintSession` | `APerformanceHint_*` (API 33) | C API | REPLACE (optional) | console thread | hint session created |
-| Touch and keys | `SurfaceView` `Touch` and `KeyPress` events | `AInputQueue` from `onInputQueueCreated`, attached to the console looper; `AMotionEvent`, `AKeyEvent` | C API | REPLACE | console thread via looper fd | CanvasDemo's input modes work |
+| Touch and keys | `SurfaceView` `Touch` and `KeyPress` events | `AInputQueue` from `onInputQueueCreated`, attached to the console looper; `AMotionEvent`, `AKeyEvent` | C API | REPLACE | console thread via looper fd | CellCanvas's input modes work |
 | Resize and insets | `WindowInsets`, `DisplayCutout`, content bounds | `onContentRectChanged`, `onNativeWindowResized`; cutout detail has no C API | C API; JNI only if cutouts matter | REPLACE | main → looper | resize reports the correct grid |
 | Keep screen on | `KeepScreenOn` | `ANativeActivity_setWindowFlags(AWINDOW_FLAG_KEEP_SCREEN_ON)` | C API | REPLACE | main thread | screen stays on |
 | Thread id | `Process.MyTid` | `gettid` (already in `libpsl-native`) | C API | REPLACE | — | — |
@@ -141,7 +141,7 @@ The profile execution substrate passed on all three backends with controlled
 fixtures: the product's case-insensitive lookup, `$PSScriptRoot`, execution as
 an external script in the existing runspace, the `HadErrors` rule, state kept
 afterward, and the missing-profile case. The Activity-dependent parts wait for
-gate 2e. CanvasDemo is the workload in the `Profile.ps1` role; its exact bytes
+gate 2e. CellCanvas is the workload in the `Profile.ps1` role; its exact bytes
 run at gate 2f.
 
 ## Open questions

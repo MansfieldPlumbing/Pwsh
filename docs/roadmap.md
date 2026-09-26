@@ -44,7 +44,7 @@ Design constraints:
 2. **Generated bindings.** Emit `Pwsh.Native.dll` from pinned `jni.h`, NDK
    headers and `vk.xml`: explicit-layout structs and `calli` entry points.
 3. **Presentation.** Vulkan swapchain on the NativeActivity window, AHB-backed
-   shared buffers, the packed cell shader from CanvasDemo.
+   shared buffers, the packed cell shader from CellCanvas.
 4. **Service slots.** One emitted DEX forwarder template per Android base class
    (accessibility, input method, tile, voice interaction, …) and one native
    dispatcher that answers synchronously within Android's deadlines.

@@ -1,17 +1,122 @@
 {
   "schemaVersion": 1,
-  "description": "Root provenance manifest. setup.ps1 holds a single constant, the SHA-256 digest of this file, and derives every other address, digest, version, and ordered name from the sources listed here. Entries with a null url are authored in this repository; entries with a url are commit-pinned upstream sources whose published bytes must hash to the recorded digest.",
-  "packageVersions": {
-    "DotNet": "11.0.0-rc.1.26425.128",
-    "Android": "37.0.0-rc.1.2257",
-    "PowerShell": "7.7.0-preview.4"
-  },
+  "description": "Root provenance manifest. setup.ps1 holds a single constant, the SHA-256 digest of this file, and derives every other address, digest, version, and ordered name from the sources and packages listed here. Entries with a null url are authored in this repository; entries with a url are commit-pinned upstream sources whose published bytes must hash to the recorded digest. Packages are the exact NuGet packages the build downloads; each .nupkg must hash to its recorded SHA-512. Nothing is resolved at build time.",
+  "packages": [
+    {
+      "id": "Microsoft.NETCore.App.Runtime.android-arm64",
+      "version": "11.0.0-rc.1.26425.128",
+      "rid": "android-arm64",
+      "sha512": "6800BE43058D535A83BAFC3606D495F49FE7A1D68359B577D914BAF9AB5AB6840C833A78F605EBBEC2A60E1B4B918907BC9185C9BBFC00524EB188A7A4A2EF47"
+    },
+    {
+      "id": "Microsoft.NETCore.App.Runtime.android-x64",
+      "version": "11.0.0-rc.1.26425.128",
+      "rid": "android-x64",
+      "sha512": "718E601CC2918B290709A70FBB2465503DD37EB7502CBEB37BC8F201BA34BE55077C4C6AFE8676976849402611BFA4EE8F47517520AD53FAEA1972D59388B369"
+    },
+    {
+      "id": "Microsoft.NETCore.App.Runtime.android-arm",
+      "version": "11.0.0-rc.1.26425.128",
+      "rid": "android-arm",
+      "sha512": "D082333BBEC2332212815E4FF7DF741CF6E1F0DDD30BA98EDE51C8B3FA6854F70356F0116BF352D3C193792C93B825D50D70A495FFBB7B47FA7B479DF9F35A44"
+    },
+    {
+      "id": "Microsoft.Android.Runtime.CoreCLR.37.android-arm64",
+      "version": "37.0.0-rc.1.2257",
+      "rid": "android-arm64",
+      "sha512": "B32E0547D91D94361E712990B8818B0A16660F6DE3F9588668E2CDF1A06E46D94A1484FE547404C68EC111659F22FD4CC04E000666B0D37FEE27C75F54689684"
+    },
+    {
+      "id": "Microsoft.Android.Runtime.CoreCLR.37.android-x64",
+      "version": "37.0.0-rc.1.2257",
+      "rid": "android-x64",
+      "sha512": "A26954365A78FAC5CBAEC5CF487F4C0D944E13D0FDABA2CEA219EB9FC30594FD7FA0FB7D44B4530AD3EF3D92F75A6BEA57786A44804CEDE255FCEB658C645345"
+    },
+    {
+      "id": "Microsoft.Android.Runtime.CoreCLR.37.android-arm",
+      "version": "37.0.0-rc.1.2257",
+      "rid": "android-arm",
+      "sha512": "B5432BE2502C186B9D3F2F2EEF37F6619236C3F461001C65DF7E06A8E3EAF7BBFCAB2A27C7DE8EA0B19A67FF8A2B569BCE0E7F5D1AAF799AFBD403B9D2F304D3"
+    },
+    {
+      "id": "Microsoft.Android.Runtime.37.android",
+      "version": "37.0.0-rc.1.2257",
+      "rid": null,
+      "sha512": "176A55C2A40729903383BFE126DF7059A85942E3BC090AFC8C3701C175CC668B0145950DC06E8356EED98E623268F5B4AA5212D6DCB9A5F17A4AE9B569214EF9"
+    },
+    {
+      "id": "System.Management.Automation",
+      "version": "7.7.0-preview.4",
+      "rid": null,
+      "sha512": "BBBD4A020A0C803E50E5E46DC0340B09E83DEE71D8B8E5217472A4CF0D2040A7BF7CFB60F4B8220A3D8A0670941FBE1871E1A8F1C8B1F91C6BA6EEB61FB37E47"
+    },
+    {
+      "id": "Microsoft.PowerShell.SDK",
+      "version": "7.7.0-preview.4",
+      "rid": null,
+      "sha512": "20595AD56150AF1AFE15974D7A3126DA114AECFCFF0EADB40E6BF456B11EC95EE96C4561D900DB812BE07D482FBF594D965B0BF1D0BAB562898E092718507F85"
+    },
+    {
+      "id": "Microsoft.ApplicationInsights",
+      "version": "2.23.0",
+      "rid": null,
+      "sha512": "DD497BFAD0C65E54A4F78D2A1644F3D0854D4CD01DD83BA506F8D5D53635E28152C7C13210DD5DD3985780AAB146A7620DE3EBAEAD8EF12C6F87088676C2157F"
+    },
+    {
+      "id": "Microsoft.Management.Infrastructure",
+      "version": "3.0.0",
+      "rid": null,
+      "sha512": "95CFDFAB16F201BCA7EE0584199E18412094E7CB3EC7373DC2142CC1E76792DE5AB78F8F89253FD1A36DEDDE7B62C0BBA0C1376BDD14A5C591C143DB96F7CBB5"
+    },
+    {
+      "id": "Microsoft.Management.Infrastructure.Runtime.Unix",
+      "version": "3.0.0",
+      "rid": null,
+      "sha512": "D8AE69C763AA128703FF2A159FF804FAB46E22A4088759FC7017E1DEDA1227703CAA72003DD20D2528B97B84F975E655E68A7AFBE6100D9D63EE3490272580B7"
+    },
+    {
+      "id": "Newtonsoft.Json",
+      "version": "13.0.4",
+      "rid": null,
+      "sha512": "6D1FAFF84FF227A83B195DAE5F0D8EAD44A36187E32E438B0BC243E24092DB79AC2DAA672AD7493C1240EF97F01C7FBE12B21F7DE22ACD82132F102EAF82805C"
+    },
+    {
+      "id": "System.CodeDom",
+      "version": "11.0.0-rc.1.26425.128",
+      "rid": null,
+      "sha512": "52E003A0B165130FE5890B119CDFC2742820497FBB7FACBB2F9EC0F70EB8CEF45D8E94E647E1CEFD1BA234F56CF355CAB51D4CAF31FA284A27FF490E79425E06"
+    },
+    {
+      "id": "System.Configuration.ConfigurationManager",
+      "version": "11.0.0-preview.6.26359.118",
+      "rid": null,
+      "sha512": "1B2894859AF31E420CD3CE7766483BABB9E325BFA1B43A0F23D0B55593169F52AFEB9F0E72FD5AF6D0FE59CFBBF8659E8EFBF3CC0A8B5B70E97812BF1C87FED4"
+    },
+    {
+      "id": "System.Diagnostics.EventLog",
+      "version": "11.0.0-preview.6.26359.118",
+      "rid": null,
+      "sha512": "8E93105EA4390E45DDD054DA0F217EFC03C09BE483230530E726856D7E7F93DA41FF0551CD38030A5E44989EE8A6D21929CDF70B9140D48CCCBE509F0377B93F"
+    },
+    {
+      "id": "System.Security.Cryptography.Pkcs",
+      "version": "11.0.0-preview.6.26359.118",
+      "rid": null,
+      "sha512": "DE29562DF8D55CB15E4EC4020E055C6801A1E516ABFF80B023AE2131500F0CBE230B355E926AA0B6A7A12D5AC46A8DCB9544E865B95E5374EA436F115D93294F"
+    },
+    {
+      "id": "System.Security.Cryptography.ProtectedData",
+      "version": "11.0.0-preview.6.26359.118",
+      "rid": null,
+      "sha512": "9D7DC659D43B84FBA3F6B2D7E1610A585FA0AC8CD0D37F509373A6A43F7D76D57DF08365426CB308F992C1B1639D13B9E6526C082C821320D5CFD9FF3BDF9DF3"
+    }
+  ],
   "sources": [
     {
-      "path": "arm64-v8a.lean-assembly-order.txt",
+      "path": "minimal-assembly-order.txt",
       "sha256": "75C97740B3A93C04636CB109D1C2990D0C123D290C9246BC43FF5F37EEF377CB",
       "url": null,
-      "role": "Ordered 96-name lean assembly payload. Architecture-neutral IL, used for every target."
+      "role": "Ordered 96-name minimal assembly payload. Architecture-neutral IL, used for every target."
     },
     {
       "path": "ic_launcher.png",

@@ -9,14 +9,6 @@ param(
     [ValidatePattern('^\d{1,2}(-\d{1,2})?(,\d{1,2}(-\d{1,2})?)*$')]
     [string] $Step = '1',
 
-    # Exact NuGet versions. Empty means the version pinned in lib/manifest.json.
-    [ValidatePattern('^$|^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$')]
-    [string] $DotNet = '',
-    [ValidatePattern('^$|^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$')]
-    [string] $Android = '',
-    [ValidatePattern('^$|^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$')]
-    [string] $PowerShell = '',
-
     # Download location. Folder: -CacheDirectory (the user temp folder unless
     # set), reused next run. Memory: never written to disk.
     [ValidateSet('Folder', 'Memory')]
@@ -121,9 +113,6 @@ for ($i = 0; $i -lt $LongArguments.Count; $i++) {
         'deletepackages'                        { $DeletePackages = $true }
         'whatif'                                { $WhatIfPreference = $true }
         'step'                                  { $Step = & $value }
-        'dotnet'                                { $DotNet = & $value }
-        'android'                               { $Android = & $value }
-        'powershell'                            { $PowerShell = & $value }
         'packages'                              { $Packages = (Get-Culture).TextInfo.ToTitleCase((& $value).ToLowerInvariant()) }
         'debug'                                 { $Debug = $true }
         'payload'                               { $Payload = & $value }
@@ -210,13 +199,12 @@ OPTIONS
   WRITE PLAN
   Before anything is written, the script lists every location it will write
   to and asks for confirmation. Locations left empty are filled with
-  suggestions and shown, not used silently: the signed APK next to this
-  script, intermediates (only with -KeepIntermediates) in ..\Build\<repo>,
-  side by side with the repository (created if missing; it ignores itself
-  for git), the
-  signing key and cache in per-user data (LocalApplicationData\Pwsh on
-  Windows, the XDG directories elsewhere). No location may be
-  inside this repository except the signed APK. Unattended runs stop unless every location is
+  suggestions and shown, not used silently: the signed APK and the
+  intermediates (only with -KeepIntermediates) in build\ under this
+  repository, which git ignores; the signing key and cache in per-user data
+  (LocalApplicationData\Pwsh on Windows, the XDG directories elsewhere).
+  Nothing else inside this repository is written, and the signing key and
+  cache never are. Unattended runs stop unless every location is
   given or -AcceptWritePlan is set. -WhatIf prints the plan and writes
   nothing.
   -Architecture <arm64|x64|arm32>
@@ -237,7 +225,7 @@ OPTIONS
                             SDK with the Android workload; built in a temp
                             folder that is deleted afterwards).
   -Payload <Minimal|Standard|SDK>
-                            Minimal: lean assembly set, IL only, no
+                            Minimal: the pinned assembly set, IL only, no
                             ReadyToRun (R2R) code. Standard: every runtime
                             assembly, R2R code included. SDK: Standard plus
                             the PowerShell SDK assemblies. Standard and SDK
@@ -246,11 +234,6 @@ OPTIONS
                             written to disk. Folder: -CacheDirectory,
                             reused next run.
                             In the interface, Enter opens Browse.
-  -DotNet <version>         .NET runtime pack for Android.
-  -Android <version>        .NET for Android CoreCLR host and bindings.
-  -PowerShell <version>     System.Management.Automation and PowerShell SDK.
-                            Exact versions only. Omitted, each uses the
-                            version pinned in lib/manifest.json.
   -DeletePackages           Delete the downloaded package cache on exit.
                             Without it packages are kept. The interface asks
                             on exit.
@@ -262,7 +245,6 @@ EXAMPLES
   .\setup.ps1 -c -Step 1
   .\setup.ps1 -c -Step 11
   .\setup.ps1 -c -Step 1-5
-  .\setup.ps1 -c -Step 11 -PowerShell 7.7.0-preview.3
   .\setup.ps1 -c -Step 11 -DeletePackages
   .\setup.ps1 -Interactive
 
@@ -314,7 +296,7 @@ $script:StepGraph = @{
     2  = @{
         Key = 'Acquire'; DependsOn = @(1)
         Title = 'Acquire and hash the pinned NuGet packages'
-        Caption = 'Downloads the versions pinned in lib/manifest.json and checks catalog SHA-512.'
+        Caption = 'Downloads the packages pinned in lib/manifest.json and checks each SHA-512.'
         Action = { Invoke-AcquisitionStep }
     }
     3  = @{
@@ -429,39 +411,9 @@ function Invoke-StepNode {
     }
 }
 
-$script:FeedManifest = @(
-    [ordered]@{
-        Name         = 'NuGet.org'
-        ServiceIndex = 'https://api.nuget.org/v3/index.json'
-    }
-)
-
-# No versions and no hashes are written here. Step 2 resolves them:
-#   Channel     packages that ship together. A channel uses the exact version
-#               pinned in lib/manifest.json, or the exact version given with
-#               -DotNet, -Android, or -PowerShell.
-#   Dependency  the version the channel packages' nuspecs ask for, which is
-#               the rule NuGet itself applies.
-# Each download is checked against the SHA-512 the feed's catalog publishes.
-$script:PackageManifest = @(
-    [ordered]@{ Id = "Microsoft.NETCore.App.Runtime.$($script:Target.Rid)"; Feed = 'NuGet.org'; Channel = 'DotNet' }
-    # The CoreCLR host for Android. Ships libnet-android.release.so, which the
-    # APK carries as the runtime's native entry point.
-    [ordered]@{ Id = "Microsoft.Android.Runtime.CoreCLR.37.$($script:Target.Rid)"; Feed = 'NuGet.org'; Channel = 'Android' }
-    [ordered]@{ Id = 'Microsoft.Android.Runtime.37.android'; Feed = 'NuGet.org'; Channel = 'Android' }
-    [ordered]@{ Id = 'System.Management.Automation'; Feed = 'NuGet.org'; Channel = 'PowerShell' }
-    [ordered]@{ Id = 'Microsoft.PowerShell.SDK'; Feed = 'NuGet.org'; Channel = 'PowerShell' }
-    [ordered]@{ Id = 'Microsoft.ApplicationInsights'; Feed = 'NuGet.org'; Channel = 'Dependency' }
-    [ordered]@{ Id = 'Microsoft.Management.Infrastructure'; Feed = 'NuGet.org'; Channel = 'Dependency' }
-    [ordered]@{ Id = 'Microsoft.Management.Infrastructure.Runtime.Unix'; Feed = 'NuGet.org'; Channel = 'Dependency' }
-    [ordered]@{ Id = 'Newtonsoft.Json'; Feed = 'NuGet.org'; Channel = 'Dependency' }
-    [ordered]@{ Id = 'System.CodeDom'; Feed = 'NuGet.org'; Channel = 'Dependency' }
-    [ordered]@{ Id = 'System.Configuration.ConfigurationManager'; Feed = 'NuGet.org'; Channel = 'Dependency' }
-    [ordered]@{ Id = 'System.Diagnostics.EventLog'; Feed = 'NuGet.org'; Channel = 'Dependency' }
-    [ordered]@{ Id = 'System.Security.Cryptography.Pkcs'; Feed = 'NuGet.org'; Channel = 'Dependency' }
-    [ordered]@{ Id = 'System.Security.Cryptography.ProtectedData'; Feed = 'NuGet.org'; Channel = 'Dependency' }
-)
-$script:Channels = 'DotNet', 'Android', 'PowerShell'
+# Packages are not declared here. lib/manifest.json pins each one by id,
+# version, RID and SHA-512; step 2 downloads exactly those (Get-PackagePins).
+$script:PackageManifest = @()
 
 $script:LibDirectory = Join-Path $PSScriptRoot 'lib'
 
@@ -474,10 +426,11 @@ $script:LibDirectory = Join-Path $PSScriptRoot 'lib'
 # ==============================================================================
 
 $script:RepositoryRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
+# The one place inside the repository this script writes. .gitignore excludes it.
+$script:BuildDirectory = Join-Path $script:RepositoryRoot 'build'
 $script:ApprovedWriteRoots = [System.Collections.Generic.List[string]]::new()
 $script:WrittenFiles = [System.Collections.Generic.List[object]]::new()
 $script:LibRestoreDirectory = $null
-$script:BuildRoot = $null
 
 function Get-SuggestedUserDirectory {
     # Per-user, non-roaming, not synced, not temp. XDG on Linux, the Library
@@ -516,14 +469,11 @@ function Resolve-WritePlan {
         ($Packages -eq 'Memory' -or -not [string]::IsNullOrWhiteSpace($CacheDirectory))
 
     $script:ApkFileName = "$script:PackageName.apk"
-    $script:ApkPath = if ([string]::IsNullOrWhiteSpace($ApkPath)) { Join-Path $script:RepositoryRoot $script:ApkFileName }
+    $script:ApkPath = if ([string]::IsNullOrWhiteSpace($ApkPath)) { Join-Path $script:BuildDirectory $script:ApkFileName }
                       else { [System.IO.Path]::GetFullPath($ApkPath) }
 
     if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
-        # <parent>\Build\<repo>, side by side with the repository. The Build
-        # folder is created if it does not exist and ignores itself for git.
-        $script:BuildRoot = Join-Path (Split-Path -Parent $script:RepositoryRoot) 'Build'
-        $script:OutputDirectory = Join-Path $script:BuildRoot (Split-Path -Leaf $script:RepositoryRoot)
+        $script:OutputDirectory = $script:BuildDirectory
     }
     if ([string]::IsNullOrWhiteSpace($SigningKeyPath)) {
         # Earlier builds kept the key directly under the data directory. Reuse
@@ -549,12 +499,16 @@ function Resolve-WritePlan {
     if ($Packages -eq 'Folder') { $plan['lib sources'] = Join-Path $script:CacheDirectory 'lib' }
     if ($Debug) { $plan['Reference'] = (Join-Path ([System.IO.Path]::GetTempPath()) 'pwsh-reference-*') + ' (deleted after the check)' }
 
-    if ((Test-PathInside -Path $script:ApkPath -Root $script:RepositoryRoot) -and
-        -not (Test-PathInside -Path $script:ApkPath -Root (Join-Path $script:RepositoryRoot $script:ApkFileName))) {
-        throw "The APK may only be placed in the repository as '$(Join-Path $script:RepositoryRoot $script:ApkFileName)'."
-    }
     foreach ($entry in @(
-            @{ Name = 'Build output'; Path = $script:OutputDirectory },
+            @{ Name = 'APK'; Path = $script:ApkPath },
+            @{ Name = 'Build output'; Path = $script:OutputDirectory })) {
+        if ((Test-PathInside -Path $entry.Path -Root $script:RepositoryRoot) -and
+            -not (Test-PathInside -Path $entry.Path -Root $script:BuildDirectory)) {
+            throw "$($entry.Name) location '$($entry.Path)' is inside the repository but outside '$script:BuildDirectory'."
+        }
+    }
+    # Secrets and downloads never go inside the repository, build folder included.
+    foreach ($entry in @(
             @{ Name = 'Signing key'; Path = $script:SigningKeyPath },
             @{ Name = 'Package cache'; Path = $script:CacheDirectory })) {
         if (Test-PathInside -Path $entry.Path -Root $script:RepositoryRoot) {
@@ -572,7 +526,10 @@ function Show-WritePlan {
     param([Parameter(Mandatory)] $Plan)
     Write-Host 'Write plan. This run writes only to these locations:'
     foreach ($key in $Plan.Keys) { Write-Host ('  {0,-14} {1}' -f $key, $Plan[$key]) }
-    $repositoryNote = if (Test-PathInside -Path $script:ApkPath -Root $script:RepositoryRoot) { "only $script:ApkFileName is written" } else { 'never written' }
+    $repositoryNote = if ((Test-PathInside -Path $script:ApkPath -Root $script:BuildDirectory) -or
+        ($KeepIntermediates -and (Test-PathInside -Path $script:OutputDirectory -Root $script:BuildDirectory))) {
+        "written only under $script:BuildDirectory, which git ignores"
+    } else { 'never written' }
     Write-Host ('  {0,-14} {1}' -f 'Repository', "$script:RepositoryRoot ($repositoryNote)")
 }
 
@@ -580,31 +537,19 @@ function Enable-WritePlan {
     $script:ApprovedWriteRoots.Clear()
     if ($KeepIntermediates) { $script:ApprovedWriteRoots.Add($script:OutputDirectory) }
     $script:ApprovedWriteRoots.Add([System.IO.Path]::GetDirectoryName($script:SigningKeyPath))
-    if (-not (Test-PathInside -Path $script:ApkPath -Root $script:RepositoryRoot)) {
-        $script:ApprovedWriteRoots.Add([System.IO.Path]::GetDirectoryName($script:ApkPath))
-    }
+    $script:ApprovedWriteRoots.Add([System.IO.Path]::GetDirectoryName($script:ApkPath))
     if ($Packages -eq 'Folder') {
         $script:ApprovedWriteRoots.Add($script:CacheDirectory)
         $script:LibRestoreDirectory = Join-Path $script:CacheDirectory 'lib'
-    }
-
-    # The shared Build folder ignores itself, so no repository that ever
-    # contains it can pick up build output.
-    if ($KeepIntermediates -and $script:BuildRoot -and -not $WhatIfPreference) {
-        $ignore = Join-Path $script:BuildRoot '.gitignore'
-        if (-not (Test-Path -LiteralPath $ignore -PathType Leaf)) {
-            $script:ApprovedWriteRoots.Add($script:BuildRoot)
-            Write-BuildFile -Path $ignore -Bytes ([System.Text.Encoding]::ASCII.GetBytes("# Build output. Never tracked.`n*`n"))
-        }
     }
 }
 
 function Assert-ApprovedWritePath {
     param([Parameter(Mandatory)][string] $Path)
-    if (Test-PathInside -Path $Path -Root $script:RepositoryRoot) {
-        # The single exception: the signed APK beside setup.ps1.
-        if (Test-PathInside -Path $Path -Root $script:ApkPath) { return }
-        throw "Refusing to write '$Path': it is inside the repository."
+    # Inside the repository, only the build folder; it must also be in the plan.
+    if ((Test-PathInside -Path $Path -Root $script:RepositoryRoot) -and
+        -not (Test-PathInside -Path $Path -Root $script:BuildDirectory)) {
+        throw "Refusing to write '$Path': it is inside the repository, outside '$script:BuildDirectory'."
     }
     foreach ($root in $script:ApprovedWriteRoots) {
         if (Test-PathInside -Path $Path -Root $root) { return }
@@ -640,12 +585,16 @@ function New-ApprovedDirectory {
 }
 
 function Get-RepositorySnapshot {
-    # Path, length and last write time of every file in the repository.
+    # Path, length and last write time of every file in the repository except
+    # .git and the build folder, which is never enumerated.
     $snapshot = @{}
-    foreach ($file in Get-ChildItem -LiteralPath $script:RepositoryRoot -Recurse -File -Force -ErrorAction SilentlyContinue) {
-        if ($file.FullName -like "*$([System.IO.Path]::DirectorySeparatorChar).git$([System.IO.Path]::DirectorySeparatorChar)*") { continue }
-        if ($script:ApkPath -and (Test-PathInside -Path $file.FullName -Root $script:ApkPath)) { continue }
-        $snapshot[$file.FullName] = '{0}|{1}' -f $file.Length, $file.LastWriteTimeUtc.Ticks
+    $top = Get-ChildItem -LiteralPath $script:RepositoryRoot -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne '.git' -and -not (Test-PathInside -Path $_.FullName -Root $script:BuildDirectory) }
+    foreach ($item in $top) {
+        $files = if ($item.PSIsContainer) { Get-ChildItem -LiteralPath $item.FullName -Recurse -File -Force -ErrorAction SilentlyContinue } else { $item }
+        foreach ($file in $files) {
+            $snapshot[$file.FullName] = '{0}|{1}' -f $file.Length, $file.LastWriteTimeUtc.Ticks
+        }
     }
     $snapshot
 }
@@ -793,7 +742,7 @@ $script:KeepPackageCache = -not $DeletePackages -and $Packages -eq 'Folder'
 # any of them fails verification before a single byte is parsed.
 $script:RepositoryLibBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/df99fa0859e0ef9e94cb68ec1a704afb15304048/lib/'
 $script:LibRootManifestPath = 'manifest.json'
-$script:LibRootManifestSha256 = 'C2B3C6D044EACBACAD7E7B1C58F18EA8AE6FB836B421B5EC3788D009E57CEDC4'
+$script:LibRootManifestSha256 = 'A2F56D639B685C2C4C6755016CD14F6094D50D3A3F49B6479E48B6B349B556A4'
 $script:LibSourceManifest = $null
 
 function Get-LibFileBytes {
@@ -865,7 +814,7 @@ function Get-UpstreamSourceBytes {
     # over the decoded file bytes.
     param([Parameter(Mandatory)][string] $Url, [string] $Transport = '')
 
-    $response = Invoke-WebRequest -Uri $Url -UseBasicParsing
+    $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -SkipHttpErrorCheck
     if ([int]$response.StatusCode -ne 200) {
         throw "Upstream source '$Url' returned HTTP $([int]$response.StatusCode)."
     }
@@ -909,26 +858,50 @@ function Get-LibSourceManifest {
         throw 'The root provenance manifest lists a source more than once.'
     }
 
-    # Exact package versions per channel. No floating resolution.
-    $versions = $manifest.packageVersions
-    if ($null -eq $versions) { throw 'The root provenance manifest declares no packageVersions.' }
-    $script:PinnedVersions = @{}
-    foreach ($channel in 'DotNet', 'Android', 'PowerShell') {
-        $value = [string]$versions.$channel
-        if ($value -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$') {
-            throw "packageVersions.$channel is not an exact version: '$value'."
+    # The exact NuGet packages the build downloads. Nothing is resolved at build
+    # time: tools/Get-AssemblyClosure.ps1 resolves and checks them against
+    # NuGet's catalog when the pins change, and each .nupkg must hash to its pin.
+    $pins = @($manifest.packages)
+    if ($pins.Count -eq 0) { throw 'The root provenance manifest declares no packages.' }
+    foreach ($pin in $pins) {
+        if ([string]$pin.id -notmatch '^[A-Za-z0-9_.-]+$') { throw "Package pin has a malformed id: '$($pin.id)'." }
+        if ([string]$pin.version -notmatch '^\d+(\.\d+){2,3}(-[0-9A-Za-z.]+)?$') {
+            throw "Package pin '$($pin.id)' is not an exact version: '$($pin.version)'."
         }
-        $script:PinnedVersions[$channel] = $value
+        if ([string]$pin.sha512 -notmatch '^[0-9A-F]{128}$') { throw "Package pin '$($pin.id)' has a malformed SHA-512." }
+        if ($null -ne $pin.rid -and [string]$pin.rid -notin @($script:Targets.Values | ForEach-Object { $_.Rid })) {
+            throw "Package pin '$($pin.id)' names unknown RID '$($pin.rid)'."
+        }
     }
+    if (@($pins | Group-Object -Property id, rid | Where-Object Count -ne 1).Count -ne 0) {
+        throw 'The root provenance manifest pins a package more than once for one RID.'
+    }
+    $script:PackagePins = @($pins | ForEach-Object {
+        [pscustomobject]@{ Id = [string]$_.id; Version = [string]$_.version; Rid = $_.rid; Sha512 = [string]$_.sha512 } })
 
     $script:LibSourceManifest = $sources
     return $script:LibSourceManifest
 }
 
-function Get-PinnedVersion {
-    param([Parameter(Mandatory)][ValidateSet('DotNet', 'Android', 'PowerShell')][string] $Channel)
+function Get-PackagePins {
+    # This target's packages: every pin without a RID and the pins for its RID,
+    # in manifest order.
     [void](Get-LibSourceManifest)
-    $script:PinnedVersions[$Channel]
+    @($script:PackagePins | Where-Object { $null -eq $_.Rid -or [string]$_.Rid -ceq $script:Target.Rid })
+}
+
+function Get-PinnedVersion {
+    # The version shown for .NET, Android and PowerShell: that of the package
+    # which defines each for the build.
+    param([Parameter(Mandatory)][ValidateSet('DotNet', 'Android', 'PowerShell')][string] $Channel)
+    $id = switch ($Channel) {
+        'DotNet'     { "Microsoft.NETCore.App.Runtime.$($script:Target.Rid)" }
+        'Android'    { 'Microsoft.Android.Runtime.37.android' }
+        'PowerShell' { 'System.Management.Automation' }
+    }
+    $pin = @(Get-PackagePins | Where-Object Id -ceq $id)
+    if ($pin.Count -ne 1) { throw "No single package pin for '$id'." }
+    $pin[0].Version
 }
 
 function Get-LibSourcePin {
@@ -953,14 +926,14 @@ function Import-LibSourceText {
     return [System.Text.Encoding]::UTF8.GetString((Import-LibSourceBytes -Path $Path))
 }
 
-function Get-LeanAssemblyManifest {
-    $text = Import-LibSourceText -Path 'arm64-v8a.lean-assembly-order.txt'
+function Get-MinimalAssemblyManifest {
+    $text = Import-LibSourceText -Path 'minimal-assembly-order.txt'
     $names = [System.Collections.Generic.List[string]]::new()
     foreach ($line in ($text -split "`r?`n")) {
         $trimmed = $line.Trim()
         if ($trimmed.Length -eq 0 -or $trimmed.StartsWith('#')) { continue }
         if (-not $trimmed.EndsWith('.dll', [StringComparison]::Ordinal)) {
-            throw "The lean assembly order contains a non-assembly entry: '$trimmed'."
+            throw "The minimal assembly order contains a non-assembly entry: '$trimmed'."
         }
         $names.Add($trimmed)
     }
@@ -968,10 +941,10 @@ function Get-LeanAssemblyManifest {
     # The list is pinned by digest in lib/manifest.json, so its length is the
     # authoritative assembly count; every later check compares against it.
     if ($names.Count -eq 0) {
-        throw 'The lean assembly order is empty.'
+        throw 'The minimal assembly order is empty.'
     }
     if (@($names | Group-Object | Where-Object Count -ne 1).Count -ne 0) {
-        throw 'The lean assembly order contains duplicate entries.'
+        throw 'The minimal assembly order contains duplicate entries.'
     }
     return $names.ToArray()
 }
@@ -1013,7 +986,7 @@ function Invoke-VerifyStep {
 
     Test-JavaPeerNaming
     $attributeCount = Test-AndroidAttributeIds
-    $names = Get-LeanAssemblyManifest
+    $names = Get-MinimalAssemblyManifest
     $contract = Get-AndroidNativeContract
     Write-Host ('[PASS] Step 1 complete: {0} lib specifications verified locally, {1} byte-identical to their pinned upstream addresses, {2} ordered assembly names, {4} framework attribute ids checked against upstream, and XABA magic 0x{3} imported.' -f
         $localCount,
@@ -1024,9 +997,7 @@ function Invoke-VerifyStep {
 }
 
 $script:BuildContext = [ordered]@{
-    Feeds            = @{}
     PackageBytes     = @{}
-    PackageContracts = @{}
     PayloadInventory = $null
     PayloadCandidates = $null
     SelectedAssemblies = $null
@@ -1075,133 +1046,43 @@ function Get-Sha256Hex {
     }
 }
 
-function Get-NuGetFeedContract {
-    param([Parameter(Mandatory)][System.Collections.IDictionary] $Feed)
-
-    $response = Invoke-WebRequest -Uri $Feed.ServiceIndex -UseBasicParsing
-    if ([int]$response.StatusCode -ne 200) {
-        throw "Feed '$($Feed.Name)' returned HTTP $([int]$response.StatusCode)."
-    }
-
-    $index = $response.Content | ConvertFrom-Json -Depth 16
-    $packageBaseResources = @(
-        $index.resources | Where-Object {
-            $types = @($_.'@type')
-            $types -contains 'PackageBaseAddress/3.0.0'
-        }
-    )
-
-    if ($packageBaseResources.Count -ne 1) {
-        throw "Feed '$($Feed.Name)' exposed $($packageBaseResources.Count) PackageBaseAddress/3.0.0 resources; exactly one is required."
-    }
-
-    $packageBaseAddress = [string]$packageBaseResources[0].'@id'
-    $registration = @($index.resources | Where-Object { @($_.'@type') -contains 'RegistrationsBaseUrl/3.6.0' })
-    if ($registration.Count -ne 1) {
-        throw "Feed '$($Feed.Name)' exposed $($registration.Count) RegistrationsBaseUrl/3.6.0 resources; exactly one is required."
-    }
-    if (-not $packageBaseAddress.StartsWith('https://', [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Feed '$($Feed.Name)' returned a non-HTTPS package base address."
-    }
-
-    [pscustomobject]@{
-        Name               = [string]$Feed.Name
-        ServiceIndex       = [string]$Feed.ServiceIndex
-        PackageBaseAddress = $packageBaseAddress.TrimEnd('/') + '/'
-        RegistrationBaseAddress = ([string]$registration[0].'@id').TrimEnd('/') + '/'
-    }
-}
+# The NuGet v3 package content resource (flat container): one GET per pinned
+# package, https://learn.microsoft.com/nuget/api/package-base-address-resource
+$script:PackageBaseAddress = 'https://api.nuget.org/v3-flatcontainer/'
 
 function Get-PackageAddress {
-    param(
-        [Parameter(Mandatory)][pscustomobject] $Feed,
-        [Parameter(Mandatory)][System.Collections.IDictionary] $Package
-    )
-
-    $id = ([string]$Package.Id).ToLowerInvariant()
-    $version = ([string]$Package.Version).ToLowerInvariant()
-    $escapedId = [Uri]::EscapeDataString($id)
-    $escapedVersion = [Uri]::EscapeDataString($version)
-    return '{0}{1}/{2}/{1}.{2}.nupkg' -f $Feed.PackageBaseAddress, $escapedId, $escapedVersion
+    param([Parameter(Mandatory)] $Package)
+    $id = [Uri]::EscapeDataString(([string]$Package.Id).ToLowerInvariant())
+    $version = [Uri]::EscapeDataString(([string]$Package.Version).ToLowerInvariant())
+    '{0}{1}/{2}/{1}.{2}.nupkg' -f $script:PackageBaseAddress, $id, $version
 }
 
-function Read-NuspecContract {
+function Assert-PackageIdentity {
+    # A package whose bytes matched its pin must also name the pinned id and
+    # version in its own nuspec. Returns the archive's entry count.
     param(
         [Parameter(Mandatory)][byte[]] $PackageBytes,
-        [Parameter(Mandatory)][System.Collections.IDictionary] $Package
+        [Parameter(Mandatory)] $Package
     )
-
     $packageStream = [System.IO.MemoryStream]::new($PackageBytes, $false)
-    $archive = [System.IO.Compression.ZipArchive]::new(
-        $packageStream,
-        [System.IO.Compression.ZipArchiveMode]::Read,
-        $false
-    )
-
+    $archive = [System.IO.Compression.ZipArchive]::new($packageStream, [System.IO.Compression.ZipArchiveMode]::Read, $false)
     try {
-        $nuspecEntries = @($archive.Entries | Where-Object FullName -like '*.nuspec')
+        $nuspecEntries = @($archive.Entries | Where-Object { $_.FullName -notmatch '/' -and $_.Name -like '*.nuspec' })
         if ($nuspecEntries.Count -ne 1) {
-            throw "Package '$($Package.Id)' contains $($nuspecEntries.Count) nuspec files; exactly one is required."
+            throw "Package '$($Package.Id)' contains $($nuspecEntries.Count) root nuspec files; exactly one is required."
         }
-
+        # XmlDocument reads the encoding declaration and byte-order mark itself.
+        $document = [xml]::new()
         $entryStream = $nuspecEntries[0].Open()
-        $reader = [System.IO.StreamReader]::new($entryStream, [Text.Encoding]::UTF8, $true)
-        try {
-            [xml]$document = $reader.ReadToEnd()
-        }
-        finally {
-            $reader.Dispose()
-            $entryStream.Dispose()
-        }
-
+        try { $document.Load($entryStream) } finally { $entryStream.Dispose() }
         $metadata = $document.package.metadata
         if ([string]$metadata.id -cne [string]$Package.Id) {
-            throw "Package identity mismatch. Expected '$($Package.Id)', received '$($metadata.id)'."
+            throw "Package identity mismatch. Pinned '$($Package.Id)', the nuspec names '$($metadata.id)'."
         }
-        if ((ConvertTo-NormalizedVersion ([string]$metadata.version)) -ine (ConvertTo-NormalizedVersion ([string]$Package.Version))) {
-            throw "Package version mismatch for '$($Package.Id)'. Expected '$($Package.Version)', received '$($metadata.version)'."
+        if ([string]$metadata.version -ine [string]$Package.Version) {
+            throw "Package version mismatch for '$($Package.Id)'. Pinned '$($Package.Version)', the nuspec names '$($metadata.version)'."
         }
-
-        $dependencies = [System.Collections.Generic.List[object]]::new()
-        $dependenciesProperty = $metadata.PSObject.Properties['dependencies']
-        if ($null -ne $dependenciesProperty -and $null -ne $dependenciesProperty.Value) {
-            $dependencyRoot = $dependenciesProperty.Value
-            $directDependencyProperty = $dependencyRoot.PSObject.Properties['dependency']
-            if ($null -ne $directDependencyProperty) {
-                foreach ($dependency in @($directDependencyProperty.Value)) {
-                    if ($null -eq $dependency) { continue }
-                    $dependencies.Add([pscustomobject]@{
-                        Framework = $null
-                        Id        = [string]$dependency.id
-                        Range     = [string]$dependency.version
-                    })
-                }
-            }
-
-            $groupProperty = $dependencyRoot.PSObject.Properties['group']
-            if ($null -ne $groupProperty) {
-                foreach ($group in @($groupProperty.Value)) {
-                    if ($null -eq $group) { continue }
-                    $groupDependencyProperty = $group.PSObject.Properties['dependency']
-                    if ($null -eq $groupDependencyProperty) { continue }
-                    foreach ($dependency in @($groupDependencyProperty.Value)) {
-                        if ($null -eq $dependency) { continue }
-                        $dependencies.Add([pscustomobject]@{
-                            Framework = [string]$group.targetFramework
-                            Id        = [string]$dependency.id
-                            Range     = [string]$dependency.version
-                        })
-                    }
-                }
-            }
-        }
-
-        [pscustomobject]@{
-            Id           = [string]$metadata.id
-            Version      = [string]$metadata.version
-            EntryCount   = $archive.Entries.Count
-            Dependencies = $dependencies.ToArray()
-        }
+        $archive.Entries.Count
     }
     finally {
         $archive.Dispose()
@@ -1212,7 +1093,12 @@ function Read-NuspecContract {
 $script:OfflineMessage = 'Pwsh Setup requires an internet connection.'
 
 function Test-NetworkFailure {
+    # True only when no server answered. An HTTP status is an answer: the
+    # connection works, and the error names the server's refusal instead.
     param([Parameter(Mandatory)][Exception] $Exception)
+    for ($e = $Exception; $e; $e = $e.InnerException) {
+        if ($e -is [System.Net.Http.HttpRequestException] -and $null -ne $e.StatusCode) { return $false }
+    }
     for ($e = $Exception; $e; $e = $e.InnerException) {
         if ($e -is [System.Net.Http.HttpRequestException] -or $e -is [System.Net.Sockets.SocketException] -or
             $e -is [System.Net.WebException] -or $e -is [System.Threading.Tasks.TaskCanceledException]) { return $true }
@@ -1230,94 +1116,6 @@ function Remove-DownloadedPackages {
     }
 }
 
-function Get-FeedVersions {
-    param([Parameter(Mandatory)][string] $PackageBaseAddress, [Parameter(Mandatory)][string] $Id)
-    # The flat container lists versions in SemVer order, oldest first.
-    $index = Invoke-RestMethod -Uri ('{0}{1}/index.json' -f $PackageBaseAddress, $Id.ToLowerInvariant())
-    return @($index.versions)
-}
-
-function Get-ChannelVersions {
-    <#
-        For each channel, the versions published for every one of its packages,
-        newest first. Needs only the flat container, so the interface can list
-        them before anything is downloaded.
-    #>
-    param(
-        [Parameter(Mandatory)][string] $PackageBaseAddress,
-        [Parameter(Mandatory)][object[]] $Manifest,
-        [Parameter(Mandatory)][string[]] $Channels
-    )
-
-    $result = [ordered]@{}
-    foreach ($channel in $Channels) {
-        $common = $null
-        foreach ($package in @($Manifest | Where-Object { $_.Channel -eq $channel })) {
-            $versions = Get-FeedVersions -PackageBaseAddress $PackageBaseAddress -Id $package.Id
-            $common = if ($null -eq $common) { $versions } else { @($common | Where-Object { $versions -contains $_ }) }
-        }
-        if (-not $common) { throw "No version of channel '$channel' is published for all of its packages." }
-        [array]::Reverse($common)
-        $result[$channel] = @($common)
-    }
-
-    # Keep only what can run together on Android. The Android packages carry
-    # their API level in the id, and each API level ships with one .NET major
-    # (35 = .NET 9, 36 = .NET 10, 37 = .NET 11). Each PowerShell 7.x release is
-    # built on one .NET major (7.5 = 9, 7.6 = 10, 7.7 = 11).
-    $android = @($Manifest | Where-Object { $_.Channel -eq 'Android' })[0]
-    if ($android.Id -notmatch '\.(\d+)\.android') { throw "Cannot read the API level from '$($android.Id)'." }
-    $dotnetMajor = [int]$Matches[1] - 26
-    $result['DotNet'] = @($result['DotNet'] | Where-Object { $_ -like "$dotnetMajor.*" })
-    $result['PowerShell'] = @($result['PowerShell'] | Where-Object { $_ -like "7.$($dotnetMajor - 4).*" })
-    foreach ($channel in $Channels) {
-        if ($result[$channel].Count -eq 0) { throw "No $channel version on the feed fits Android API $($dotnetMajor + 26) (.NET $dotnetMajor)." }
-    }
-    return $result
-}
-
-function Get-DependencyFloor {
-    # NuGet ranges: '1.2', '[1.2, )', '[1.2]', '(1.2, 2.0]'. The resolved
-    # version is the lower bound.
-    param([Parameter(Mandatory)][string] $Range)
-    $lower = ($Range.Trim().TrimStart('[', '(') -split ',')[0].Trim().TrimEnd(']', ')')
-    if (-not $lower) { throw "Dependency range '$Range' has no lower bound." }
-    return ConvertTo-NormalizedVersion $lower
-}
-
-function ConvertTo-NormalizedVersion {
-    # NuGet's normalized form, which the feed's addresses use: at least three
-    # numeric parts, a fourth only when it is not zero, metadata dropped.
-    param([Parameter(Mandatory)][string] $Version)
-    $core, $label = ($Version -split '\+')[0] -split '-', 2
-    $parts = [System.Collections.Generic.List[string]]@(($core -split '\.') | ForEach-Object { [string][long]$_ })
-    while ($parts.Count -lt 3) { $parts.Add('0') }
-    if ($parts.Count -eq 4 -and $parts[3] -eq '0') { $parts.RemoveAt(3) }
-    return ($parts -join '.') + $(if ($label) { "-$label" } else { '' })
-}
-
-function Get-VersionSortKey {
-    # Numeric parts compare as numbers; a release sorts after its prereleases.
-    param([Parameter(Mandatory)][string] $Version)
-    $core, $label = $Version -split '-', 2
-    $numbers = @(($core -split '\.') + @('0', '0', '0', '0') | Select-Object -First 4 | ForEach-Object { '{0:D10}' -f [long]$_ })
-    return ($numbers -join '.') + $(if ($label) { "-$label" } else { '~' })
-}
-
-function Get-CatalogSha512 {
-    param(
-        [Parameter(Mandatory)][string] $RegistrationBaseAddress,
-        [Parameter(Mandatory)][string] $Id,
-        [Parameter(Mandatory)][string] $Version
-    )
-    $leaf = Invoke-RestMethod -Uri ('{0}{1}/{2}.json' -f $RegistrationBaseAddress, $Id.ToLowerInvariant(), $Version.ToLowerInvariant())
-    $entry = Invoke-RestMethod -Uri ([string]$leaf.catalogEntry)
-    if ([string]$entry.packageHashAlgorithm -cne 'SHA512') {
-        throw "Catalog for '$Id $Version' publishes a $($entry.packageHashAlgorithm) hash; SHA512 is required."
-    }
-    return [Convert]::ToHexString([Convert]::FromBase64String([string]$entry.packageHash))
-}
-
 function Get-FileSha512 {
     param([Parameter(Mandatory)][string] $Path)
     $stream = [System.IO.File]::OpenRead($Path)
@@ -1327,25 +1125,21 @@ function Get-FileSha512 {
 
 function Get-VerifiedPackageBytes {
     <#
-        Returns one resolved package's bytes, checked against the catalog's
-        SHA-512. Folder downloads into $CacheDirectory unless a matching
-        copy is there; Memory never writes. Returns $null under -WhatIf.
+        Returns one pinned package's bytes, after they hash to its pinned
+        SHA-512. Folder keeps a verified copy in $CacheDirectory and reuses it;
+        Memory never writes. Returns $null under -WhatIf.
     #>
-    param(
-        [Parameter(Mandatory)][pscustomobject] $Feed,
-        [Parameter(Mandatory)][System.Collections.IDictionary] $Package
-    )
+    param([Parameter(Mandatory)] $Package)
 
     $fileName = '{0}.{1}.nupkg' -f $Package.Id, $Package.Version
-    $Package.Sha512 = Get-CatalogSha512 -RegistrationBaseAddress $Feed.RegistrationBaseAddress -Id $Package.Id -Version $Package.Version
-    $address = Get-PackageAddress -Feed $Feed -Package $Package
+    $address = Get-PackageAddress -Package $Package
 
     if ($Packages -eq 'Memory') {
         if (-not $PSCmdlet.ShouldProcess($address, 'Download into memory and verify')) { return $null }
         $bytes = [byte[]](Invoke-WebRequest -Uri $address -UseBasicParsing).Content
         $actual = [Convert]::ToHexString([System.Security.Cryptography.SHA512]::HashData($bytes))
         if ($actual -cne $Package.Sha512) {
-            throw "SHA-512 mismatch for '$fileName'. The catalog publishes $($Package.Sha512); the download hashes to $actual."
+            throw "SHA-512 mismatch for '$fileName'. The pin is $($Package.Sha512); the download hashes to $actual."
         }
         return , $bytes
     }
@@ -1362,7 +1156,7 @@ function Get-VerifiedPackageBytes {
         Invoke-WebRequest -Uri $address -OutFile $downloadPath -UseBasicParsing
         $actual = Get-FileSha512 -Path $downloadPath
         if ($actual -cne $Package.Sha512) {
-            throw "SHA-512 mismatch for '$fileName'. The catalog publishes $($Package.Sha512); the download hashes to $actual."
+            throw "SHA-512 mismatch for '$fileName'. The pin is $($Package.Sha512); the download hashes to $actual."
         }
         Move-Item -LiteralPath $downloadPath -Destination $destination -Force
     }
@@ -1381,86 +1175,24 @@ function Invoke-AcquisitionStep {
         }
     }
 
-    $feeds = @{}
-    foreach ($feedDefinition in $script:FeedManifest) {
-        $feed = Get-NuGetFeedContract -Feed $feedDefinition
-        $feeds[$feed.Name] = $feed
-        Write-Host ('[PASS] Feed API: {0} -> {1}' -f $feed.Name, $feed.PackageBaseAddress) -ForegroundColor Green
+    $script:PackageManifest = @(Get-PackagePins)
+    $runtimeId = "Microsoft.NETCore.App.Runtime.$($script:Target.Rid)"
+    if (@($script:PackageManifest | Where-Object Id -ceq $runtimeId).Count -ne 1) {
+        throw "lib/manifest.json pins no single runtime pack '$runtimeId'."
     }
-    $script:BuildContext.Feeds = $feeds
 
+    $loaded = 0
     foreach ($package in $script:PackageManifest) {
-        if (-not $feeds.ContainsKey([string]$package.Feed)) {
-            throw "Package '$($package.Id)' refers to unknown feed '$($package.Feed)'."
-        }
-    }
-
-    # Channels first: the version requested, otherwise the one pinned in lib/manifest.json.
-    $requested = @{ DotNet = $DotNet; Android = $Android; PowerShell = $PowerShell }
-    $channelFeed = $feeds[[string]$script:PackageManifest[0].Feed]
-    $available = Get-ChannelVersions -PackageBaseAddress $channelFeed.PackageBaseAddress -Manifest $script:PackageManifest -Channels $script:Channels
-    foreach ($channel in $script:Channels) {
-        $version = if ($requested[$channel]) { $requested[$channel] } else { Get-PinnedVersion -Channel $channel }
-        if ($available[$channel] -notcontains $version) {
-            throw "$channel $version is not published for every package in the channel."
-        }
-        foreach ($package in @($script:PackageManifest | Where-Object { $_.Channel -eq $channel })) { $package.Version = $version }
-        Write-Host ('[PASS] {0} {1}' -f $channel, $version) -ForegroundColor Green
-    }
-
-    $contracts = [System.Collections.Generic.List[object]]::new()
-    $load = {
-        param($package)
-        $bytes = Get-VerifiedPackageBytes -Feed $feeds[[string]$package.Feed] -Package $package
+        $bytes = Get-VerifiedPackageBytes -Package $package
         if ($null -eq $bytes) {
             Write-Host ('[PLAN] Package not loaded during WhatIf: {0} {1}' -f $package.Id, $package.Version) -ForegroundColor Yellow
-            return
+            continue
         }
-        $contract = Read-NuspecContract -PackageBytes $bytes -Package $package
+        $entryCount = Assert-PackageIdentity -PackageBytes $bytes -Package $package
         $script:BuildContext.PackageBytes[[string]$package.Id] = $bytes
-        $script:BuildContext.PackageContracts[[string]$package.Id] = $contract
-        $contracts.Add($contract)
-        Write-Host ('[PASS] Package: {0} {1} | {2} bytes | {3} entries | SHA-512 matches catalog' -f
-            $contract.Id, $contract.Version, $bytes.Length, $contract.EntryCount) -ForegroundColor Green
-    }
-
-    foreach ($package in @($script:PackageManifest | Where-Object { $_.Channel -ne 'Dependency' })) { . $load $package }
-
-    # Dependencies: the highest floor any loaded package declares. Repeated
-    # until nothing changes, so a dependency of a dependency counts, and a
-    # higher floor found later replaces a version chosen earlier.
-    $dependencies = @($script:PackageManifest | Where-Object { $_.Channel -eq 'Dependency' })
-    do {
-        $progress = $false
-        foreach ($package in $dependencies) {
-            $floors = @(foreach ($contract in $contracts) {
-                foreach ($dependency in $contract.Dependencies) {
-                    if ($dependency.Id -ieq $package.Id -and $dependency.Range) { Get-DependencyFloor -Range $dependency.Range }
-                }
-            })
-            if ($floors.Count -eq 0) { continue }
-            $wanted = @($floors | Sort-Object { Get-VersionSortKey $_ })[-1]
-            if ($package.Contains('Version') -and $package.Version -eq $wanted) { continue }
-            if ($package.Contains('Version')) {
-                Write-Host ('[PASS] {0} raised to {1}; a later dependency asks for it.' -f $package.Id, $wanted) -ForegroundColor Green
-                $stale = @($contracts | Where-Object { $_.Id -ieq $package.Id })
-                foreach ($old in $stale) { [void]$contracts.Remove($old) }
-            }
-            $package.Version = $wanted
-            . $load $package
-            $progress = $true
-        }
-    } while ($progress)
-
-    # System.* packages ship with the runtime; one nothing asks for follows it.
-    foreach ($package in @($dependencies | Where-Object { -not $_.Contains('Version') })) {
-        if ($package.Id -notlike 'System.*') {
-            if ($WhatIfPreference) { continue }
-            throw "No loaded package declares a dependency on '$($package.Id)'."
-        }
-        $package.Version = $script:PackageManifest[0].Version
-        Write-Host ('[PASS] {0} follows .NET {1}; no package names a version.' -f $package.Id, $package.Version) -ForegroundColor Green
-        . $load $package
+        $loaded++
+        Write-Host ('[PASS] Package: {0} {1} | {2} bytes | {3} entries | SHA-512 matches pin' -f
+            $package.Id, $package.Version, $bytes.Length, $entryCount) -ForegroundColor Green
     }
 
     # The record of what this build used.
@@ -1472,11 +1204,11 @@ function Invoke-AcquisitionStep {
         Write-BuildFile -Intermediate -Path $recordPath -Bytes ([System.Text.UTF8Encoding]::new($false).GetBytes($json + [Environment]::NewLine))
     }
 
-    Write-Host ('[PASS] Step 2 complete: {0} packages, each matching its catalog SHA-512. .NET {1} | Android {2} | PowerShell {3}' -f
-        $contracts.Count,
-        $script:PackageManifest[0].Version,
-        $script:PackageManifest[1].Version,
-        $script:PackageManifest[3].Version) -ForegroundColor Green
+    Write-Host ('[PASS] Step 2 complete: {0} packages, each matching its pinned SHA-512. .NET {1} | Android {2} | PowerShell {3}' -f
+        $loaded,
+        (Get-PinnedVersion -Channel DotNet),
+        (Get-PinnedVersion -Channel Android),
+        (Get-PinnedVersion -Channel PowerShell)) -ForegroundColor Green
 }
 
 function Test-ReadyToRunImage {
@@ -3626,6 +3358,9 @@ function New-PwshActivityAssemblyBytes {
             $mark = { param([string] $Text) & $log $infoPriority (New-ClrConstant $Text ([string])) }
 
             $rs = [Management.Automation.Runspaces.RunspaceFactory]
+            # Borrowed for this NativeActivity invocation; never publish one
+            # process-global current Activity. native_activity.h owns its lifetime.
+            $nativeActivity = [Linq.Expressions.Expression]::Parameter([IntPtr], 'nativeActivity')
             $runspaceType = [Management.Automation.Runspaces.Runspace]
             $issVar = [Linq.Expressions.Expression]::Variable([Management.Automation.Runspaces.InitialSessionState], 'iss')
             $runspaceVar = [Linq.Expressions.Expression]::Variable($runspaceType, 'runspace')
@@ -3692,6 +3427,10 @@ function New-PwshActivityAssemblyBytes {
                         (& $log $infoPriority (New-StaticCall $concat @((New-ClrConstant 'GATE2D profile state 0x' ([string])), (& $hexText $stateValue)))))),
                     (& $mark 'GATE2D START_MISSING')))
             $try = New-ClrBlock @() @(
+                [Linq.Expressions.Expression]::IfThen(
+                    [Linq.Expressions.Expression]::Equal($nativeActivity, (New-ClrConstant ([IntPtr]::Zero) ([IntPtr]))),
+                    [Linq.Expressions.Expression]::Throw((New-ClrNew ([ArgumentNullException].GetConstructor([type[]]@([string]))) @(
+                        (New-ClrConstant 'nativeActivity' ([string])))))),
                 (New-StaticCall ([Management.Automation.PowerShellAssemblyLoadContextInitializer].GetMethod(
                     'SetPowerShellAssemblyLoadContext', [Reflection.BindingFlags]'Public,Static', $null, [type[]]@([string]), $null)) @(
                     (New-ClrProperty $null (Get-ExactProperty ([AppContext]) 'BaseDirectory')))),
@@ -3708,6 +3447,11 @@ function New-PwshActivityAssemblyBytes {
                 (New-ClrCall $runspaceVar (Get-ExactMethod $runspaceType 'Open' @())),
                 (New-ClrAssign (New-ClrProperty $null (Get-ExactProperty $runspaceType 'DefaultRunspace')) $runspaceVar),
                 (& $mark 'GATE2C DefaultRunspace set'),
+                # Gate 2e admission prerequisite. The facade may read env/vm/
+                # clazz from this borrowed pointer on the owning main thread.
+                # Revocation at onDestroy belongs to the lifecycle gate.
+                (New-ClrCall $sessionState (Get-ExactMethod ([Management.Automation.Runspaces.SessionStateProxy]) 'SetVariable' @([string], [object])) @(
+                    (New-ClrConstant 'NativeActivityHandle' ([string])), [Linq.Expressions.Expression]::Convert($nativeActivity, [object]))),
                 (New-ClrAssign $shellVar (New-StaticCall (Get-ExactMethod ([powershell]) 'Create' @($runspaceType)) @($runspaceVar))),
                 (New-ClrCall $shellVar (Get-ExactMethod ([powershell]) 'AddScript' @([string])) @((New-ClrConstant '0x50575348' ([string])))),
                 (New-ClrAssign $resultVar $firstValue),
@@ -3718,8 +3462,8 @@ function New-PwshActivityAssemblyBytes {
                 $resultVar)
             # Run holds every SMA reference. Admit references none, so a load or
             # JIT failure of Run surfaces as an exception inside Admit's try.
-            $run = Add-PersistedMethod $nativeHostType 'Run' ([Reflection.MethodAttributes]'Private,Static,HideBySig') ([int]) @() `
-                ([Func[int]]) @() (New-ClrBlock @($issVar, $runspaceVar, $shellVar, $resultVar, $filesVar, $profileVar, $profileShell, $stateShell, $startCommand) @($try))
+            $run = Add-PersistedMethod $nativeHostType 'Run' ([Reflection.MethodAttributes]'Private,Static,HideBySig') ([int]) @([IntPtr]) `
+                ([Func[IntPtr,int]]) @($nativeActivity) (New-ClrBlock @($issVar, $runspaceVar, $shellVar, $resultVar, $filesVar, $profileVar, $profileShell, $stateShell, $startCommand) @($try))
             # RunPowerShell returns the HResult of any exception, and the native
             # host logs it. The handler first logs the exception's type and
             # message (not ToString, which pulls in stack-trace machinery), inside
@@ -3734,8 +3478,8 @@ function New-PwshActivityAssemblyBytes {
                     (New-ClrBlock @() @((& $log $errorPriority $describe), [Linq.Expressions.Expression]::Empty())),
                     [Linq.Expressions.Expression]::Catch([Exception], [Linq.Expressions.Expression]::Empty())),
                 (New-ClrProperty $errorVar (Get-ExactProperty ([Exception]) 'HResult')))))
-            [void](Add-PersistedMethod $nativeHostType 'RunPowerShell' ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([int]) @() `
-                ([Func[int]]) @() ([Linq.Expressions.Expression]::TryCatch((New-StaticCall $run), $catch)))
+            [void](Add-PersistedMethod $nativeHostType 'RunPowerShell' ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([int]) @([IntPtr]) `
+                ([Func[IntPtr,int]]) @($nativeActivity) ([Linq.Expressions.Expression]::TryCatch((New-StaticCall $run @($nativeActivity)), $catch)))
             # Gate 2a, kept as an in-process invariant: the host calls it first
             # and requires 'PWSH' (0x50575348) before it calls RunPowerShell.
             [void](Add-PersistedMethod $nativeHostType 'Admit' ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([int]) @() `
@@ -3787,7 +3531,7 @@ function Invoke-SelectionStep {
     if ($Payload -ne 'Minimal') {
         throw "Payload '$Payload' is not built yet. Only Minimal is."
     }
-    $manifest = Get-LeanAssemblyManifest
+    $manifest = Get-MinimalAssemblyManifest
     Add-GeneratedAssemblyCandidates
 
     $selected = [ordered]@{}
@@ -3817,7 +3561,7 @@ function Invoke-SelectionStep {
             ($missing -join ', '))
     }
     if ($selected.Count -ne $manifest.Count) {
-        throw "Lean assembly selection produced $($selected.Count) entries; the pinned list names $($manifest.Count)."
+        throw "Minimal assembly selection produced $($selected.Count) entries; the pinned list names $($manifest.Count)."
     }
 
     $script:BuildContext.SelectedAssemblies = $selected
@@ -3917,7 +3661,7 @@ function New-AssemblyStoreBytes {
     $indexSize = $indexEntryCount * $indexEntrySize
     $dataStart = $headerSize + $indexSize + ($entryCount * $descriptorSize) + $namesSize
 
-    # Descriptors, in the same order as the lean assembly manifest. The index is
+    # Descriptors, in the same order as the minimal assembly manifest. The index is
     # built alongside them and sorted by name hash afterwards, exactly as the
     # runtime's binary search over the index requires.
     $descriptors = [System.Collections.Generic.List[object]]::new()
@@ -6911,12 +6655,13 @@ function New-NativeHostLibrary {
         @{ Op = 'lea-data'; Rd = 5; Data = 'runPowerShell' },
         @{ Op = 'call-import'; Import = 'coreclr_create_delegate'; Args = 6 },
         @{ Op = 'cbnz'; Rt = 0; Is64 = $false; Label = 'runDelegateFailed' },
-        # __android_log_print(INFO, "Pwsh", "GATE2B begin"); RunPowerShell(); log its result
+        # Log the gate boundary, then RunPowerShell(activity); log its result.
         @{ Op = 'movz'; Rd = 0; Imm = $info; Is64 = $false },
         @{ Op = 'lea-data'; Rd = 1; Data = 'tag' },
         @{ Op = 'lea-data'; Rd = 2; Data = 'fmtBegin' },
         @{ Op = 'call-import'; Import = '__android_log_print'; Args = 3; Variadic = $true },
-        @{ Op = 'call-data'; Data = 'runPowerShell'; Args = 0 },
+        @{ Op = 'mov'; Rd = 0; Rm = 19; Is64 = $true }, # borrowed ANativeActivity*
+        @{ Op = 'call-data'; Data = 'runPowerShell'; Args = 1 },
         @{ Op = 'mov'; Rd = 3; Rm = 0; Is64 = $false },
         @{ Op = 'movz'; Rd = 0; Imm = $info; Is64 = $false },
         @{ Op = 'lea-data'; Rd = 1; Data = 'tag' },
@@ -7045,7 +6790,8 @@ function New-NativeHostLibrary {
         @{ Op = 'cmp'; Rn = 0; Rm = 1 },
         @{ Op = 'bne'; Label = 'admitWrong' }
     ) + (& $logInfo 'fmtAdmit' $true) + (& $createDelegate 'runMethodName' 'runPowerShell' 'runDelegateFailed') + (& $logInfo 'fmtBegin' $false) + @(
-        @{ Op = 'call-data'; Data = 'runPowerShell'; Args = 0 }
+        @{ Op = 'mov'; Rd = 0; Rm = 4 }, # borrowed ANativeActivity*
+        @{ Op = 'call-data'; Data = 'runPowerShell'; Args = 1 }
     ) + (& $logInfo 'fmtRun' $true) + @(
         @{ Op = 'b'; Label = 'done' }
     ) + (& $logFailure 'directoryFailed' 'fmtDirectory2') + (& $logFailure 'contractFailed' 'fmtContract') + (& $logFailure 'initFailed' 'fmtInit') + (& $logFailure 'delegateFailed' 'fmtDelegate') +
@@ -7172,13 +6918,14 @@ function New-NativeHostLibrary {
         @{ Op = 'call-import'; Import = 'coreclr_create_delegate'; Args = 6 },
         @{ Op = 'test32'; Reg = 0 },
         @{ Op = 'jnz'; Label = 'runDelegateFailed' },
-        # __android_log_write(INFO, "Pwsh", "GATE2B begin"); RunPowerShell(); log its result
+        # Log the gate boundary, then RunPowerShell(activity); log its result.
         @{ Op = 'movimm32'; Dst = 7; Imm = $info },
         @{ Op = 'lea-data'; Dst = 6; Data = 'tag' },
         @{ Op = 'lea-data'; Dst = 2; Data = 'fmtBegin' },
         @{ Op = 'xor32'; Dst = 0 },
         @{ Op = 'call-import'; Import = '__android_log_print'; Args = 3; Variadic = $true },
-        @{ Op = 'call-data'; Data = 'runPowerShell'; Args = 0 },
+        @{ Op = 'mov64'; Dst = 7; Src = 3 }, # borrowed ANativeActivity*
+        @{ Op = 'call-data'; Data = 'runPowerShell'; Args = 1 },
         @{ Op = 'mov32'; Dst = 1; Src = 0 },
         @{ Op = 'movimm32'; Dst = 7; Imm = $info },
         @{ Op = 'lea-data'; Dst = 6; Data = 'tag' },
@@ -8880,22 +8627,18 @@ function New-XamarinAppLibrary {
         'Microsoft.Android.Runtime.RuntimeFeature.TrimmableTypeMap'    = 'false'
     }
 
-    # From 37.0.0-rc.1 the host also fills RUNTIME_IDENTIFIER and
+    # The pinned host (37.0.0-rc.1 and later) also fills RUNTIME_IDENTIFIER and
     # APP_CONTEXT_BASE_DIRECTORY, by position, right after the contract
     # (dotnet/android host.cc, ApplicationConfigNativeAssemblyGeneratorCLR.cs).
-    # An older host leaves those slots null, so they exist only for a new one.
-    $hostVersion = [string]@($script:PackageManifest | Where-Object { $_.Channel -eq 'Android' })[0].Version
-    if ((Get-VersionSortKey $hostVersion) -ge (Get-VersionSortKey '37.0.0-rc.1')) {
-        $hostFilled = [ordered]@{
-            'HOST_RUNTIME_CONTRACT'      = $null
-            'RUNTIME_IDENTIFIER'         = $null
-            'APP_CONTEXT_BASE_DIRECTORY' = $null
-        }
-        foreach ($key in $runtimeProperties.Keys) {
-            if (-not $hostFilled.Contains($key)) { $hostFilled[$key] = $runtimeProperties[$key] }
-        }
-        $runtimeProperties = $hostFilled
+    $hostFilled = [ordered]@{
+        'HOST_RUNTIME_CONTRACT'      = $null
+        'RUNTIME_IDENTIFIER'         = $null
+        'APP_CONTEXT_BASE_DIRECTORY' = $null
     }
+    foreach ($key in $runtimeProperties.Keys) {
+        if (-not $hostFilled.Contains($key)) { $hostFilled[$key] = $runtimeProperties[$key] }
+    }
+    $runtimeProperties = $hostFilled
 
     # Pointer width from the target's ELF class. Only pointer-typed fields
     # change size; the fixed-width fields (uint32_t, uint64_t) do not.
@@ -10234,9 +9977,8 @@ function Show-Popup {
 }
 
 function Show-DebugPopup {
-    $versions = if ($script:ChannelVersions -is [System.Collections.IDictionary]) {
-        ($script:Channels | ForEach-Object { '{0}={1} of {2}' -f $_, $script:ChosenVersions[$_], @($script:ChannelVersions[$_]).Count }) -join '  '
-    } else { "list: $(if ($null -eq $script:ChannelVersions) { 'loading' } else { $script:ChannelVersions })" }
+    $versions = 'pinned  .NET {0}  Android {1}  PowerShell {2}' -f
+        (Get-PinnedVersion -Channel DotNet), (Get-PinnedVersion -Channel Android), (Get-PinnedVersion -Channel PowerShell)
     $window = try { '{0}x{1}' -f [Console]::WindowWidth, [Console]::WindowHeight } catch { 'none' }
     $last = @($script:BuildLog | Select-Object -Last 3 | ForEach-Object { if ($_.Length -gt 60) { $_.Substring(0, 60) } else { $_ } })
     Show-Popup -Title 'Debug' -Lines (@(
@@ -10248,7 +9990,7 @@ function Show-DebugPopup {
         $versions
         "node $($script:ActiveNodeId)  failed $($script:FailedNodeId)  done $($script:CompletedNodes.Count)  ended $($script:BuildEnded)"
         "queue $($script:EventQueue.Count)  log $($script:BuildLog.Count) lines"
-        "worker $(if ($script:WorkerPowerShell) { $script:WorkerPowerShell.InvocationStateInfo.State } else { 'none' })  resolver $(if ($script:ResolverPowerShell) { $script:ResolverPowerShell.InvocationStateInfo.State } else { 'none' })"
+        "worker $(if ($script:WorkerPowerShell) { $script:WorkerPowerShell.InvocationStateInfo.State } else { 'none' })"
         ''
     ) + $last)
 }
@@ -10259,20 +10001,12 @@ function Show-OfflinePopup {
     Show-Popup -Title 'No internet connection' -Lines @($script:OfflineMessage, 'Connect, then select Build again.')
 }
 $script:LogSaved      = $false
-$script:ChannelVersions = $null
-$script:ChosenVersions  = @{
-    DotNet     = $(if ($DotNet) { $DotNet } else { Get-PinnedVersion -Channel DotNet })
-    Android    = $(if ($Android) { $Android } else { Get-PinnedVersion -Channel Android })
-    PowerShell = $(if ($PowerShell) { $PowerShell } else { Get-PinnedVersion -Channel PowerShell })
-}
-$script:ResolverRunspace = $null
-$script:ResolverPowerShell = $null
 
 function Get-VersionDisplay {
+    # Versions are pinned in lib/manifest.json; the interface shows them and
+    # offers no other.
     param([Parameter(Mandatory)][string] $Channel)
-    $chosen = $script:ChosenVersions[$Channel]
-    if ($chosen -ceq (Get-PinnedVersion -Channel $Channel)) { return "$chosen (pinned)" }
-    return $chosen
+    "$(Get-PinnedVersion -Channel $Channel) (pinned)"
 }
 
 function Get-NavigationItems {
@@ -10293,9 +10027,9 @@ function Get-NavigationItems {
                'SDK'      { 'Standard + PowerShell SDK (not built yet)' }
            } }
         @{ Id = 'Step'; Kind = 'Option'; Label = 'Step'; Value = "$Step  $($stepNode.Key)"; Caption = $stepNode.Title }
-        @{ Id = 'DotNet'; Kind = 'Option'; Label = '.NET'; Value = (Get-VersionDisplay DotNet); Caption = '' }
-        @{ Id = 'Android'; Kind = 'Option'; Label = 'Android'; Value = (Get-VersionDisplay Android); Caption = '' }
-        @{ Id = 'PowerShell'; Kind = 'Option'; Label = 'PowerShell'; Value = (Get-VersionDisplay PowerShell); Caption = '' }
+        @{ Id = 'DotNet'; Kind = 'Option'; Label = '.NET'; Value = (Get-VersionDisplay DotNet); Caption = 'lib/manifest.json' }
+        @{ Id = 'Android'; Kind = 'Option'; Label = 'Android'; Value = (Get-VersionDisplay Android); Caption = 'lib/manifest.json' }
+        @{ Id = 'PowerShell'; Kind = 'Option'; Label = 'PowerShell'; Value = (Get-VersionDisplay PowerShell); Caption = 'lib/manifest.json' }
         @{ Id = 'Packages'; Kind = 'Option'; Label = 'Download to'
            Value = if ($Packages -eq 'Memory') { 'Memory' } else { "$CacheDirectory  [Browse...]" }
            Caption = '' }
@@ -10328,14 +10062,7 @@ function Set-OptionValue {
             $script:Packages = if ($Packages -eq 'Folder') { 'Memory' } else { 'Folder' }
             $script:KeepPackageCache = $script:Packages -eq 'Folder'
         }
-        { $_ -in 'DotNet', 'Android', 'PowerShell' } {
-            # Right steps to older published versions, left toward newer ones.
-            if ($script:ChannelVersions -isnot [System.Collections.IDictionary]) { return }
-            $list = @($script:ChannelVersions[$Id])
-            $at = [Math]::Max(0, [Array]::IndexOf($list, $script:ChosenVersions[$Id]))
-            $at = [Math]::Min($list.Count - 1, [Math]::Max(0, $at + $Direction))
-            $script:ChosenVersions[$Id] = $list[$at]
-        }
+        # .NET, Android and PowerShell are pinned; they do not step.
     }
 }
 # The canvas is the VGA text grid: 80x30 cells, 640x480 at an 8x16 glyph. The
@@ -10541,9 +10268,6 @@ function Get-CanvasCells {
             '  -Payload <name>             Minimal, Standard, or SDK'
             '  -Architecture <abi>         arm64-v8a'
             '  -Packages <mode>            Folder or Memory'
-            '  -DotNet <version>           .NET runtime (default pinned)'
-            '  -Android <version>          Android host (default pinned)'
-            '  -PowerShell <version>       SMA and SDK (default pinned)'
             '  -OutputDirectory <path>     Build output'
             '  -DeletePackages             Delete packages on exit'
             '  -WhatIf                     Preview only'
@@ -10647,7 +10371,7 @@ function Start-PipelineWorker {
     $script:WorkerPowerShell = [PowerShell]::Create()
     $script:WorkerPowerShell.Runspace = $script:WorkerRunspace
     [void]$script:WorkerPowerShell.AddScript({
-        param($EventQueue, $ScriptPath, $TargetStep, $Architecture, $DebugRun, $Payload, $DotNet, $Android, $PowerShell, $Packages,
+        param($EventQueue, $ScriptPath, $TargetStep, $Architecture, $DebugRun, $Payload, $Packages,
               $CacheDirectory, $OutputDirectory, $SigningKeyPath, $DeletePackages, $PreviewOnly)
         Set-StrictMode -Version Latest
         try {
@@ -10656,9 +10380,6 @@ function Start-PipelineWorker {
                 Step            = $TargetStep
                 Architecture    = $Architecture
                 Payload         = $Payload
-                DotNet          = $DotNet
-                Android         = $Android
-                PowerShell      = $PowerShell
                 Packages        = $Packages
                 CacheDirectory  = $CacheDirectory
                 OutputDirectory = $OutputDirectory
@@ -10698,9 +10419,6 @@ function Start-PipelineWorker {
         Architecture    = $Architecture
         DebugRun        = [bool]$Debug
         Payload         = $Payload
-        DotNet          = $script:ChosenVersions['DotNet']
-        Android         = $script:ChosenVersions['Android']
-        PowerShell      = $script:ChosenVersions['PowerShell']
         Packages        = $Packages
         CacheDirectory  = $CacheDirectory
         OutputDirectory = $OutputDirectory
@@ -10730,38 +10448,6 @@ function Invoke-SetupInterface {
         }
     }).AddArgument($script:EventQueue)
     [void]$script:InputPowerShell.BeginInvoke()
-
-    $script:ResolverRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-    $script:ResolverRunspace.Open()
-    $script:ResolverPowerShell = [PowerShell]::Create()
-    $script:ResolverPowerShell.Runspace = $script:ResolverRunspace
-    [void]$script:ResolverPowerShell.AddScript({
-        param($EventQueue, $ServiceIndex, $Manifest, $Channels, $FeedVersionsBody, $ChannelVersionsBody)
-        Set-StrictMode -Version Latest
-        try {
-            ${function:Get-FeedVersions} = $FeedVersionsBody
-            ${function:Get-ChannelVersions} = $ChannelVersionsBody
-            $index = Invoke-RestMethod -Uri $ServiceIndex
-            $base = ([string]@($index.resources | Where-Object { @($_.'@type') -contains 'PackageBaseAddress/3.0.0' })[0].'@id').TrimEnd('/') + '/'
-            $versions = Get-ChannelVersions -PackageBaseAddress $base -Manifest $Manifest -Channels $Channels
-            $EventQueue.Add([PSCustomObject]@{ Type = 'Versions'; Data = $versions })
-        }
-        catch {
-            $offline = $false
-            for ($e = $_.Exception; $e; $e = $e.InnerException) {
-                if ($e -is [System.Net.Http.HttpRequestException] -or $e -is [System.Net.Sockets.SocketException]) { $offline = $true }
-            }
-            $EventQueue.Add([PSCustomObject]@{ Type = 'VersionsFailed'; Text = $_.Exception.Message; Offline = $offline })
-        }
-    }).AddParameters([ordered]@{
-        EventQueue          = $script:EventQueue
-        ServiceIndex        = $script:FeedManifest[0].ServiceIndex
-        Manifest            = $script:PackageManifest
-        Channels            = $script:Channels
-        FeedVersionsBody    = ${function:Get-FeedVersions}.ToString()
-        ChannelVersionsBody = ${function:Get-ChannelVersions}.ToString()
-    })
-    [void]$script:ResolverPowerShell.BeginInvoke()
 
     $result = 'Exit'
     Render-Canvas
@@ -10879,18 +10565,6 @@ function Invoke-SetupInterface {
                     }
                 }
 
-                'Versions' {
-                    $script:ChannelVersions = $event.Data
-                    $dirty = $true
-                }
-
-                'VersionsFailed' {
-                    $script:ChannelVersions = 'failed'
-                    $script:BuildLog.Add("Version list: $($event.Text)")
-                    if ($event.Offline) { Show-OfflinePopup }
-                    $dirty = $true
-                }
-
                 'Done' {
                     $script:ActiveNodeId = 0
                     $script:ActiveStep = 'Done. S saves the log.'
@@ -10999,8 +10673,6 @@ if ($useInteractiveMode) {
         if ($script:InputRunspace)    { $script:InputRunspace.Dispose() }
         if ($script:WorkerPowerShell) { $script:WorkerPowerShell.Stop(); $script:WorkerPowerShell.Dispose() }
         if ($script:WorkerRunspace)   { $script:WorkerRunspace.Dispose() }
-        if ($script:ResolverPowerShell) { $script:ResolverPowerShell.Stop(); $script:ResolverPowerShell.Dispose() }
-        if ($script:ResolverRunspace)   { $script:ResolverRunspace.Dispose() }
 
         [Console]::Write("`e[?7h`e[?25h`e[?1049l`e[0m")
         [Console]::CursorVisible        = $originalCursorVisible

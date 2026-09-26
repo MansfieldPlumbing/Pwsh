@@ -38,7 +38,7 @@ Every artifact the script emits has been exercised by the device:
 Not yet done, stated plainly:
 
 - **The host is minimal.** The activity opens a runspace and runs
-  `Profile.ps1` in-process; on the x86_64 emulator that runs CanvasDemo. The
+  `Profile.ps1` in-process; on the x86_64 emulator that runs CellCanvas. The
   payload carries no cmdlet modules, so commands such as `Get-ChildItem` and
   `Get-Process` (`Microsoft.PowerShell.Commands.Management`) are not present.
 - **The type map covers only the emitted assembly.** `Mono.Android` needs its
@@ -120,7 +120,7 @@ Each step runs its dependencies first, so `-Step 11` is a full build.
 | 1 | Verify pinned specifications against their upstream addresses |
 | 2 | Acquire and hash the pinned NuGet packages |
 | 3 | Inspect and classify every payload in those packages |
-| 4 | Select the 96-assembly lean payload |
+| 4 | Select the 96-assembly minimal payload |
 | 5 | Emit and verify the XABA assembly store |
 | 6 | Wrap the store in an ELF shared library for the target; emit `libpsl-native.so` |
 | 7 | Emit the binary `AndroidManifest.xml` |
@@ -193,12 +193,12 @@ The only file the build writes inside the repository is the signed APK. It
 fails if anything else in the repository changed during a run, and it ends by
 listing every file it wrote with its SHA-512.
 
-The signed APK is written next to `setup.ps1` as
-`dev.mansfieldplumbing.pwsh.apk` (the Android package name; `*.apk` is
-ignored by git). `-ApkPath` puts it elsewhere. Every intermediate artifact
-stays in memory. `-KeepIntermediates` writes them for inspection to
-`..\Build\Pwsh`, side by side with the repository, created if missing. The build root holds a
-`.gitignore` of `*`, so no repository that contains it tracks build output. The signing key and package cache default to per-user data:
+The signed APK is written to `build\dev.mansfieldplumbing.pwsh.apk` (the
+Android package name). `build\` is the only place inside the repository the
+script writes, and git ignores it. `-ApkPath` puts the APK elsewhere. Every
+intermediate artifact stays in memory; `-KeepIntermediates` writes them to
+`build\` for inspection. The signing key and package cache never go inside
+the repository and default to per-user data:
 `%LOCALAPPDATA%\Pwsh` on Windows, the Library folders on macOS, and the XDG
 data and cache directories on Linux.
 `-OutputDirectory`, `-SigningKeyPath` and `-CacheDirectory` override them.
