@@ -42,9 +42,15 @@ Ship versions are locked: PowerShell 7.7.0-preview.5 and .NET
 
 ## Next: unblock the build
 
-- [ ] Byte-identical APK proof of the 2026-09-26 refactor: build every target
-  under both admissions from `build/baseline-src/` and from the working tree
-  and compare SHA-256s.
+- [x] Byte-identical APK proof of the 2026-09-26 refactor (package pins,
+  `build/` output, renames, `git-v2` transport): every target under both
+  admissions, built from the frozen `build/baseline-src/` and from `168ffb0`
+  with the same pinned packages and signing key, produced identical APKs
+  (SHA-256 prefixes: arm64 `28AE42E2` NativeActivity, `F4FA8243` Xamarin;
+  x64 `6D4E624B`, `059DBF79`; arm32 `E6198AEA`, `EFC0587C`). The baseline ran
+  from a copy whose googlesource fetch used `git-v2`, which changes how step 1
+  reaches upstream, not the admitted bytes. The baseline already contains the
+  gate 2e host change, so this proof does not cover that change.
 - [ ] The gate 2e host change (`RunPowerShell(IntPtr)`, `NativeActivityHandle`)
   is in `main` unbuilt. Build it, pass the decoder and ABI checkers, and
   re-prove gates 2a–2d on all three backends, or revert it until then.
