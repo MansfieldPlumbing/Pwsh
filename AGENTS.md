@@ -43,6 +43,31 @@ Pwsh's performance comes from lowering, not from interpreting faster.
     PowerShell builds and validates an expression tree and compiles it to IL;
     RyuJIT turns it into machine code once per process. The cost is paid once
     and amortized; the code lives in process memory, not in the signed APK.
+  - On the device, persisted: when device-dependent code is stable across
+    runs, lower it once, write it as an IL-only managed assembly in the app's
+    private storage (`internalDataPath`), admit it by manifest and hash, and
+    load it at the next process start. The cost is paid once per change, not
+    once per process. Kokoro-Hexagon's `Model.Store.psm1` is the admission
+    precedent. Policy supports it: an app reads its own data files
+    (`untrusted_app_all.te:27`) and may JIT into executable memory
+    (`app.te:199`); system/sepolicy `7595d4f4`.
+  - Native machine code is emitted only by the build machine and reaches the
+    device only through the package installer: in the APK, or later in a
+    signed split APK added with `PackageInstaller.MODE_INHERIT_EXISTING`
+    (`PackageInstaller.java:2227`). Installed code lives in `/data/app`
+    (`apk_data_file`), which apps may map and execute (`app.te:427`) and may
+    never write (`public/app.te:108-110`). The app never writes machine code
+    itself: mapping an app-written file as executable is audited
+    (`untrusted_app_all.te:28`), `execve` of one is forbidden from target SDK
+    29 as a W^X violation (`app_neverallows.te:60-69`), and persisting JIT
+    output would re-create ReadyToRun on the device.
+- Pwsh updates itself by artifact type. IL: lowered on the device (or
+  supplied by the paired PC), stored in private storage, admitted by hash,
+  promoted by an atomic active pointer, and loaded at the next process start.
+  Machine code: lowered by the paired Windows PC from what the device reports
+  (hot paths, timings, ISA), signed there with the release key, which never
+  leaves the PC, and installed as a split APK. Emitted IL binds native code by
+  function pointer, so neither path needs ReadyToRun.
   - A path fixed at build time is never deferred to run time, and a path that
     depends on device state is never forced into the APK.
 - Work that the platform already does well (composition, rasterization on the

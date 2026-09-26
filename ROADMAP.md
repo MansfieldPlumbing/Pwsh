@@ -118,6 +118,15 @@ The win came from specialization to known shapes and layout.
 - [ ] **N4 Lower.** Where SMA's dynamic dispatch dominates, lower a restricted
   PowerShell subset to IL at build time (Kokoro-Hexagon's managed-lowering
   receipt is the precedent) before reaching for native code.
+- [ ] **N5 Self-update.** IL: a device-lowered, IL-only assembly written to
+  private storage, admitted by hash, promoted by an atomic active pointer and
+  loaded at the next start; prove admission, tamper rejection and rollback on
+  all three backends. Machine code: the device reports hot paths, timings and
+  ISA; the paired Windows PC lowers them with the named encoders, signs a
+  split APK and installs it with `MODE_INHERIT_EXISTING`; prove that the
+  split's `.so` loads and is called from emitted IL. To verify first: whether
+  an adb partial install (`install-multiple -p`) needs on-device confirmation,
+  and what an app-initiated session requires.
 
 ## Build hygiene
 
