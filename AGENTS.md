@@ -291,6 +291,13 @@ only when that group's evidence exists. Name the source for every new fact.
   onn 4K Plus (arm32, API 34), with the managed host assembly named
   `Dev.MansfieldPlumbing.Pwsh`: every marker on the main thread, the process
   alive 40 seconds later, the crash buffer empty.
+- IL-only store, 2026-09-26: with all 62 ReadyToRun images re-emitted IL-only,
+  CoreLib included, gates 2a-2d pass on the x86_64 emulator, the S23 and the
+  onn 4K Plus, every marker on the main thread, alive 40 seconds later, no
+  crash for the process. Startup (Admit to `RunPowerShell returned`) rose
+  from 0.51-0.55 s to 0.97-1.03 s on the S23 and from 3.8-4.0 s to
+  6.8-7.2 s on the onn; the JIT now compiles the CoreLib and `System.*` code
+  that ran precompiled.
 - The current payload contains no cmdlet modules, so commands such as
   `Join-Path` and `Write-Error` are unavailable in this `CreateDefault2`
   runspace. Profile fixtures use the language and .NET only.

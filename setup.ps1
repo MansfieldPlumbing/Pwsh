@@ -1399,6 +1399,162 @@ function Test-ReadyToRunImage {
         $stream.Dispose()
     }
 }
+# Re-emits a ReadyToRun image as an IL-only PE32 image. Kept: the IL bodies,
+# field RVA data, metadata and managed resources. Dropped: native code, the R2R
+# header, exception/reloc/debug/import data and the strong-name signature.
+#
+# Sources (runtime ab19415702aa8139d5369e47c73edb47343c34ad):
+# - pedecoder.cpp:1228 CheckILOnly: with no R2R header, only import, resource,
+#   security, basereloc, debug, IAT and COM directories are allowed, sections
+#   must not be shared, and imports/relocations/entry point are optional.
+# - System.Reflection.Metadata Tables.cs:431 and :1811: the RVA is the first
+#   4 bytes of every MethodDef and FieldRVA row.
+# - readytorun-format.md: a single-file R2R image retains its IL and metadata.
+
+function Get-RvaFileOffset($Headers, [int]$Rva) {
+    foreach ($s in $Headers.SectionHeaders) {
+        if ($Rva -ge $s.VirtualAddress -and $Rva -lt $s.VirtualAddress + [Math]::Max($s.VirtualSize, $s.SizeOfRawData)) {
+            return $Rva - $s.VirtualAddress + $s.PointerToRawData
+        }
+    }
+    throw "RVA 0x$($Rva.ToString('X')) is in no section."
+}
+
+function Get-FieldRvaDataSize($Reader, $Field) {
+    # Field signature: 0x06, optional custom modifiers, then the type.
+    $blob = $Reader.GetBlobReader($Field.Signature)
+    if ($blob.ReadByte() -ne 0x06) { throw 'Not a field signature.' }
+    $type = $blob.ReadByte()
+    while ($type -in 0x1F, 0x20) { [void]$blob.ReadCompressedInteger(); $type = $blob.ReadByte() }
+    switch ($type) {
+        { $_ -in 0x02, 0x04, 0x05 } { return 1 }
+        { $_ -in 0x03, 0x06, 0x07 } { return 2 }
+        { $_ -in 0x08, 0x09, 0x0C } { return 4 }
+        { $_ -in 0x0A, 0x0B, 0x0D } { return 8 }
+        0x11 {
+            $handle = $blob.ReadTypeHandle()
+            if ($handle.Kind -ne [Reflection.Metadata.HandleKind]::TypeDefinition) { throw 'FieldRVA value type is not defined in this assembly.' }
+            $size = $Reader.GetTypeDefinition([Reflection.Metadata.TypeDefinitionHandle]$handle).GetLayout().Size
+            if ($size -le 0) { throw 'FieldRVA value type has no explicit size.' }
+            return $size
+        }
+        default { throw "FieldRVA field has unsupported element type 0x$($type.ToString('X2'))." }
+    }
+}
+
+function ConvertTo-IlOnlyImage {
+    param([Parameter(Mandatory)][byte[]]$Image, [Parameter(Mandatory)][byte[]]$Template)
+    $pe = [Reflection.PortableExecutable.PEReader]::new([IO.MemoryStream]::new($Image, $false))
+    try {
+        $h = $pe.PEHeaders
+        $cor = $h.CorHeader
+        if ($cor.ManagedNativeHeaderDirectory.Size -eq 0) { return , $Image }
+        if ($cor.VtableFixupsDirectory.Size -ne 0) { throw 'Image has vtable fixups (mixed mode); not convertible.' }
+        $md = [Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe)
+
+        $text = [IO.MemoryStream]::new()
+        $base = 0x2000
+        $text.Write([byte[]]::new(72), 0, 72)                      # CLI header, filled last
+        function Align([int]$n) { while ($text.Length % $n) { $text.WriteByte(0) } }
+
+        # IL bodies, deduplicated by original RVA; fat bodies stay 4-aligned.
+        $methodRva = @{}
+        foreach ($mh in $md.MethodDefinitions) {
+            $rva = $md.GetMethodDefinition($mh).RelativeVirtualAddress
+            if ($rva -eq 0 -or $methodRva.ContainsKey($rva)) { continue }
+            $size = [Reflection.Metadata.PEReaderExtensions]::GetMethodBody($pe, $rva).Size
+            $off = Get-RvaFileOffset $h $rva
+            if (($Image[$off] -band 3) -eq 3) { Align 4 }
+            $methodRva[$rva] = $base + [int]$text.Length
+            $text.Write($Image, $off, $size)
+        }
+
+        # Field RVA data, keeping each blob's original power-of-two alignment (max 16).
+        $fieldRva = @{}
+        foreach ($fh in $md.FieldDefinitions) {
+            $field = $md.GetFieldDefinition($fh)
+            $rva = $field.GetRelativeVirtualAddress()
+            if ($rva -eq 0 -or $fieldRva.ContainsKey($rva)) { continue }
+            $size = Get-FieldRvaDataSize $md $field
+            $align = 1; while ($align -lt 16 -and ($rva % ($align * 2)) -eq 0) { $align *= 2 }
+            Align $align
+            $fieldRva[$rva] = $base + [int]$text.Length
+            $text.Write($Image, (Get-RvaFileOffset $h $rva), $size)
+        }
+
+        # Metadata, with the RVA column of MethodDef and FieldRVA rewritten.
+        Align 4
+        $mdRva = $base + [int]$text.Length
+        $metadata = [byte[]]::new($cor.MetadataDirectory.Size)
+        [Array]::Copy($Image, (Get-RvaFileOffset $h $cor.MetadataDirectory.RelativeVirtualAddress), $metadata, 0, $metadata.Length)
+        $ext = [Reflection.Metadata.Ecma335.MetadataReaderExtensions]
+        foreach ($pair in @(@([Reflection.Metadata.Ecma335.TableIndex]::MethodDef, $methodRva), @([Reflection.Metadata.Ecma335.TableIndex]::FieldRva, $fieldRva))) {
+            $table = $pair[0]; $map = $pair[1]
+            $start = $ext::GetTableMetadataOffset($md, $table); $row = $ext::GetTableRowSize($md, $table); $count = $ext::GetTableRowCount($md, $table)
+            for ($r = 0; $r -lt $count; $r++) {
+                $at = $start + $r * $row
+                $old = [BitConverter]::ToInt32($metadata, $at)
+                if ($old -eq 0) { continue }
+                if (-not $map.ContainsKey($old)) { throw "No relocated data for $table RVA 0x$($old.ToString('X'))." }
+                [BitConverter]::GetBytes([int]$map[$old]).CopyTo($metadata, $at)
+            }
+        }
+        $text.Write($metadata, 0, $metadata.Length)
+
+        # Managed resources, 8-aligned; offsets inside are relative to this blob.
+        $resRva = 0; $resSize = $cor.ResourcesDirectory.Size
+        if ($resSize) {
+            Align 8
+            $resRva = $base + [int]$text.Length
+            $text.Write($Image, (Get-RvaFileOffset $h $cor.ResourcesDirectory.RelativeVirtualAddress), $resSize)
+        }
+
+        # CLI header (ECMA-335 II.25.3.3): IL-only, no entry point, no strong name.
+        $cli = [IO.BinaryWriter]::new([IO.MemoryStream]::new())
+        $cli.Write([uint32]72); $cli.Write([uint16]2); $cli.Write([uint16]5)
+        $cli.Write([uint32]$mdRva); $cli.Write([uint32]$metadata.Length)
+        $cli.Write([uint32]1)                                       # COMIMAGE_FLAGS_ILONLY
+        $cli.Write([uint32]0)                                       # entry point token
+        $cli.Write([uint32]$resRva); $cli.Write([uint32]$resSize)
+        $cli.Write([byte[]]::new(8 * 5))                            # strong name, code manager, vtable fixups, EAT jumps, managed native header
+        $textBytes = $text.ToArray()
+        [Array]::Copy($cli.BaseStream.ToArray(), 0, $textBytes, 0, 72)
+
+        # PE32 headers from the pack's IL-only template, then patched.
+        $t = [Reflection.PortableExecutable.PEReader]::new([IO.MemoryStream]::new($Template, $false))
+        $lfanew = [BitConverter]::ToInt32($Template, 0x3C)
+        $headerSize = 0x200
+        $rawSize = [int]([Math]::Ceiling($textBytes.Length / 512) * 512)
+        $out = [byte[]]::new($headerSize + $rawSize)
+        [Array]::Copy($Template, 0, $out, 0, $lfanew + 4 + 20 + 224)
+        $t.Dispose()
+        $coff = $lfanew + 4; $opt = $coff + 20
+        [BitConverter]::GetBytes([uint16]1).CopyTo($out, $coff + 2)          # one section
+        [BitConverter]::GetBytes([uint32]0).CopyTo($out, $coff + 4)          # timestamp: deterministic
+        [BitConverter]::GetBytes([uint32]$rawSize).CopyTo($out, $opt + 4)    # SizeOfCode
+        [BitConverter]::GetBytes([uint32]0).CopyTo($out, $opt + 8)           # SizeOfInitializedData
+        [BitConverter]::GetBytes([uint32]0).CopyTo($out, $opt + 16)          # AddressOfEntryPoint
+        [BitConverter]::GetBytes([uint32]$base).CopyTo($out, $opt + 20)      # BaseOfCode
+        $imageSize = $base + [int]([Math]::Ceiling($textBytes.Length / 0x2000) * 0x2000)
+        [BitConverter]::GetBytes([uint32]$imageSize).CopyTo($out, $opt + 56) # SizeOfImage
+        [BitConverter]::GetBytes([uint32]$headerSize).CopyTo($out, $opt + 60)# SizeOfHeaders
+        [BitConverter]::GetBytes([uint32]0).CopyTo($out, $opt + 64)          # CheckSum
+        for ($d = 0; $d -lt 16; $d++) { [Array]::Clear($out, $opt + 96 + 8 * $d, 8) }
+        [BitConverter]::GetBytes([uint32]$base).CopyTo($out, $opt + 96 + 8 * 14)   # COM descriptor
+        [BitConverter]::GetBytes([uint32]72).CopyTo($out, $opt + 96 + 8 * 14 + 4)
+        $sec = $opt + 224
+        [Array]::Clear($out, $sec, 40)
+        [Text.Encoding]::ASCII.GetBytes('.text').CopyTo($out, $sec)
+        [BitConverter]::GetBytes([uint32]$textBytes.Length).CopyTo($out, $sec + 8)
+        [BitConverter]::GetBytes([uint32]$base).CopyTo($out, $sec + 12)
+        [BitConverter]::GetBytes([uint32]$rawSize).CopyTo($out, $sec + 16)
+        [BitConverter]::GetBytes([uint32]$headerSize).CopyTo($out, $sec + 20)
+        [BitConverter]::GetBytes([uint32]0x60000020).CopyTo($out, $sec + 36) # code, execute, read
+        [Array]::Copy($textBytes, 0, $out, $headerSize, $textBytes.Length)
+        return , $out
+    } finally { $pe.Dispose() }
+}
+
 
 function Read-ZipEntryBytes {
     param([Parameter(Mandatory)][System.IO.Compression.ZipArchiveEntry] $Entry)
@@ -3747,8 +3903,29 @@ function Invoke-SelectionStep {
         throw "Minimal assembly selection produced $($selected.Count) entries; the pinned list names $($manifest.Count)."
     }
 
+    # Every ReadyToRun image is re-emitted IL-only: its IL, field data, metadata
+    # and resources are kept and its native code is dropped. The PE headers
+    # follow the runtime pack's own IL-only images; the first by package path
+    # is the template.
+    $template = @($script:BuildContext.PayloadCandidates |
+        Where-Object { -not $_.ReferenceOnly -and -not $_.IsReadyToRun -and $_.PackageId -like 'Microsoft.NETCore.App.Runtime.*' } |
+        Sort-Object -Property PackagePath -CaseSensitive)[0]
+    if ($null -eq $template) { throw 'The runtime pack supplies no IL-only image to use as a PE header template.' }
+    $converted = 0
+    foreach ($name in @($selected.Keys)) {
+        $candidate = $selected[$name]
+        if (-not $candidate.IsReadyToRun) { continue }
+        $bytes = ConvertTo-IlOnlyImage -Image ([byte[]]$candidate.Bytes) -Template ([byte[]]$template.Bytes)
+        if (Test-ReadyToRunImage -ImageBytes $bytes) { throw "$name still carries a ReadyToRun header after conversion." }
+        $copy = $candidate.PSObject.Copy()
+        $copy.Bytes = $bytes
+        $copy.IsReadyToRun = $false
+        $selected[$name] = $copy
+        $converted++
+    }
+
     $script:BuildContext.SelectedAssemblies = $selected
-    Write-Host "[PASS] Step 4 complete: $($selected.Count) ordered runtime assemblies selected in memory; reference-only images and Probe.r2r.dll rejected." -ForegroundColor Green
+    Write-Host "[PASS] Step 4 complete: $($selected.Count) ordered runtime assemblies selected in memory; $converted ReadyToRun images re-emitted IL-only; reference-only images and Probe.r2r.dll rejected." -ForegroundColor Green
 }
 
 $script:Crc32Table = $null
@@ -4162,6 +4339,16 @@ function Invoke-StoreStep {
 
     $contract = Get-AndroidNativeContract
     $selected = $script:BuildContext.SelectedAssemblies
+    # The store carries IL only: no image may keep a ReadyToRun header, and each
+    # must declare itself IL-only (pedecoder.cpp CheckILOnly, runtime ab194157).
+    foreach ($name in $selected.Keys) {
+        $bytes = [byte[]]$selected[$name].Bytes
+        if (Test-ReadyToRunImage -ImageBytes $bytes) { throw "Store image $name carries a ReadyToRun header." }
+        $reader = [System.Reflection.PortableExecutable.PEReader]::new([System.IO.MemoryStream]::new($bytes, $false))
+        try {
+            if (($reader.PEHeaders.CorHeader.Flags -band [System.Reflection.PortableExecutable.CorFlags]::ILOnly) -eq 0) { throw "Store image $name is not flagged IL-only." }
+        } finally { $reader.Dispose() }
+    }
     # NativeActivity serves images to CoreCLR in place, without the copy the
     # .NET for Android host makes (lib/assembly-store.cc), so this layout owns
     # their alignment: every image starts on a 16-byte boundary. CoreCLR needs

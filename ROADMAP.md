@@ -65,20 +65,21 @@ Ship versions are locked: PowerShell 7.7.0-preview.5 and .NET
   `docs/powershell-load-behavior.md`; freeze a payload from the device-traced
   startup set (`-TraceAssemblyProbe`) plus supported features; add
   `Microsoft.Management.Infrastructure.Runtime.Unix` to the probe explicitly.
-- [ ] **Measure the ReadyToRun tax before cutting it.** A diagnostic host
-  option sets `DOTNET_ReadyToRun=0` before `coreclr_initialize`; log
-  `JitInfo.GetCompilationTime()`, the compiled-method count and
-  `/proc/self/smaps_rollup` (`Private_Dirty`, `Pss`) after `RunPowerShell`, with
-  R2R on and off, on all three backends. Source facts at runtime commit
-  `ab194157`: an R2R image served from the store is copied section by section
-  into anonymous memory (`peimagelayout.cpp` `LoadImageByCopyingParts`); an
-  IL-only image is used in place.
-- [ ] Remove R2R. Re-emit each of the 62 R2R store images as an IL-only PE and
-  add an artifact-level zero-R2R gate. `PEDecoder::CheckILOnly`
-  (`pedecoder.cpp:1228`) admits only the import, resource, security,
-  base-relocation, debug, IAT and COR-header directories, no shared sections,
-  and needs no imports, relocations or entry point; zeroing the R2R header
-  alone leaves the exception directory and fails. Re-prove gates 2a–2d.
+- [x] ReadyToRun removed. Step 4 re-emits every selected R2R image (62 of
+  96) as an IL-only PE32 image: IL bodies, field data, metadata and resources
+  kept, native code, R2R header and exception, relocation, debug and import
+  data dropped, MethodDef and FieldRVA RVAs rewritten (`Tables.cs:431`,
+  `:1811`). Step 5 refuses any store image with an R2R header or without the
+  IL-only flag (`pedecoder.cpp:1228` CheckILOnly). Checked offline on all
+  three packs: every IL body, field blob, resource blob and metadata byte
+  identical apart from the RVA columns; Windows CoreCLR loads all 61
+  non-CoreLib images. Gates 2a-2d pass on the x86_64 emulator, the S23 and the
+  onn 4K Plus. The arm64 APK went from 40,967,652 to 25,872,787 bytes.
+- [ ] Startup cost of IL-only, measured Admit to `RunPowerShell returned`:
+  S23 0.51-0.55 s to 0.97-1.03 s; onn 3.8-4.0 s to 6.8-7.2 s; emulator
+  2.0 s to 3.5-4.1 s (cold 3.3 s to 11.2 s). On the emulator's cold run,
+  `CreateDefault2` took 4.5 s and `Open` 4.2 s of 11.2 s. Next: a leaner
+  initial session state, measured on all three devices.
 - [ ] Store compression. The store is about 111 MB uncompressed; `zstd.h` is
   pinned and unused.
 
