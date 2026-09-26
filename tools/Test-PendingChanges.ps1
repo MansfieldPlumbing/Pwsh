@@ -39,8 +39,13 @@ $findings = [System.Collections.Generic.List[string]]::new()
 function Test-Line([string]$Where, [string]$Text) {
     foreach ($name in $rules.Keys) {
         if ($Text -notmatch $rules[$name]) { continue }
-        # SHA digests are hex; they are pinned inputs, not secrets.
-        if ($name -eq 'Base64Blob' -and $Matches[0] -match '^[0-9A-Fa-f]+$') { continue }
+        # SHA digests are hex, and URL paths are short segments between
+        # slashes; neither is a secret. A blob needs one long mixed segment.
+        if ($name -eq 'Base64Blob') {
+            $segment = @($Matches[0] -split '/' | Sort-Object Length -Descending)[0]
+            if ($segment.Length -lt 32 -or $segment -match '^[0-9A-Fa-f]+$' -or
+                $segment -cnotmatch '[a-z]' -or $segment -cnotmatch '[A-Z]' -or $segment -notmatch '[0-9]') { continue }
+        }
         $findings.Add("$name $Where")
     }
 }
