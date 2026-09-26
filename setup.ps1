@@ -1096,6 +1096,9 @@ function Get-MinimalAssemblyManifest {
         if (-not $trimmed.EndsWith('.dll', [StringComparison]::Ordinal)) {
             throw "The minimal assembly order contains a non-assembly entry: '$trimmed'."
         }
+        # The pinned list names the managed assembly 'Pwsh.dll'; translate that
+        # slot to the admission's assembly name.
+        if ($trimmed -ceq "$($script:AssemblyName).dll") { $trimmed = "$(Get-ManagedAssemblyName).dll" }
         $names.Add($trimmed)
     }
 
@@ -1183,6 +1186,13 @@ $script:ResourceChunkConstants = $null
 # chosen: the package is a hash of the managed identity.
 $script:AssemblyName = 'Pwsh'
 $script:ManagedNamespace = 'Dev.MansfieldPlumbing.Pwsh'
+
+function Get-ManagedAssemblyName {
+    # NativeActivity names the managed assembly after the package. The Xamarin
+    # path keeps 'Pwsh' until it is deleted: its Java peer name, pinned in
+    # lib/classes.dex and checked by step 1, is derived from that identity.
+    if ($Admission -eq 'NativeActivity') { $script:ManagedNamespace } else { $script:AssemblyName }
+}
 
 # When an activity declares an explicit Name, .NET Android emits the Java peer
 # under that exact name instead of a crc64 package. The manifest, the peer in
@@ -1874,6 +1884,7 @@ function Test-ExpressionGraph {
         DynamicNodes       = 0
         CallSiteReferences = 0
         CallSiteConstants  = 0
+        BoundConstants     = 0
         NodesVisited       = 0
     }
 
@@ -1892,6 +1903,15 @@ function Test-ExpressionGraph {
             if (Test-CallSiteType $Node.Type) { $report.CallSiteReferences++ }
             if ($Node -is [Linq.Expressions.ConstantExpression] -and $null -ne $Node.Value) {
                 if (Test-CallSiteType $Node.Value.GetType()) { $report.CallSiteConstants++ }
+                # LambdaCompiler emits only these as IL literals (ILGen.CanEmitConstant,
+                # runtime ab194157); anything else is loaded from a closure, and a
+                # persisted method has none, so the load reads argument 0 instead.
+                $code = [Type]::GetTypeCode([Nullable]::GetUnderlyingType($Node.Type) ?? $Node.Type)
+                if ($code -notin 'Boolean', 'SByte', 'Int16', 'Int32', 'Int64', 'Single', 'Double', 'Char',
+                        'Byte', 'UInt16', 'UInt32', 'UInt64', 'Decimal', 'String' -and
+                    $Node.Value -isnot [Type] -and $Node.Value -isnot [Reflection.MethodBase]) {
+                    $report.BoundConstants++
+                }
             }
             if ($Node -is [Linq.Expressions.MethodCallExpression]) {
                 if ((Test-CallSiteType $Node.Method.DeclaringType) -or
@@ -1950,11 +1970,12 @@ function Add-PersistedMethod {
     )
 
     $report = Test-ExpressionGraph -Expression $Body
-    if ($report.DynamicNodes -or $report.CallSiteReferences -or $report.CallSiteConstants) {
+    if ($report.DynamicNodes -or $report.CallSiteReferences -or $report.CallSiteConstants -or $report.BoundConstants) {
         throw ("$($Owner.FullName).$Name is not fully persisted: " +
             "$($report.DynamicNodes) dynamic node(s), " +
             "$($report.CallSiteReferences) call-site reference(s), " +
-            "$($report.CallSiteConstants) call-site constant(s).")
+            "$($report.CallSiteConstants) call-site constant(s), " +
+            "$($report.BoundConstants) constant(s) IL cannot encode.")
     }
 
     $method = $Owner.DefineMethod($Name, $Attributes, $ReturnType, $ParameterTypes)
@@ -3407,7 +3428,7 @@ function New-PwshActivityAssemblyBytes {
             Where-Object { -not $_.ReferenceOnly -and $_.Name -ceq $name } |
             Sort-Object @{ Expression = { Get-PayloadCandidateRank -Candidate $_ } } |
             Select-Object -First 1
-        if ($null -eq $candidate) { throw "Cannot emit Pwsh.dll without '$name'." }
+        if ($null -eq $candidate) { throw "Cannot emit $(Get-ManagedAssemblyName).dll without '$name'." }
         $imageMap[[IO.Path]::GetFileNameWithoutExtension($name)] = $candidate.Bytes
     }
 
@@ -3428,9 +3449,9 @@ function New-PwshActivityAssemblyBytes {
 
         $activityAttributeType = $android.GetType('Android.App.ActivityAttribute', $true)
 
-        $identity = [Reflection.AssemblyName]::new('Pwsh')
+        $identity = [Reflection.AssemblyName]::new((Get-ManagedAssemblyName))
         $builder = [Reflection.Emit.PersistedAssemblyBuilder]::new($identity, [object].Assembly)
-        $module = $builder.DefineDynamicModule('Pwsh.dll')
+        $module = $builder.DefineDynamicModule("$(Get-ManagedAssemblyName).dll")
 
         $activityType = $android.GetType('Android.App.Activity', $true)
         $main = $module.DefineType(
@@ -3590,7 +3611,7 @@ function New-PwshActivityAssemblyBytes {
                     (& $mark 'GATE2D START_MISSING')))
             $try = New-ClrBlock @() @(
                 [Linq.Expressions.Expression]::IfThen(
-                    [Linq.Expressions.Expression]::Equal($nativeActivity, (New-ClrConstant ([IntPtr]::Zero) ([IntPtr]))),
+                    [Linq.Expressions.Expression]::Equal($nativeActivity, [Linq.Expressions.Expression]::Default([IntPtr])),
                     [Linq.Expressions.Expression]::Throw((New-ClrNew ([ArgumentNullException].GetConstructor([type[]]@([string]))) @(
                         (New-ClrConstant 'nativeActivity' ([string])))))),
                 (New-StaticCall ([Management.Automation.PowerShellAssemblyLoadContextInitializer].GetMethod(
@@ -3671,7 +3692,7 @@ function Add-GeneratedAssemblyCandidates {
             -AssemblyName '_Microsoft.Android.Resource.Designer' `
             -TypeName '_Microsoft.Android.Resource.Designer.Resource'
         'Probe.dll' = New-EmptyManagedAssemblyBytes -AssemblyName 'Probe' -TypeName 'Pwsh.Probe'
-        'Pwsh.dll' = New-PwshActivityAssemblyBytes -Candidates $script:BuildContext.PayloadCandidates
+        "$(Get-ManagedAssemblyName).dll" = New-PwshActivityAssemblyBytes -Candidates $script:BuildContext.PayloadCandidates
     }
     foreach ($item in $generated.GetEnumerator()) {
         $script:BuildContext.PayloadCandidates.Add([pscustomobject]@{
@@ -6685,8 +6706,8 @@ function New-NativeHostLibrary {
         keyRid       = & $ascii 'RUNTIME_IDENTIFIER'
         keyBase      = & $ascii 'APP_CONTEXT_BASE_DIRECTORY'
         rid          = & $ascii $script:Target.Rid
-        assemblyName = & $ascii 'Pwsh'
-        typeName     = & $ascii 'Dev.MansfieldPlumbing.Pwsh.NativeHost'
+        assemblyName = & $ascii $script:ManagedNamespace
+        typeName     = & $ascii "$($script:ManagedNamespace).NativeHost"
         methodName   = & $ascii 'Admit'
         tag          = & $ascii 'Pwsh'
         fmtAdmit     = & $ascii 'GATE2A Admit returned 0x%08x'
