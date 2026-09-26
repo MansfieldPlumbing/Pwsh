@@ -274,6 +274,16 @@ APK carries `lib/x86_64/libcoreclr.so`, `libclrjit.so` and `libpsl-native.so`,
 the shim is ELF64 `EM_X86_64`, and logcat shows no `berberis` or
 `ndk_translation` frames at all.
 
+Before pushing, enable the tracked hook once per clone with
+`git config core.hooksPath .githooks`. Its `pre-push` runs
+`tools/Test-PendingChanges.ps1 -PrePush`, which scans the added lines of every
+commit being pushed for private keys, known token formats, credential
+assignments, home-directory paths, email addresses, device identifiers and key
+files, and refuses the push on any finding or on any scan failure. Findings name
+the rule and `path:line`, never the matched text. Run the script without
+`-PrePush` to scan the working tree. GitHub secret scanning with push
+protection is enabled on the repository as a second check.
+
 ## 11. Open questions
 
 Carried in `audit.md` §8. The ones that block work:

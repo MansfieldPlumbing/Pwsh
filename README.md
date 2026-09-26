@@ -187,6 +187,9 @@ lib/              pinned specifications, restored on demand, never executed
 lib/manifest.json the root provenance manifest; setup.ps1 holds only its digest
 docs/roadmap.md   where the project is going
 docs/DEVELOPER.md decisions, proofs, architecture targets, testing
+scripts/          the frozen CellCanvas workload and its reference inventory
+tools/            payload closure probe; pre-push scan for secrets and personal data
+.githooks/        pre-push hook (git config core.hooksPath .githooks)
 ```
 
 The only file the build writes inside the repository is the signed APK. It

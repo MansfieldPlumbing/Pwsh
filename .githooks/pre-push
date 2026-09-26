@@ -1,0 +1,5 @@
+#!/bin/sh
+# Refuse a push that adds secrets, key files or personal data.
+# Enable once per clone: git config core.hooksPath .githooks
+command -v pwsh >/dev/null 2>&1 || { echo "pre-push: pwsh not found; push refused." >&2; exit 1; }
+exec pwsh -NoProfile -NonInteractive -File "$(git rev-parse --show-toplevel)/tools/Test-PendingChanges.ps1" -PrePush
