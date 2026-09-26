@@ -44,10 +44,21 @@ Receiving uses a declared, disabled, frozen manifest:
   or signature-level callers. The exact list comes from AOSP's manifest and
   permission definitions at the pinned tag.
 
-To verify against AOSP source before relying on it: that an app may change
-the enabled state of its own components without
-`CHANGE_COMPONENT_ENABLED_STATE`, and whether that call needs `DONT_KILL_APP`
-to avoid restarting the process.
+Read from AOSP `frameworks/base` at `android-14.0.0_r1` (commit `299fe6f5`):
+
+- An app may change the enabled state of its own components without
+  `CHANGE_COMPONENT_ENABLED_STATE`: `PackageManagerService.setEnabledSettings`
+  rejects a caller only when it is neither the target package nor holds the
+  permission (`PackageManagerService.java:3869-3890`). The one exception is the
+  system-generated app-details activity (`:3942-3946`).
+- Without `PackageManager.DONT_KILL_APP` the package-changed broadcast is sent
+  at once with `dontKillApp=false` (`:4026-4073`). Every call passes
+  `DONT_KILL_APP`. Where the unflagged broadcast stops the process is not yet
+  traced.
+- `NativeActivity` does not override `onNewIntent`, and `Activity.onNewIntent`
+  is empty (`Activity.java:2275`); an intent delivered to a running activity
+  never reaches native code. Receiving one needs an emitted subclass of
+  `NativeActivity` that forwards `onNewIntent`.
 
 ## Decision: composite, and use cells only where VT needs them
 
@@ -65,6 +76,21 @@ Android `Canvas` and AGSL reached through JNI, which gate 2e/2f requires for
 CellCanvas (`docs/android-facade.md`), and a Vulkan swapchain on the
 `NativeActivity` window (`ROADMAP.md`, UI and platform). The terminal is built
 on whichever of them the owner confirms, using the bridges gate 2e proves.
+
+## Text input
+
+Read from the same commit: `NativeActivity`'s content view is a bare
+`NativeContentView extends View` (`NativeActivity.java:113-123`), and `View`
+returns `false` from `onCheckIsTextEditor` and `null` from
+`onCreateInputConnection` (`View.java:16460`, `:16483`). The native side has
+only `ANativeActivity_showSoftInput` and `hideSoftInput`. Soft-keyboard text
+(committed and composing text, deletions) therefore needs a view that returns
+an `InputConnection`, which means emitted DEX. The same emitted `NativeActivity`
+subclass that forwards `onNewIntent` can host that view. How it attaches
+without `setContentView` over the native content view is an owner decision.
+`NativeActivity` also sets `SOFT_INPUT_ADJUST_RESIZE` (`:136-138`), so the IME
+arrives as a content-rect change, and sets the window format to RGB_565
+(`:135`); the host must select a 32-bit buffer format before drawing colour.
 
 ## Rules
 

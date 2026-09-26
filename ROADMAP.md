@@ -77,10 +77,17 @@ Ship versions are locked: PowerShell 7.7.0-preview.5 and .NET
 
 ## Leaving .NET for Android
 
+- [ ] Pin `jni.h` as a `git-v2` source: AOSP `libnativehelper` at
+  `android-14.0.0_r1` (commit `af5fd77f`), `include_jni/jni.h`, SHA-256
+  `C88CE2CB6CE10378CD4C706A3A2AD017794AEDB9314DDCC341E39B470CDB601A`. Its
+  `JNINativeInterface` has 233 entries; `GetVersion` is slot 4, `FindClass` 6,
+  `GetMethodID` 33, `CallObjectMethodA` 36, `RegisterNatives` 215,
+  `ExceptionCheck` 228. The build derives slots from the header, never from a
+  table typed by hand.
 - [ ] Gate 2e: JNI function-table calls (`GetVersion`, `FindClass`,
-  `GetMethodID`, one `Call*MethodA` with `jvalue[]`) from a pinned Android 14
-  `jni.h` on all three backends, then an owned compatibility assembly that
-  satisfies exactly the CellCanvas surface.
+  `GetMethodID`, one `Call*MethodA` with `jvalue[]`) from the pinned `jni.h`
+  on all three backends, then an owned compatibility assembly that satisfies
+  exactly the CellCanvas surface.
 - [ ] Gate 2f: the frozen `scripts/CellCanvas.ps1` bytes run with Mono.Android,
   Mono.Android.Runtime, Java.Interop, libmonodroid, libxamarin-app, Xamarin DEX
   and type maps absent.
@@ -129,7 +136,15 @@ The win came from specialization to known shapes and layout.
   `NativeActivity` window with SPIR-V compiled on the build machine.
 - [ ] Intents: declare nearly every intent in the manifest, disabled and
   pointing at script stubs, then freeze the manifest; scripts enable
-  components at runtime.
+  components at runtime with `DONT_KILL_APP`. Own-package changes need no
+  permission (`docs/ui.md`, traced to `PackageManagerService`).
+- [ ] One emitted DEX subclass of `android.app.NativeActivity`: forwards
+  `onNewIntent` to native code (the base class drops it) and hosts a view whose
+  `InputConnection` carries soft-keyboard text to native code (the base view
+  has none). Owner decision: how that view attaches without `setContentView`
+  over the native content view.
+- [ ] Select a 32-bit window buffer format before drawing; `NativeActivity`
+  defaults the window to RGB_565.
 - [ ] Service slots: one emitted DEX forwarder per Android base class that
   needs one (accessibility, input method, tile, voice interaction) and a
   dispatcher that answers within Android's deadlines.

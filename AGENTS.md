@@ -25,6 +25,33 @@ When a rule blocks work that meets all four conditions, report the rule and
 propose a precise change to it. Do not refuse silently, and do not work around
 it silently.
 
+## Execution model: PowerShell orchestrates, lowered code runs hot paths
+
+Pwsh's performance comes from lowering, not from interpreting faster.
+
+- PowerShell running through SMA's dynamic dispatch is the control plane:
+  lifecycle, event dispatch, scheduling, composition and damage decisions. It
+  is never on a per-frame, per-cell, per-glyph or per-sample path.
+- Hot paths are authored in PowerShell and lowered. When lowering happens
+  follows from when its inputs are known:
+  - At APK build time, when the code and its shapes are fixed then: IL through
+    persisted LINQ expression trees, machine code from named encoders
+    (`ROADMAP.md` gates N2-N3), or shaders. It costs nothing at startup, is
+    checked by the build, and ships signed in the APK.
+  - On the device at run time, when the shape depends on what only the device
+    knows: the user's scripts, screen and cell metrics, fonts, loaded data.
+    PowerShell builds and validates an expression tree and compiles it to IL;
+    RyuJIT turns it into machine code once per process. The cost is paid once
+    and amortized; the code lives in process memory, not in the signed APK.
+  - A path fixed at build time is never deferred to run time, and a path that
+    depends on device state is never forced into the APK.
+- Work that the platform already does well (composition, rasterization on the
+  GPU) is handed to it.
+- Drawing is damage-driven. A state change records damage; lowered code turns
+  damage into pixels; nothing redraws unconditionally or on a timer.
+- A new hot path names its lowering target and its measurement before it is
+  built.
+
 ## Layout
 
 - `ROADMAP.md` is the single implementation roadmap. A checked item names its
@@ -296,10 +323,19 @@ only when that group's evidence exists. Name the source for every new fact.
 - In the Xamarin baseline, CellCanvas runs on the Android main thread: the host
   runs `Profile.ps1` in a `UseCurrentThread` runspace there, and the script's
   delegates are invoked there. `activity->env` belongs to the main thread; any
-  other thread attaches through `activity->vm`. Android's own `Canvas`, `Bitmap`, `Paint` and AGSL
-  `RuntimeShader` stay the implementation, reached through JNI on the
-  `Surface` from `ANativeWindow_toSurface`; the real `setContentView` is never
-  called over `NativeActivity`'s content view.
+  other thread attaches through `activity->vm`. For CellCanvas, Android's own
+  `Canvas`, `Bitmap`, `Paint` and AGSL `RuntimeShader` stay the implementation,
+  reached through JNI on the `Surface` from `ANativeWindow_toSurface`; its
+  `SetContentView` call binds that surface and never reaches the real one.
+- Keep `NativeActivity`'s `NativeContentView` as the content view. Under the
+  surface `NativeActivity` takes, `ViewRootImpl` draws no views
+  (`ViewRootImpl.java:4838`), input goes to the native queue (`:1450`), and
+  `NativeActivity` derives the content rectangle and IME focus from that view
+  (`NativeActivity.java:301-335`; frameworks/base `299fe6f5`). Non-drawing
+  views, such as the text-input view, may be added with `addContentView`. The
+  one emitted `NativeActivity` subclass on the roadmap is a fixed class, not
+  arbitrary Java subclassing. Rendering goes through the window surface; the
+  renderer is chosen separately.
 - Layering. QuickPS Android mechanisms are literal and policy-free: NDK
   exports, JNI function-table dispatch, looper and input primitives, the
   choreographer binding. The Pwsh compatibility assembly owns the
