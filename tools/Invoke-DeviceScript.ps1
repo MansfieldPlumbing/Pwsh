@@ -131,7 +131,8 @@ $run = {
     $lines = @(Adb logcat -d -v time --pid=$procId -s Pwsh:V | Where-Object { $_ -match '\bPwsh\b' })
     $result.Alive = (Adb shell pidof $Package).Trim() -eq $procId
     $result.CrashLines = @(Adb logcat -d -b crash -v threadtime -T $started 2>$null | Where-Object { $_ -match [regex]::Escape($Package) -or $_ -match "\s$procId\s" }).Count
-    $result.Log = @($lines | ForEach-Object { ($_ -replace '^\S+\s+\S+\s+\w/Pwsh\s*\(\s*\d+\):\s*', '') })
+    # Each line keeps its logcat time of day, so phases can be timed.
+    $result.Log = @($lines | ForEach-Object { ($_ -replace '^\S+\s+(\S+)\s+\w/Pwsh\s*\(\s*\d+\):\s*', '$1 ') })
     [pscustomobject]$result
 }
 
