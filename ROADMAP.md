@@ -97,10 +97,15 @@ Ship versions are locked: PowerShell 7.7.0-preview.5 and .NET
   `GetMethodID` 33, `CallObjectMethodA` 36, `RegisterNatives` 215,
   `ExceptionCheck` 228. The build derives slots from the header, never from a
   table typed by hand.
-- [ ] Gate 2e: JNI function-table calls (`GetVersion`, `FindClass`,
-  `GetMethodID`, one `Call*MethodA` with `jvalue[]`) from the pinned `jni.h`
-  on all three backends, then an owned compatibility assembly that satisfies
-  exactly the CellCanvas surface.
+- [x] Gate 2e, JNI: `GetVersion`, `FindClass`, `GetMethodID`, instance and
+  static `Call*MethodA` with `jvalue[]`, slots derived from `jni.h`, on all
+  three backends, from `Profile.ps1` without a rebuild; Android `Canvas` text
+  and colors on the window surface through the same bindings
+  (`scripts/probes/`, `AGENTS.md`). The build does not yet read `jni.h` from
+  `lib/`; the probe bindings were generated from the same file and digest.
+- [ ] Gate 2e, compatibility: an owned compatibility assembly that satisfies
+  exactly the CellCanvas surface, first prototyped live as a dynamic
+  assembly from `Profile.ps1`, then emitted by `setup.ps1`.
 - [ ] Gate 2f: the frozen `scripts/CellCanvas.ps1` bytes run with Mono.Android,
   Mono.Android.Runtime, Java.Interop, libmonodroid, libxamarin-app, Xamarin DEX
   and type maps absent.

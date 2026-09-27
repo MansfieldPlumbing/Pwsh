@@ -322,6 +322,29 @@ only when that group's evidence exists. Name the source for every new fact.
   reach script-block delegates on the main thread; the product's
   `[UnmanagedCallersOnly]` callbacks in the compatibility assembly (Layering)
   are not proven by this.
+- JNI and Android `Canvas` from PowerShell, 2026-09-26, no rebuild, on the
+  x86_64 emulator, the S23 and the onn 4K Plus under CheckJNI (on in
+  `-Debuggable` builds). `scripts/probes/jni/Jni.ps1` binds the
+  `JNINativeInterface` slots, all derived from `jni.h` (libnativehelper
+  `af5fd77f`, SHA-256 `C88CE2CB…B601A`, 233 entries), as delegates on
+  `activity->env`. The JNI probe read `GetVersion` 0x00010006, `SDK_INT` equal to
+  `activity->sdkVersion` (36, 36, 34), `getPackageName` through
+  `CallObjectMethodA`, and `Integer.toHexString` through
+  `CallStaticObjectMethodA` with a `jvalue[]`. The Canvas probe took the window's
+  `Surface` with `ANativeWindow_toSurface`, drew with `lockCanvas`, `Paint`,
+  `Typeface.MONOSPACE`, `drawText` and `drawRect`, and posted it; `screencap`
+  read the eight Campbell ANSI colors exactly across the band and text pixels
+  in the text area on every device. Each process was alive afterwards with no
+  crash for it.
+- QuickPS `src/Native.ps1` at `62747ebf` does not run unchanged in this
+  payload: its first `Add-Member` fails, because that cmdlet is in
+  `Microsoft.PowerShell.Commands.Utility` (`AddMember.cs`), which is not
+  shipped; `ForEach-Object` is in SMA (`InternalCommands.cs`) and resolves.
+  With each `Add-Member ScriptMethod` replaced by
+  `PSObject.Methods.Add([PSScriptMethod])` and nothing else changed, its
+  `GetComCall` on `JNIEnv*` (a pointer to a function table, taking the env as
+  its first argument, like a COM object) returned `GetVersion` 0x00010006 on all
+  three backends, 2026-09-26.
 - The current payload contains no cmdlet modules, so commands such as
   `Join-Path` and `Write-Error` are unavailable in this `CreateDefault2`
   runspace. Profile fixtures use the language and .NET only.
@@ -427,11 +450,9 @@ Verify each on hardware before relying on it.
   surface CellCanvas requires; the recovery screen; the animation callback;
   exact frozen CellCanvas execution without Xamarin; the 40 store assemblies no
   proven path has requested, served in place.
-- To prove at gate 2c, then promote: QuickPS's function-table call performs
-  JNI on Android, shown by `GetVersion`, `FindClass`, `GetMethodID` and one
-  `Call*MethodA` with a `jvalue[]`, using slot numbers from a pinned Android 14
-  `jni.h`; `QuickPS/src/Native.ps1` runs unchanged under the owned CoreCLR host;
-  its `CallingConvention.StdCall` attribute is harmless on arm64, x64 and arm32.
+- Still open for QuickPS: its `CallingConvention.StdCall` attribute was
+  harmless for one argument-free call (`GetVersion`) on all three backends;
+  calls with arguments through it are untested.
 - The exact runtime properties `coreclr_initialize` needs without the .NET for
   Android host.
 - Settled 2026-09-26: `libSystem.Security.Cryptography.Native.Android.so`

@@ -40,9 +40,10 @@ Not yet done, stated plainly:
 
 - **No cmdlet modules.** Commands such as `Get-ChildItem` and `Get-Process`
   (`Microsoft.PowerShell.Commands.Management`) are not present.
-- **Drawing is a probe so far.** `scripts/ScreenProbe.ps1`, run as
-  `Profile.ps1`, fills the window from PowerShell on all three devices; there
-  is no terminal renderer or input handling yet.
+- **Drawing is probes so far.** Run as `Profile.ps1`, `scripts/ScreenProbe.ps1`
+  fills the window, and `scripts/probes/canvas` draws text and ANSI colors
+  with Android's `Canvas` through JNI, on all three devices; there is no
+  terminal renderer or input handling yet.
 - **CellCanvas does not run yet.** It ran under .NET for Android; it returns
   when gate 2e supplies its Android compatibility surface (`ROADMAP.md`).
 - **Startup.** Without ReadyToRun the JIT compiles the startup path: about
@@ -161,7 +162,7 @@ lib/              pinned specifications, restored on demand, never executed
 lib/manifest.json the root provenance manifest; setup.ps1 holds only its digest
 ROADMAP.md        where the project is going, gate by gate
 docs/DEVELOPER.md decisions, proofs, architecture targets, testing
-scripts/          the frozen CellCanvas workload, its reference inventory, the screen probe
+scripts/          the frozen CellCanvas workload, its reference inventory, device probes
 tools/            device script runner (run-as, no rebuild); payload closure probe; pre-push scan
 .githooks/        pre-push hook (git config core.hooksPath .githooks)
 ```
