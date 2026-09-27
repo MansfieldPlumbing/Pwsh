@@ -124,8 +124,10 @@ Pwsh's performance comes from lowering, not from interpreting faster.
   with the device JIT.
 - Pushes go through `.githooks/pre-push` (`git config core.hooksPath
   .githooks`), which refuses secrets, key files and personal data.
-- Do not vendor upstream repositories, donor code, graphics work, JavaScript
-  parsing work, or unrelated application archaeology here.
+- Other projects stay in their own repositories: upstream sources, donor code,
+  JavaScript-to-PowerShell translation tooling (js2ps), and prototypes in other
+  languages. Code ported from them into PowerShell belongs here, with the
+  source repository and commit it was ported from.
 
 ## Established facts
 
