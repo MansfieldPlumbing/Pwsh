@@ -49,6 +49,7 @@ Register-WindowDrawHandler {
     for ($r = 0; $r -lt $m.GetRows(); $r++) { $w2 = $frame[($r * $m.GetCols()) * 3 + 2]; if ((($w2 -shr 24) -band 3) -eq 1 -and ($w2 -band 0xff) -eq 11) { $progressRow = $r; break } }
     $global:ConsoleProbeLayout = @{ Left = $inset.Left; Top = $inset.Top; CellW = $cw; CellH = $ch }
     $global:ConsoleSurfaceWidth = $size.Width
+    $global:ConsoleZoom = @{ AreaW = $areaW; AreaH = $areaH; WidthPerPx = $cw / $textSize; HeightPerPx = $ch / $textSize }
     if ($null -eq $global:ConsoleGestureInsets) { $global:ConsoleGestureInsets = Get-SystemBarInsets -Gestures }
     Write-AndroidLog ("CONSOLE DREW {0}x{1} cell {2:N1}x{3:N1} progressRow {4} insets {5},{6},{7},{8}" -f $m.GetCols(), $m.GetRows(), $cw, $ch, $progressRow, $inset.Left, $inset.Top, $inset.Right, $inset.Bottom)
 }
@@ -85,7 +86,10 @@ Register-InputHandler -Handle {
         $d = [Math]::Sqrt([Math]::Pow($Event.X2 - $Event.X, 2) + [Math]::Pow($Event.Y2 - $Event.Y, 2))
         if ($null -eq $global:ConsolePinch) { $global:ConsolePinch = @{ Distance = [Math]::Max(1.0, $d); Size = [float]$global:ConsoleTextSize } }
         elseif ($Event.Action -eq 2) {
-            $size = [float][Math]::Min(160, [Math]::Max(12, $global:ConsolePinch.Size * $d / $global:ConsolePinch.Distance))
+            # Zoom in until one cell fills the visible area; zoom out to 6 px text.
+            $z = $global:ConsoleZoom
+            $max = [Math]::Floor([Math]::Min($z.AreaW / $z.WidthPerPx, $z.AreaH / $z.HeightPerPx))
+            $size = [float][Math]::Min($max, [Math]::Max(6, $global:ConsolePinch.Size * $d / $global:ConsolePinch.Distance))
             if ([Math]::Abs($size - $global:ConsoleTextSize) -ge 1) { $global:ConsoleTextSize = $size; $global:ConsoleDirty = $true }
         }
         return $true
