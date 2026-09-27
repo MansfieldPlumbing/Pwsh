@@ -423,9 +423,28 @@ function Initialize-AndroidCanvas {
         CallVoidMethodA = Get-JniFunction CallVoidMethodA $v @($I, $I, $I)
         CallIntMethodA = Get-JniFunction CallIntMethodA ([int]) @($I, $I, $I)
         CallFloatMethodA = Get-JniFunction CallFloatMethodA $f @($I, $I, $I)
+        CallStaticIntMethodA = Get-JniFunction CallStaticIntMethodA ([int]) @($I, $I, $I)
+        GetIntField = Get-JniFunction GetIntField ([int]) @($I, $I)
     }
     $script:ToSurface = Get-NativeExport 'libandroid.so' 'ANativeWindow_toSurface' $I @($I, $I)
     $script:SetGeometry = Get-NativeExport 'libandroid.so' 'ANativeWindow_setBuffersGeometry' ([int]) @($I, [int], [int], [int])
+    # Input queue and looper (include/android/input.h, looper.h at frameworks/native bfcf7507).
+    $script:Input = @{
+        ForThread = Get-NativeExport 'libandroid.so' 'ALooper_forThread' $I
+        Attach = Get-NativeExport 'libandroid.so' 'AInputQueue_attachLooper' ([void]) @($I, $I, [int], $I, $I)
+        Detach = Get-NativeExport 'libandroid.so' 'AInputQueue_detachLooper' ([void]) @($I)
+        GetEvent = Get-NativeExport 'libandroid.so' 'AInputQueue_getEvent' ([int]) @($I, $I)
+        PreDispatch = Get-NativeExport 'libandroid.so' 'AInputQueue_preDispatchEvent' ([int]) @($I, $I)
+        Finish = Get-NativeExport 'libandroid.so' 'AInputQueue_finishEvent' ([void]) @($I, $I, [int])
+        EventType = Get-NativeExport 'libandroid.so' 'AInputEvent_getType' ([int]) @($I)
+        MotionAction = Get-NativeExport 'libandroid.so' 'AMotionEvent_getAction' ([int]) @($I)
+        MotionX = Get-NativeExport 'libandroid.so' 'AMotionEvent_getX' ([float]) @($I, $I)
+        MotionY = Get-NativeExport 'libandroid.so' 'AMotionEvent_getY' ([float]) @($I, $I)
+        PointerCount = Get-NativeExport 'libandroid.so' 'AMotionEvent_getPointerCount' $I @($I)
+        KeyAction = Get-NativeExport 'libandroid.so' 'AKeyEvent_getAction' ([int]) @($I)
+        KeyCode = Get-NativeExport 'libandroid.so' 'AKeyEvent_getKeyCode' ([int]) @($I)
+    }
+    $script:EventSlot = $Interop::AllocHGlobal([IntPtr]::Size)   # AInputEvent** for getEvent, reused
     $surface = Get-JavaClass 'android/view/Surface'; $canvas = Get-JavaClass 'android/graphics/Canvas'
     $paint = Get-JavaClass 'android/graphics/Paint'; $typeface = Get-JavaClass 'android/graphics/Typeface'
     $mono = $script:Jni.GetStaticObjectField.Invoke($script:JniEnv, $typeface, (Get-JavaField $typeface 'MONOSPACE' 'Landroid/graphics/Typeface;' -Static))
@@ -508,6 +527,18 @@ function Invoke-CanvasFrame {
 
 # --- 5. Window callbacks ------------------------------------------------------------
 $script:Callbacks = @()
+$script:InsetIds = $null
+$script:InputQueue = [IntPtr]::Zero
+$script:HandleInput = $null
+$script:InputCallbacks = @()
+$script:AfterInput = $null
+$script:Draw = $null
+$script:Window = [IntPtr]::Zero
+
+function Request-WindowDraw {
+    <# Draws the window again with the registered draw handler, now, on the calling (main) thread. Call it after a state change; nothing redraws on its own. #>
+    if ($script:Window -ne [IntPtr]::Zero -and $null -ne $script:Draw) { Invoke-CanvasFrame $script:Window $script:Draw }
+}
 function Register-WindowDrawHandler {
     <# Draws with $Draw when Android creates the window and whenever it asks for a redraw. #>
     param([Parameter(Mandatory)][scriptblock] $Draw)
@@ -516,7 +547,7 @@ function Register-WindowDrawHandler {
     $handler = { param([IntPtr] $Activity, [IntPtr] $Window)
         # Nothing may escape: an exception that reaches the native caller
         # aborts the process.
-        try { Invoke-CanvasFrame $Window $script:Draw }
+        try { $script:Window = $Window; Invoke-CanvasFrame $Window $script:Draw }
         catch { try { Write-AndroidLog ('AndroidCanvas: ' + $_.Exception.GetType().FullName + ': ' + $_.Exception.Message) 6 } catch { } } }
     $created = [Management.Automation.LanguagePrimitives]::ConvertTo($handler, $type)
     $redraw = [Management.Automation.LanguagePrimitives]::ConvertTo($handler, $type)
@@ -526,6 +557,107 @@ function Register-WindowDrawHandler {
     $Interop::WriteIntPtr($table, 9 * [IntPtr]::Size, $Interop::GetFunctionPointerForDelegate($redraw))    # onNativeWindowRedrawNeeded
 }
 
+# --- 6. System-bar insets ------------------------------------------------------------
+
+function Get-SystemBarInsets {
+    <# The window's system-bar insets in pixels (WindowInsets.Type.systemBars, API 30), or zeros before the window is attached. #>
+    $e = $script:JniEnv; $j = $script:Jni
+    if ($null -eq $script:InsetIds) {
+        $activity = Get-JavaClass 'android/app/Activity'; $window = Get-JavaClass 'android/view/Window'
+        $view = Get-JavaClass 'android/view/View'; $insets = Get-JavaClass 'android/view/WindowInsets'
+        $type = Get-JavaClass 'android/view/WindowInsets$Type'; $box = Get-JavaClass 'android/graphics/Insets'
+        $script:InsetIds = @{
+            GetWindow = Get-JavaMethod $activity 'getWindow' '()Landroid/view/Window;'
+            GetDecorView = Get-JavaMethod $window 'getDecorView' '()Landroid/view/View;'
+            GetRootWindowInsets = Get-JavaMethod $view 'getRootWindowInsets' '()Landroid/view/WindowInsets;'
+            TypeClass = $type
+            SystemBars = Get-JavaMethod $type 'systemBars' '()I' -Static
+            GetInsets = Get-JavaMethod $insets 'getInsets' '(I)Landroid/graphics/Insets;'
+            Left = Get-JavaField $box 'left' 'I'; Top = Get-JavaField $box 'top' 'I'
+            Right = Get-JavaField $box 'right' 'I'; Bottom = Get-JavaField $box 'bottom' 'I'
+        }
+    }
+    $k = $script:InsetIds
+    $activityObject = $Interop::ReadIntPtr($script:Activity, 3 * [IntPtr]::Size)   # ANativeActivity.clazz
+    $window = Invoke-JavaCall $j.CallObjectMethodA $activityObject $k.GetWindow
+    $decor = Invoke-JavaCall $j.CallObjectMethodA $window $k.GetDecorView
+    $root = Invoke-JavaCall $j.CallObjectMethodA $decor $k.GetRootWindowInsets
+    $result = [pscustomobject]@{ Left = 0; Top = 0; Right = 0; Bottom = 0 }
+    if ($root -ne [IntPtr]::Zero) {
+        $mask = Invoke-JavaCall $j.CallStaticIntMethodA $k.TypeClass $k.SystemBars
+        $box = Invoke-JavaCall $j.CallObjectMethodA $root $k.GetInsets @([int]$mask)
+        $result = [pscustomobject]@{
+            Left = $j.GetIntField.Invoke($e, $box, $k.Left); Top = $j.GetIntField.Invoke($e, $box, $k.Top)
+            Right = $j.GetIntField.Invoke($e, $box, $k.Right); Bottom = $j.GetIntField.Invoke($e, $box, $k.Bottom)
+        }
+        Remove-JavaLocalRef $box; Remove-JavaLocalRef $root
+    }
+    Remove-JavaLocalRef $decor; Remove-JavaLocalRef $window
+    $result
+}
+
+# --- 7. Input ---------------------------------------------------------------------------
+
+function Register-InputHandler {
+    <#
+        Attaches the activity's input queue to the main looper and calls $Handle
+        for each event with a hashtable: Type ('key' or 'motion'), Action,
+        X and Y (motion, pointer 0), KeyCode (key). $Handle returns $true when
+        it consumed the event. Every event is finished, so input never stalls
+        (an unread queue makes Android report the app as not responding).
+    #>
+    param([Parameter(Mandatory)][scriptblock] $Handle, [scriptblock] $AfterInput)
+    $script:HandleInput = $Handle; $script:AfterInput = $AfterInput
+    $looperType = Get-NativeDelegateType ([int]) @([int], [int], [IntPtr])
+    $queueType = Get-NativeDelegateType ([void]) @([IntPtr], [IntPtr])
+    $onEvents = {
+        param([int] $Fd, [int] $Events, [IntPtr] $Data)
+        # Nothing may escape to the native caller.
+        try {
+            $q = $script:InputQueue; $in = $script:Input; $drained = $false
+            while ($in.GetEvent.Invoke($q, $script:EventSlot) -ge 0) {
+                $ev = $Interop::ReadIntPtr($script:EventSlot, 0)
+                if ($in.PreDispatch.Invoke($q, $ev) -ne 0) { continue }
+                $handled = $false
+                try {
+                    $t = $in.EventType.Invoke($ev)
+                    $info = if ($t -eq 2) {
+                        # Action carries the pointer index in bits 8-15 (AMOTION_EVENT_ACTION_POINTER_INDEX_MASK).
+                        $count = [int]$in.PointerCount.Invoke($ev)
+                        $m = @{ Type = 'motion'; Action = $in.MotionAction.Invoke($ev) -band 0xff; Pointers = $count
+                                X = $in.MotionX.Invoke($ev, [IntPtr]::Zero); Y = $in.MotionY.Invoke($ev, [IntPtr]::Zero) }
+                        if ($count -ge 2) { $m.X2 = $in.MotionX.Invoke($ev, [IntPtr]1); $m.Y2 = $in.MotionY.Invoke($ev, [IntPtr]1) }
+                        $m
+                    }
+                    else { @{ Type = 'key'; Action = $in.KeyAction.Invoke($ev); KeyCode = $in.KeyCode.Invoke($ev) } }
+                    $handled = [bool](& $script:HandleInput $info)
+                }
+                catch { try { Write-AndroidLog ('AndroidCanvas input: ' + $_.Exception.Message) 6 } catch { } }
+                $in.Finish.Invoke($q, $ev, [int]$handled)
+                $drained = $true
+            }
+            # One call after the queue is empty: a burst of events coalesces into one redraw.
+            if ($drained -and $null -ne $script:AfterInput) { & $script:AfterInput }
+        }
+        catch { try { Write-AndroidLog ('AndroidCanvas input queue: ' + $_.Exception.Message) 6 } catch { } }
+        return 1   # keep receiving
+    }
+    $onCreated = { param([IntPtr] $Activity, [IntPtr] $Queue)
+        try { $script:InputQueue = $Queue; $script:Input.Attach.Invoke($Queue, $script:Input.ForThread.Invoke(), 1, $script:InputPointer, [IntPtr]::Zero) }
+        catch { try { Write-AndroidLog ('AndroidCanvas input attach: ' + $_.Exception.Message) 6 } catch { } } }
+    $onDestroyed = { param([IntPtr] $Activity, [IntPtr] $Queue)
+        try { $script:Input.Detach.Invoke($Queue); $script:InputQueue = [IntPtr]::Zero } catch { } }
+    $looperCallback = [Management.Automation.LanguagePrimitives]::ConvertTo($onEvents, $looperType)
+    $created = [Management.Automation.LanguagePrimitives]::ConvertTo($onCreated, $queueType)
+    $destroyed = [Management.Automation.LanguagePrimitives]::ConvertTo($onDestroyed, $queueType)
+    $script:InputCallbacks = @($looperCallback, $created, $destroyed)          # rooted for the process lifetime
+    $script:InputPointer = $Interop::GetFunctionPointerForDelegate($looperCallback)
+    $table = $Interop::ReadIntPtr($script:Activity, 0)
+    $Interop::WriteIntPtr($table, 11 * [IntPtr]::Size, $Interop::GetFunctionPointerForDelegate($created))    # onInputQueueCreated
+    $Interop::WriteIntPtr($table, 12 * [IntPtr]::Size, $Interop::GetFunctionPointerForDelegate($destroyed))  # onInputQueueDestroyed
+}
+
 Export-ModuleMember -Function New-NativeFunction, Get-NativeExport, Write-AndroidLog, ConvertTo-ArgbColor,
+    Get-SystemBarInsets, Register-InputHandler, Request-WindowDraw,
     Initialize-AndroidCanvas, Get-CanvasSize, Get-TextCell, Clear-Canvas, Add-CanvasRect, Add-CanvasText,
     Invoke-CanvasFrame, Register-WindowDrawHandler

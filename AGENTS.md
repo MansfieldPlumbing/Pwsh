@@ -364,6 +364,19 @@ only when that group's evidence exists. Name the source for every new fact.
   `GetComCall` on `JNIEnv*` (a pointer to a function table, taking the env as
   its first argument, like a COM object) returned `GetVersion` 0x00010006 on all
   three backends, 2026-09-26.
+- Console core on devices, 2026-09-27, no rebuild: `modules/Console.psm1`
+  replayed all 63 conformance vectors in the app (`CONSOLE PASS 63 FAIL 0`) on
+  the x86_64 emulator, the S23 and the onn 4K Plus, parsing JSON with
+  `Newtonsoft.Json` from the payload. Its frame, drawn op by op through
+  `AndroidCanvas.psm1`, showed the progress row's Yellow background
+  (`F9F1A5`), palette 208 (`FF8700`), truecolor `3A96DD` and empty `0C0C0C` in
+  `screencap` on all three. Without an input-queue reader the S23 reported the
+  app not responding; with `onInputQueueCreated` attaching the queue to the
+  main looper and finishing every event, a session of 12 taps and 249 redraws
+  logged no not-responding event. The grid is inset by the system bars
+  (`WindowInsets.Type.systemBars`, S23 portrait 98 px top, 45 px bottom), and
+  pinch changes the text size and reflows the grid within the visible area:
+  89 grid sizes from 63x66 to 25x26 cells, no module error, process alive.
 - The current payload contains no cmdlet modules, so commands such as
   `Join-Path` and `Write-Error` are unavailable in this `CreateDefault2`
   runspace. Profile fixtures use the language and .NET only.

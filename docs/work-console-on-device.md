@@ -87,10 +87,11 @@ Create `scripts/probes/console-screen/Profile.ps1`. Place it with
      `x = col * cellWidth`, `y = (row + 0.8) * cellHeight`;
    - logs `CONSOLE DREW <cols>x<rows>`.
 
-Acceptance, with `-CapturePath`: on each device, the pixel at the center of
-the progress row's first cell has the color `F9F1A5` (Yellow, the progress
-background), and the pixel at the center of the first cell of the empty area
-below the editor has `0C0C0C`. Report the cell size, the rows and the two
+Acceptance, with `-CapturePath`: on each device, the pixel 2 px right and
+2 px below the top-left corner of the progress row's first cell has the color
+`F9F1A5` (Yellow, the progress background; the cell's center can fall on the
+black glyph), and the same pixel of the first cell of the empty area below the
+editor has `0C0C0C`. Report the cell size, the rows and the two
 pixel values per device, and whether each process stayed alive.
 
 ## Report

@@ -145,6 +145,8 @@ foreach ($job in $jobs) {
     foreach ($f in $failed) {
         # A failure inside one device's run is reported, not rethrown, so the
         # other devices' results still arrive.
-        [pscustomobject]@{ Device = $job.Name; Result = "tool error: $($f.Exception.Message) | $(([string]$f.ScriptStackTrace -split "`n")[0])" }
+        $message = "$($f.Exception.Message) | $(([string]$f.ScriptStackTrace -split "`n")[0])"
+        foreach ($t in $targets) { $message = $message.Replace($t.Serial, '<device>') }   # serials are personal data; never print them
+        [pscustomobject]@{ Device = $job.Name; Result = "tool error: $message" }
     }
 }
