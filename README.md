@@ -49,7 +49,7 @@ Not yet done, stated plainly:
 ## Design
 
 **The build script is inside the thing it builds.** The assemblies `setup.ps1`
-relies on are all among the 96 it ships, because a PowerShell host and an APK
+relies on are all among the 91 it ships, because a PowerShell host and an APK
 builder need the same things:
 
 ```
@@ -97,8 +97,7 @@ before it is parsed:
   checked against pinned digests. Identity and version are re-read from the
   `.nuspec` inside the verified archive.
 - The binary format specifications live in `lib/`, each pinned to an exact
-  upstream commit: `dotnet/android` for the store, type map and application
-  config, `llvm-project` for ELF64, `aosp-mirror` for binary XML.
+  upstream commit: `dotnet/android` for the store, `llvm-project` for ELF64, `aosp-mirror` for binary XML.
 - The script holds exactly one constant: the SHA-256 of the root provenance
   manifest. Every other digest, address, format constant and ordered name chains
   back to it.
