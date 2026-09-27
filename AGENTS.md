@@ -97,7 +97,8 @@ Pwsh's performance comes from lowering, not from interpreting faster.
 
 - Every input is pinned by SHA-256. Nothing is taken from the machine's
   installed state. A tool may be fetched ephemerally only if it is pinned, and
-  only to verify output, never to produce it.
+  only to verify output, never to produce it. The pinned runtime's own JIT is
+  the one admitted producer outside `setup.ps1`, under the capture rule below.
 - Every capability claim names a gate and passes it on hardware. Unproven work
   is described as planned, not as done.
 - New code must not depend on .NET for Android (Xamarin) types. Android is
@@ -110,6 +111,17 @@ Pwsh's performance comes from lowering, not from interpreting faster.
   in emitted IL or PowerShell.
 - Machine code, if emitted, comes from named instruction encoders, never raw
   hex, and is decoded back and checked by the build.
+- Captured JIT output may ship when all of this holds: RyuJIT from the pinned
+  runtime pack compiled it, at a recorded tier and ISA, inside the app's own
+  process on a `-Debuggable` development build (a process reads its own code;
+  no root); the method is a leaf, with no calls, no GC references and no
+  absolute runtime addresses; the build decodes every instruction back with its
+  independent decoder, finds no reference outside the body, and ABI-checks it;
+  the artifact records the method's IL hash, the JIT's SHA-256, tier and ISA;
+  it reaches the device only through the package installer; and a device
+  receipt compares it with the live JIT on every backend it claims. Code that
+  calls, allocates or holds GC references needs the runtime's fixups and stays
+  with the device JIT.
 - Pushes go through `.githooks/pre-push` (`git config core.hooksPath
   .githooks`), which refuses secrets, key files and personal data.
 - Do not vendor upstream repositories, donor code, graphics work, JavaScript
