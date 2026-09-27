@@ -425,6 +425,10 @@ function Initialize-AndroidCanvas {
         CallFloatMethodA = Get-JniFunction CallFloatMethodA $f @($I, $I, $I)
         CallStaticIntMethodA = Get-JniFunction CallStaticIntMethodA ([int]) @($I, $I, $I)
         GetIntField = Get-JniFunction GetIntField ([int]) @($I, $I)
+        GetStringUTFChars = Get-JniFunction GetStringUTFChars $I @($I, $I)
+        ReleaseStringUTFChars = Get-JniFunction ReleaseStringUTFChars $v @($I, $I)
+        CallBooleanMethodA = Get-JniFunction CallBooleanMethodA $b @($I, $I, $I)
+        CallStaticObjectMethodA = Get-JniFunction CallStaticObjectMethodA $I @($I, $I, $I)
     }
     $script:ToSurface = Get-NativeExport 'libandroid.so' 'ANativeWindow_toSurface' $I @($I, $I)
     $script:SetGeometry = Get-NativeExport 'libandroid.so' 'ANativeWindow_setBuffersGeometry' ([int]) @($I, [int], [int], [int])
@@ -532,6 +536,8 @@ $script:InputQueue = [IntPtr]::Zero
 $script:HandleInput = $null
 $script:InputCallbacks = @()
 $script:AfterInput = $null
+$script:ClipIds = $null
+$script:Timer = $null
 $script:Draw = $null
 $script:Window = [IntPtr]::Zero
 
@@ -560,7 +566,8 @@ function Register-WindowDrawHandler {
 # --- 6. System-bar insets ------------------------------------------------------------
 
 function Get-SystemBarInsets {
-    <# The window's system-bar insets in pixels (WindowInsets.Type.systemBars, API 30), or zeros before the window is attached. #>
+    <# The window's system-bar insets in pixels (WindowInsets.Type.systemBars, API 30), or with -Gestures the zones Android reserves for its edge gestures (systemGestures); zeros before the window is attached. #>
+    param([switch] $Gestures)
     $e = $script:JniEnv; $j = $script:Jni
     if ($null -eq $script:InsetIds) {
         $activity = Get-JavaClass 'android/app/Activity'; $window = Get-JavaClass 'android/view/Window'
@@ -572,6 +579,7 @@ function Get-SystemBarInsets {
             GetRootWindowInsets = Get-JavaMethod $view 'getRootWindowInsets' '()Landroid/view/WindowInsets;'
             TypeClass = $type
             SystemBars = Get-JavaMethod $type 'systemBars' '()I' -Static
+            SystemGestures = Get-JavaMethod $type 'systemGestures' '()I' -Static
             GetInsets = Get-JavaMethod $insets 'getInsets' '(I)Landroid/graphics/Insets;'
             Left = Get-JavaField $box 'left' 'I'; Top = Get-JavaField $box 'top' 'I'
             Right = Get-JavaField $box 'right' 'I'; Bottom = Get-JavaField $box 'bottom' 'I'
@@ -584,7 +592,7 @@ function Get-SystemBarInsets {
     $root = Invoke-JavaCall $j.CallObjectMethodA $decor $k.GetRootWindowInsets
     $result = [pscustomobject]@{ Left = 0; Top = 0; Right = 0; Bottom = 0 }
     if ($root -ne [IntPtr]::Zero) {
-        $mask = Invoke-JavaCall $j.CallStaticIntMethodA $k.TypeClass $k.SystemBars
+        $mask = Invoke-JavaCall $j.CallStaticIntMethodA $k.TypeClass $(if ($Gestures) { $k.SystemGestures } else { $k.SystemBars })
         $box = Invoke-JavaCall $j.CallObjectMethodA $root $k.GetInsets @([int]$mask)
         $result = [pscustomobject]@{
             Left = $j.GetIntField.Invoke($e, $box, $k.Left); Top = $j.GetIntField.Invoke($e, $box, $k.Top)
@@ -596,7 +604,126 @@ function Get-SystemBarInsets {
     $result
 }
 
-# --- 7. Input ---------------------------------------------------------------------------
+# --- 7. Clipboard, haptics and a looper timer --------------------------------------------
+
+function ConvertFrom-JavaString([IntPtr] $JString) {
+    if ($JString -eq [IntPtr]::Zero) { return '' }
+    $chars = $script:Jni.GetStringUTFChars.Invoke($script:JniEnv, $JString, [IntPtr]::Zero); Assert-NoJavaException 'GetStringUTFChars'
+    try { $Interop::PtrToStringUTF8($chars) } finally { $script:Jni.ReleaseStringUTFChars.Invoke($script:JniEnv, $JString, $chars) }
+}
+
+function Initialize-ClipboardIds {
+    if ($null -ne $script:ClipIds) { return }
+    $activity = Get-JavaClass 'android/app/Activity'; $manager = Get-JavaClass 'android/content/ClipboardManager'
+    $data = Get-JavaClass 'android/content/ClipData'; $item = Get-JavaClass 'android/content/ClipData$Item'
+    $object = Get-JavaClass 'java/lang/Object'; $view = Get-JavaClass 'android/view/View'
+    $haptic = Get-JavaClass 'android/view/HapticFeedbackConstants'; $window = Get-JavaClass 'android/view/Window'
+    $script:ClipIds = @{
+        GetSystemService = Get-JavaMethod $activity 'getSystemService' '(Ljava/lang/String;)Ljava/lang/Object;'
+        SetPrimaryClip = Get-JavaMethod $manager 'setPrimaryClip' '(Landroid/content/ClipData;)V'
+        GetPrimaryClip = Get-JavaMethod $manager 'getPrimaryClip' '()Landroid/content/ClipData;'
+        DataClass = $data
+        NewPlainText = Get-JavaMethod $data 'newPlainText' '(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;' -Static
+        GetItemCount = Get-JavaMethod $data 'getItemCount' '()I'
+        GetItemAt = Get-JavaMethod $data 'getItemAt' '(I)Landroid/content/ClipData$Item;'
+        CoerceToText = Get-JavaMethod $item 'coerceToText' '(Landroid/content/Context;)Ljava/lang/CharSequence;'
+        ToString = Get-JavaMethod $object 'toString' '()Ljava/lang/String;'
+        GetWindow = Get-JavaMethod $activity 'getWindow' '()Landroid/view/Window;'
+        GetDecorView = Get-JavaMethod $window 'getDecorView' '()Landroid/view/View;'
+        PerformHaptic = Get-JavaMethod $view 'performHapticFeedback' '(I)Z'
+        LongPress = $script:Jni.GetStaticIntField.Invoke($script:JniEnv, $haptic, (Get-JavaField $haptic 'LONG_PRESS' 'I' -Static))
+    }
+}
+
+function Get-ActivityObject { $Interop::ReadIntPtr($script:Activity, 3 * [IntPtr]::Size) }   # ANativeActivity.clazz
+
+function Get-ClipboardManager {
+    Initialize-ClipboardIds
+    $name = New-JavaString 'clipboard'
+    try { Invoke-JavaCall $script:Jni.CallObjectMethodA (Get-ActivityObject) $script:ClipIds.GetSystemService @([IntPtr]$name) } finally { Remove-JavaLocalRef $name }
+}
+
+function Set-AndroidClipboard {
+    <# Puts plain text on Android's clipboard (ClipData.newPlainText, ClipboardManager.setPrimaryClip). Main thread only. #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string] $Text)
+    $k = $script:ClipIds; $manager = Get-ClipboardManager; $k = $script:ClipIds
+    $label = New-JavaString 'Pwsh'; $body = New-JavaString $Text
+    try {
+        $clip = Invoke-JavaCall $script:Jni.CallStaticObjectMethodA $k.DataClass $k.NewPlainText @([IntPtr]$label, [IntPtr]$body)
+        Invoke-JavaCall $script:Jni.CallVoidMethodA $manager $k.SetPrimaryClip @([IntPtr]$clip)
+        Remove-JavaLocalRef $clip
+    }
+    finally { Remove-JavaLocalRef $label; Remove-JavaLocalRef $body; Remove-JavaLocalRef $manager }
+}
+
+function Get-AndroidClipboard {
+    <# The clipboard's first item as text, or an empty string. Android lets only the focused app read it. #>
+    $manager = Get-ClipboardManager; $k = $script:ClipIds; $text = ''
+    try {
+        $clip = Invoke-JavaCall $script:Jni.CallObjectMethodA $manager $k.GetPrimaryClip
+        if ($clip -ne [IntPtr]::Zero) {
+            if ((Invoke-JavaCall $script:Jni.CallIntMethodA $clip $k.GetItemCount) -gt 0) {
+                $item = Invoke-JavaCall $script:Jni.CallObjectMethodA $clip $k.GetItemAt @([int]0)
+                $chars = Invoke-JavaCall $script:Jni.CallObjectMethodA $item $k.CoerceToText @([IntPtr](Get-ActivityObject))
+                $str = Invoke-JavaCall $script:Jni.CallObjectMethodA $chars $k.ToString
+                $text = ConvertFrom-JavaString $str
+                Remove-JavaLocalRef $str; Remove-JavaLocalRef $chars; Remove-JavaLocalRef $item
+            }
+            Remove-JavaLocalRef $clip
+        }
+    }
+    finally { Remove-JavaLocalRef $manager }
+    $text
+}
+
+function Invoke-HapticFeedback {
+    <# The system long-press haptic on the window's decor view. #>
+    Initialize-ClipboardIds; $k = $script:ClipIds
+    $window = Invoke-JavaCall $script:Jni.CallObjectMethodA (Get-ActivityObject) $k.GetWindow
+    $decor = Invoke-JavaCall $script:Jni.CallObjectMethodA $window $k.GetDecorView
+    [void](Invoke-JavaCall $script:Jni.CallBooleanMethodA $decor $k.PerformHaptic @([int]$k.LongPress))
+    Remove-JavaLocalRef $decor; Remove-JavaLocalRef $window
+}
+
+function Register-LooperTimer {
+    <#
+        A one-shot timer on the main looper: a timerfd (CLOCK_MONOTONIC,
+        TFD_NONBLOCK | TFD_CLOEXEC; bionic sys/timerfd.h) registered with
+        ALooper_addFd, so the looper wakes us; nothing polls. Start-LooperTimer
+        arms it, Stop-LooperTimer disarms it, and $OnElapsed runs on the main
+        thread when it fires.
+    #>
+    param([Parameter(Mandatory)][scriptblock] $OnElapsed)
+    $libc = @{
+        Create = Get-NativeExport 'libc.so' 'timerfd_create' ([int]) @([int], [int])
+        SetTime = Get-NativeExport 'libc.so' 'timerfd_settime' ([int]) @([int], [int], $I, $I)
+        Read = Get-NativeExport 'libc.so' 'read' $I @([int], $I, $I)
+    }
+    $addFd = Get-NativeExport 'libandroid.so' 'ALooper_addFd' ([int]) @($I, [int], [int], [int], $I, $I)
+    $script:Timer = @{ Libc = $libc; Fd = $libc.Create.Invoke(1, 0x800 -bor 0x80000); OnElapsed = $OnElapsed
+                       Spec = $Interop::AllocHGlobal(4 * [IntPtr]::Size); Scratch = $Interop::AllocHGlobal(8) }
+    if ($script:Timer.Fd -lt 0) { throw 'timerfd_create failed.' }
+    $type = Get-NativeDelegateType ([int]) @([int], [int], [IntPtr])
+    $onFd = { param([int] $Fd, [int] $Events, [IntPtr] $Data)
+        try { [void]$script:Timer.Libc.Read.Invoke($Fd, $script:Timer.Scratch, [IntPtr]8); & $script:Timer.OnElapsed }
+        catch { try { Write-AndroidLog ('AndroidCanvas timer: ' + $_.Exception.Message) 6 } catch { } }
+        return 1 }
+    $script:Timer.Callback = [Management.Automation.LanguagePrimitives]::ConvertTo($onFd, $type)   # rooted
+    [void]$addFd.Invoke($script:Input.ForThread.Invoke(), $script:Timer.Fd, -2, 1, $Interop::GetFunctionPointerForDelegate($script:Timer.Callback), [IntPtr]::Zero)   # ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT
+}
+
+function Set-TimerSpec([long] $Milliseconds) {
+    # struct itimerspec { timespec it_interval; timespec it_value; }, each timespec two longs (time_t, long).
+    $p = [IntPtr]::Size; $sp = $script:Timer.Spec
+    $Interop::WriteIntPtr($sp, 0, [IntPtr]::Zero); $Interop::WriteIntPtr($sp, $p, [IntPtr]::Zero)
+    $Interop::WriteIntPtr($sp, 2 * $p, [IntPtr]([long][Math]::Floor($Milliseconds / 1000)))
+    $Interop::WriteIntPtr($sp, 3 * $p, [IntPtr](($Milliseconds % 1000) * 1000000))
+    [void]$script:Timer.Libc.SetTime.Invoke($script:Timer.Fd, 0, $sp, [IntPtr]::Zero)
+}
+function Start-LooperTimer { param([Parameter(Mandatory)][int] $Milliseconds) Set-TimerSpec $Milliseconds }
+function Stop-LooperTimer { if ($null -ne $script:Timer) { Set-TimerSpec 0 } }
+
+# --- 8. Input ---------------------------------------------------------------------------
 
 function Register-InputHandler {
     <#
@@ -658,6 +785,7 @@ function Register-InputHandler {
 }
 
 Export-ModuleMember -Function New-NativeFunction, Get-NativeExport, Write-AndroidLog, ConvertTo-ArgbColor,
-    Get-SystemBarInsets, Register-InputHandler, Request-WindowDraw,
+    Get-SystemBarInsets, Register-InputHandler, Request-WindowDraw, Set-AndroidClipboard, Get-AndroidClipboard,
+    Invoke-HapticFeedback, Register-LooperTimer, Start-LooperTimer, Stop-LooperTimer,
     Initialize-AndroidCanvas, Get-CanvasSize, Get-TextCell, Clear-Canvas, Add-CanvasRect, Add-CanvasText,
     Invoke-CanvasFrame, Register-WindowDrawHandler

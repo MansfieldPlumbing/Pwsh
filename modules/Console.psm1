@@ -377,6 +377,7 @@ class ConsoleEntry {
     [int] $Version = 1
     [int] $CachedCols = -1
     [System.Collections.Generic.List[ConsoleCell[]]] $CachedRows = $null
+    [System.Collections.Generic.List[int[]]] $CachedStarts = $null   # per wrapped row: logical line, first cell index
     ConsoleEntry([string] $stream) {
         $this.Stream = $stream
         $this.Lines = [System.Collections.Generic.List[System.Collections.Generic.List[ConsoleCell]]]::new()
@@ -399,6 +400,13 @@ class ConsoleModel {
     hidden [int] $HistoryIndex = -1
     hidden [string] $Saved = ''
     hidden [int] $ScrollOffset = 0
+    # Selection in logical positions (entry, line, cell), so it survives reflow.
+    hidden [int[]] $SelA = $null
+    hidden [int[]] $SelB = $null
+    hidden [bool] $SelLines = $false
+    # Per composed row: kind (0 transcript, 1 progress, 2 editor), entry, line, first cell; and the first visible row.
+    hidden [System.Collections.Generic.List[int[]]] $RowMeta = [System.Collections.Generic.List[int[]]]::new()
+    hidden [int] $ViewStart = 0
     static [ConsoleStyle] $Default = [ConsoleStyle]::new()
 
     ConsoleModel([int] $cols, [int] $rows) { $this.Cols = [Math]::Max(1, $cols); $this.Rows = [Math]::Max(1, $rows) }
@@ -519,33 +527,41 @@ class ConsoleModel {
     # Wraps one logical line at cols; a wide character that would start in the
     # last column moves to the next row, leaving that column empty.
     hidden [System.Collections.Generic.List[ConsoleCell[]]] Wrap([System.Collections.Generic.List[ConsoleCell]] $line, [int] $cols) {
+        return $this.Wrap($line, $cols, [System.Collections.Generic.List[int]]::new())
+    }
+    # $starts receives each wrapped row's first logical cell index.
+    hidden [System.Collections.Generic.List[ConsoleCell[]]] Wrap([System.Collections.Generic.List[ConsoleCell]] $line, [int] $cols, [System.Collections.Generic.List[int]] $starts) {
         $wrapped = [System.Collections.Generic.List[ConsoleCell[]]]::new()
         $row = [System.Collections.Generic.List[ConsoleCell]]::new()
         $empty = [ConsoleCell]::new(0, 1, [ConsoleModel]::Default)
-        $i = 0
+        $i = 0; $rowStart = 0
         while ($i -lt $line.Count) {
             $cell = if ($null -ne $line[$i]) { $line[$i] } else { $empty }
             if ($cell.Width -eq 2) {
-                if ($row.Count -eq $cols - 1) { $row.Add($empty); $wrapped.Add($row.ToArray()); $row.Clear() }
+                if ($row.Count -eq $cols - 1) { $row.Add($empty); $wrapped.Add($row.ToArray()); $starts.Add($rowStart); $row.Clear(); $rowStart = $i }
                 $row.Add($cell)
                 $next = if ($i + 1 -lt $line.Count -and $null -ne $line[$i + 1]) { $line[$i + 1] } else { [ConsoleCell]::new(0, 0, $cell.Style) }
                 $row.Add($next); $i += 2
             }
             else { $row.Add($cell); $i++ }
-            if ($row.Count -ge $cols) { $wrapped.Add($row.GetRange(0, $cols).ToArray()); $row.Clear() }
+            if ($row.Count -ge $cols) { $wrapped.Add($row.GetRange(0, $cols).ToArray()); $starts.Add($rowStart); $row.Clear(); $rowStart = $i }
         }
         if ($row.Count -gt 0 -or $wrapped.Count -eq 0) {
             while ($row.Count -lt $cols) { $row.Add($empty) }
-            $wrapped.Add($row.ToArray())
+            $wrapped.Add($row.ToArray()); $starts.Add($rowStart)
         }
         return $wrapped
     }
-
     hidden [System.Collections.Generic.List[ConsoleCell[]]] EntryRows([ConsoleEntry] $e, [int] $cols) {
         if ($e.CachedCols -eq $cols -and $null -ne $e.CachedRows) { return $e.CachedRows }
         $all = [System.Collections.Generic.List[ConsoleCell[]]]::new()
-        foreach ($line in $e.Lines) { $all.AddRange($this.Wrap($line, $cols)) }
-        $e.CachedCols = $cols; $e.CachedRows = $all
+        $meta = [System.Collections.Generic.List[int[]]]::new()
+        for ($li = 0; $li -lt $e.Lines.Count; $li++) {
+            $starts = [System.Collections.Generic.List[int]]::new()
+            $all.AddRange($this.Wrap($e.Lines[$li], $cols, $starts))
+            foreach ($st in $starts) { $meta.Add(@($li, $st)) }
+        }
+        $e.CachedCols = $cols; $e.CachedRows = $all; $e.CachedStarts = $meta
         return $all
     }
 
@@ -562,7 +578,11 @@ class ConsoleModel {
     [hashtable] Compose([int[]] $target) {
         $nc = $this.Cols; $nr = $this.Rows
         $all = [System.Collections.Generic.List[ConsoleCell[]]]::new()
-        foreach ($e in $this.Entries) { $all.AddRange($this.EntryRows($e, $nc)) }
+        $meta = [System.Collections.Generic.List[int[]]]::new()
+        for ($ei = 0; $ei -lt $this.Entries.Count; $ei++) {
+            $all.AddRange($this.EntryRows($this.Entries[$ei], $nc))
+            foreach ($m in $this.Entries[$ei].CachedStarts) { $meta.Add(@(0, $ei, $m[0], $m[1])) }
+        }
 
         # Progress rows: ConsoleHost ProgressForegroundColor Black, ProgressBackgroundColor Yellow.
         $ps = [ConsoleStyle]::new(0, 1, 11, 1, 0)
@@ -570,7 +590,7 @@ class ConsoleModel {
             $pl = [System.Collections.Generic.List[ConsoleCell]]::new()
             foreach ($r in ([string]$text).EnumerateRunes()) { $pl.Add([ConsoleCell]::new($r.Value, [ConsoleWidth]::Of($r.Value), $ps)) }
             while ($pl.Count -lt $nc) { $pl.Add([ConsoleCell]::new(0, 1, $ps)) }
-            $all.Add($pl.GetRange(0, $nc).ToArray())
+            $all.Add($pl.GetRange(0, $nc).ToArray()); $meta.Add(@(1, -1, -1, 0))
         }
 
         # Editor: prompt, a space, text before the caret, composition (inverse), the rest.
@@ -582,7 +602,8 @@ class ConsoleModel {
         if ($this.Composition.Length -gt 0) { $this.AddCells($el, [ConsoleModel]::Scalars($this.Composition), [ConsoleStyle]::new(0, 0, 0, 0, 8)) }
         $this.AddCells($el, $this.Editor.GetRange($this.Caret, $this.Editor.Count - $this.Caret).ToArray(), $d)
         $editorStart = $all.Count
-        $all.AddRange($this.Wrap($el, $nc))
+        $editorRows = $this.Wrap($el, $nc); $all.AddRange($editorRows)
+        foreach ($er2 in $editorRows) { $meta.Add(@(2, -1, -1, 0)) }
 
         $caretRow = $editorStart + [Math]::Floor($caretCell / $nc)
         $total = $all.Count
@@ -590,16 +611,78 @@ class ConsoleModel {
         $start = if ($total -le $nr) { 0 } else { $total - $nr - $scroll }
         $screenRow = $caretRow - $start
 
+        $this.RowMeta = $meta; $this.ViewStart = $start
         [Array]::Clear($target, 0, $target.Length)
         for ($y = 0; $y -lt $nr; $y++) {
             $li = $start + $y
             $rowCells = if ($li -ge 0 -and $li -lt $total) { $all[$li] } else { $null }
             for ($x = 0; $x -lt $nc; $x++) {
-                if ($null -ne $rowCells -and $x -lt $rowCells.Length) { $c = $rowCells[$x]; [ConsoleCells]::Put($target, $y * $nc + $x, $c.Scalar, $c.Width, $c.Style) }
+                if ($null -ne $rowCells -and $x -lt $rowCells.Length) {
+                    $c = $rowCells[$x]; $st = $c.Style
+                    if ($null -ne $this.SelA -and $meta[$li][0] -eq 0 -and $this.IsSelected($meta[$li][1], $meta[$li][2], $meta[$li][3] + $x)) { $st = $st.Clone(); $st.Attrs = $st.Attrs -bxor 8 }
+                    [ConsoleCells]::Put($target, $y * $nc + $x, $c.Scalar, $c.Width, $st)
+                }
                 else { [ConsoleCells]::Put($target, $y * $nc + $x, 0, 1, $d) }
             }
         }
         return @{ Col = $caretCell % $nc; Row = [Math]::Max(0, [Math]::Min($nr - 1, $screenRow)); Visible = ($screenRow -ge 0 -and $screenRow -lt $nr) }
+    }
+
+    # --- Selection -------------------------------------------------------------
+    static [int] ComparePosition([int[]] $a, [int[]] $b) {
+        for ($k = 0; $k -lt 3; $k++) { if ($a[$k] -ne $b[$k]) { return [Math]::Sign($a[$k] - $b[$k]) } }
+        return 0
+    }
+    hidden [object[]] Ordered() {
+        if ([ConsoleModel]::ComparePosition($this.SelA, $this.SelB) -le 0) { return @(, $this.SelA) + @(, $this.SelB) }
+        return @(, $this.SelB) + @(, $this.SelA)
+    }
+    [bool] IsSelected([int] $entry, [int] $line, [int] $cell) {
+        if ($null -eq $this.SelA) { return $false }
+        $o = $this.Ordered(); [int[]] $lo = $o[0]; [int[]] $hi = $o[1]
+        if ($this.SelLines) { [int[]] $p = @($entry, $line, 0); [int[]] $a = @($lo[0], $lo[1], 0); [int[]] $b = @($hi[0], $hi[1], 0) }
+        else { [int[]] $p = @($entry, $line, $cell); $a = $lo; $b = $hi }
+        return [ConsoleModel]::ComparePosition($p, $a) -ge 0 -and [ConsoleModel]::ComparePosition($p, $b) -le 0
+    }
+    # The logical position (entry, line, cell) under a visible cell, or $null outside the transcript.
+    [int[]] PositionAt([int] $row, [int] $col) {
+        $li = $this.ViewStart + $row
+        if ($row -lt 0 -or $li -ge $this.RowMeta.Count) { return $null }
+        $m = $this.RowMeta[$li]
+        if ($m[0] -ne 0) { return $null }
+        $cell = $m[3] + [Math]::Max(0, [Math]::Min($col, $this.Cols - 1))
+        return [int[]]@($m[1], $m[2], $cell)
+    }
+    # The kind of a visible row: 0 transcript, 1 progress, 2 editor, -1 none.
+    [int] RowKind([int] $row) { $li = $this.ViewStart + $row; if ($row -lt 0 -or $li -ge $this.RowMeta.Count) { return -1 }; return $this.RowMeta[$li][0] }
+    [void] SetSelection([int[]] $anchor, [int[]] $focus, [bool] $byLine) { $this.SelA = $anchor; $this.SelB = $focus; $this.SelLines = $byLine }
+    [void] ClearSelection() { $this.SelA = $null; $this.SelB = $null; $this.SelLines = $false }
+    [bool] HasSelection() { return $null -ne $this.SelA }
+    # The selected text: logical lines joined with LF, trailing blanks trimmed per line.
+    [string] SelectionText() {
+        if ($null -eq $this.SelA) { return '' }
+        $o = $this.Ordered(); [int[]] $lo = $o[0]; [int[]] $hi = $o[1]
+        $out = [System.Collections.Generic.List[string]]::new()
+        for ($e = $lo[0]; $e -le $hi[0]; $e++) {
+            $lines = $this.Entries[$e].Lines
+            $l0 = if ($e -eq $lo[0]) { $lo[1] } else { 0 }
+            $l1 = if ($e -eq $hi[0]) { $hi[1] } else { $lines.Count - 1 }
+            for ($l = $l0; $l -le $l1; $l++) {
+                $cells = $lines[$l]
+                $c0 = if (-not $this.SelLines -and $e -eq $lo[0] -and $l -eq $lo[1]) { $lo[2] } else { 0 }
+                $c1 = if (-not $this.SelLines -and $e -eq $hi[0] -and $l -eq $hi[1]) { $hi[2] } else { $cells.Count - 1 }
+                $sb = [System.Text.StringBuilder]::new()
+                for ($c = $c0; $c -le [Math]::Min($c1, $cells.Count - 1); $c++) {
+                    $cell = $cells[$c]
+                    if ($null -eq $cell) { [void]$sb.Append(' ') }
+                    elseif ($cell.Width -eq 0) { }
+                    elseif ($cell.Scalar -eq 0) { [void]$sb.Append(' ') }
+                    else { [void]$sb.Append([System.Text.Rune]::new($cell.Scalar).ToString()) }
+                }
+                $out.Add($sb.ToString().TrimEnd())
+            }
+        }
+        return [string]::Join("`n", $out)
     }
 
     [int] GetCols() { return $this.Cols }
