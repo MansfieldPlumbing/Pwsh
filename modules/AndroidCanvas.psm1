@@ -445,6 +445,14 @@ function Initialize-AndroidCanvas {
         MotionX = Get-NativeExport 'libandroid.so' 'AMotionEvent_getX' ([float]) @($I, $I)
         MotionY = Get-NativeExport 'libandroid.so' 'AMotionEvent_getY' ([float]) @($I, $I)
         PointerCount = Get-NativeExport 'libandroid.so' 'AMotionEvent_getPointerCount' $I @($I)
+        Source = Get-NativeExport 'libandroid.so' 'AInputEvent_getSource' ([int]) @($I)
+        DeviceId = Get-NativeExport 'libandroid.so' 'AInputEvent_getDeviceId' ([int]) @($I)
+        Buttons = Get-NativeExport 'libandroid.so' 'AMotionEvent_getButtonState' ([int]) @($I)
+        Axis = Get-NativeExport 'libandroid.so' 'AMotionEvent_getAxisValue' ([float]) @($I, [int], $I)
+        Classification = Get-NativeExport 'libandroid.so' 'AMotionEvent_getClassification' ([int]) @($I)
+        KeyMeta = Get-NativeExport 'libandroid.so' 'AKeyEvent_getMetaState' ([int]) @($I)
+        ShowSoftInput = Get-NativeExport 'libandroid.so' 'ANativeActivity_showSoftInput' ([void]) @($I, [int])
+        HideSoftInput = Get-NativeExport 'libandroid.so' 'ANativeActivity_hideSoftInput' ([void]) @($I, [int])
         KeyAction = Get-NativeExport 'libandroid.so' 'AKeyEvent_getAction' ([int]) @($I)
         KeyCode = Get-NativeExport 'libandroid.so' 'AKeyEvent_getKeyCode' ([int]) @($I)
     }
@@ -539,6 +547,7 @@ $script:AfterInput = $null
 $script:ClipIds = $null
 $script:HapticIds = @{}
 $script:Audio = $null
+$script:KeyIds = $null
 $script:Timer = $null
 $script:Draw = $null
 $script:Window = [IntPtr]::Zero
@@ -741,7 +750,7 @@ function Open-AudioOutput {
         waits and never stalls the main thread. Output needs no permission.
         Returns the stream's sample rate.
     #>
-    param([int] $CapacityFrames = 16384)
+    param([int] $CapacityFrames = 16384, [int] $Usage = 13)   # 13 ASSISTANCE_SONIFICATION, 14 GAME (media volume)
     $aa = @{}
     foreach ($e in @(
         @('CreateBuilder', 'AAudio_createStreamBuilder', [int], @($I)),
@@ -762,7 +771,7 @@ function Open-AudioOutput {
         if ($aa.CreateBuilder.Invoke($out) -ne 0) { throw 'AAudio_createStreamBuilder failed.' }
         $b = $Interop::ReadIntPtr($out, 0)
         $aa.SetFormat.Invoke($b, 2); $aa.SetChannels.Invoke($b, 1); $aa.SetPerformance.Invoke($b, 10)
-        $aa.SetUsage.Invoke($b, 13); $aa.SetCapacity.Invoke($b, $CapacityFrames)
+        $aa.SetUsage.Invoke($b, $Usage); $aa.SetCapacity.Invoke($b, $CapacityFrames)
         $rc = $aa.Open.Invoke($b, $out); [void]$aa.DeleteBuilder.Invoke($b)
         if ($rc -ne 0) { throw "AAudioStreamBuilder_openStream rc=$rc" }
         $stream = $Interop::ReadIntPtr($out, 0)
@@ -782,7 +791,27 @@ function Write-AudioOutput {
     finally { $handle.Free() }
 }
 
-# --- 9. Input ---------------------------------------------------------------------------
+# --- 9. Keyboard ------------------------------------------------------------------------
+
+function Get-KeyUnicode {
+    <# The character a key produces on its device's layout with the given meta state (KeyCharacterMap.load(deviceId).get(keyCode, metaState)), or 0. #>
+    param([int] $DeviceId, [int] $KeyCode, [int] $MetaState)
+    if ($null -eq $script:KeyIds) {
+        $c = Get-JavaClass 'android/view/KeyCharacterMap'
+        $script:KeyIds = @{ Class = $c; Load = Get-JavaMethod $c 'load' '(I)Landroid/view/KeyCharacterMap;' -Static; Get = Get-JavaMethod $c 'get' '(II)I'; Maps = @{} }
+    }
+    $k = $script:KeyIds
+    if (-not $k.Maps.ContainsKey($DeviceId)) {
+        $local = Invoke-JavaCall $script:Jni.CallStaticObjectMethodA $k.Class $k.Load @([int]$DeviceId)
+        $k.Maps[$DeviceId] = $script:Jni.NewGlobalRef.Invoke($script:JniEnv, $local); Remove-JavaLocalRef $local
+    }
+    [int](Invoke-JavaCall $script:Jni.CallIntMethodA $k.Maps[$DeviceId] $k.Get @([int]$KeyCode, [int]$MetaState))
+}
+
+function Show-SoftKeyboard { <# ANativeActivity_showSoftInput, SHOW_SOFT_INPUT_FORCED (2). #> $script:Input.ShowSoftInput.Invoke($script:Activity, 2) }
+function Hide-SoftKeyboard { <# ANativeActivity_hideSoftInput, flags 0. #> $script:Input.HideSoftInput.Invoke($script:Activity, 0) }
+
+# --- 10. Input --------------------------------------------------------------------------
 
 function Register-InputHandler {
     <#
@@ -811,11 +840,19 @@ function Register-InputHandler {
                         # Action carries the pointer index in bits 8-15 (AMOTION_EVENT_ACTION_POINTER_INDEX_MASK).
                         $count = [int]$in.PointerCount.Invoke($ev)
                         $m = @{ Type = 'motion'; Action = $in.MotionAction.Invoke($ev) -band 0xff; Pointers = $count
-                                X = $in.MotionX.Invoke($ev, [IntPtr]::Zero); Y = $in.MotionY.Invoke($ev, [IntPtr]::Zero) }
+                                X = $in.MotionX.Invoke($ev, [IntPtr]::Zero); Y = $in.MotionY.Invoke($ev, [IntPtr]::Zero)
+                                Source = $in.Source.Invoke($ev); Buttons = $in.Buttons.Invoke($ev); Classification = $in.Classification.Invoke($ev)
+                                # Axes (input.h): VSCROLL 9, GESTURE_SCROLL_Y_DISTANCE 51, GESTURE_PINCH_SCALE_FACTOR 52.
+                                VScroll = $in.Axis.Invoke($ev, 9, [IntPtr]::Zero); GestureScrollY = $in.Axis.Invoke($ev, 51, [IntPtr]::Zero)
+                                PinchScale = $in.Axis.Invoke($ev, 52, [IntPtr]::Zero) }
                         if ($count -ge 2) { $m.X2 = $in.MotionX.Invoke($ev, [IntPtr]1); $m.Y2 = $in.MotionY.Invoke($ev, [IntPtr]1) }
                         $m
                     }
-                    else { @{ Type = 'key'; Action = $in.KeyAction.Invoke($ev); KeyCode = $in.KeyCode.Invoke($ev) } }
+                    else {
+                        $code = $in.KeyCode.Invoke($ev); $meta = $in.KeyMeta.Invoke($ev)
+                        @{ Type = 'key'; Action = $in.KeyAction.Invoke($ev); KeyCode = $code; MetaState = $meta
+                           Unicode = Get-KeyUnicode $in.DeviceId.Invoke($ev) $code $meta }
+                    }
                     $handled = [bool](& $script:HandleInput $info)
                 }
                 catch { try { Write-AndroidLog ('AndroidCanvas input: ' + $_.Exception.Message + ' | at ' + (@(([string]$_.ScriptStackTrace) -split [char]10)[0..2] -join ' < ')) 6 } catch { } }
@@ -846,5 +883,6 @@ function Register-InputHandler {
 Export-ModuleMember -Function New-NativeFunction, Get-NativeExport, Write-AndroidLog, ConvertTo-ArgbColor,
     Get-SystemBarInsets, Register-InputHandler, Request-WindowDraw, Set-AndroidClipboard, Get-AndroidClipboard,
     Invoke-HapticFeedback, Register-LooperTimer, Start-LooperTimer, Stop-LooperTimer, Open-AudioOutput, Write-AudioOutput,
+    Show-SoftKeyboard, Hide-SoftKeyboard, Get-KeyUnicode,
     Initialize-AndroidCanvas, Get-CanvasSize, Get-TextCell, Clear-Canvas, Add-CanvasRect, Add-CanvasText,
     Invoke-CanvasFrame, Register-WindowDrawHandler
