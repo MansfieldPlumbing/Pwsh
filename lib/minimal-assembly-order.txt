@@ -79,10 +79,6 @@ System.Xml.XPath.dll
 System.Xml.XmlSerializer.dll
 System.dll
 netstandard.dll
-Java.Interop.dll
-Mono.Android.Runtime.dll
-Mono.Android.dll
-_Microsoft.Android.Resource.Designer.dll
 Microsoft.ApplicationInsights.dll
 Microsoft.Management.Infrastructure.dll
 Newtonsoft.Json.dll
@@ -92,5 +88,4 @@ System.Diagnostics.EventLog.dll
 System.Management.Automation.dll
 System.Security.Cryptography.Pkcs.dll
 System.Security.Cryptography.ProtectedData.dll
-Pwsh.dll
-Probe.dll
+Dev.MansfieldPlumbing.Pwsh.dll

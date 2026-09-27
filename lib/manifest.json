@@ -21,24 +21,6 @@
       "sha512": "D082333BBEC2332212815E4FF7DF741CF6E1F0DDD30BA98EDE51C8B3FA6854F70356F0116BF352D3C193792C93B825D50D70A495FFBB7B47FA7B479DF9F35A44"
     },
     {
-      "id": "Microsoft.Android.Runtime.CoreCLR.37.android-arm64",
-      "version": "37.0.0-rc.1.2257",
-      "rid": "android-arm64",
-      "sha512": "B32E0547D91D94361E712990B8818B0A16660F6DE3F9588668E2CDF1A06E46D94A1484FE547404C68EC111659F22FD4CC04E000666B0D37FEE27C75F54689684"
-    },
-    {
-      "id": "Microsoft.Android.Runtime.CoreCLR.37.android-x64",
-      "version": "37.0.0-rc.1.2257",
-      "rid": "android-x64",
-      "sha512": "A26954365A78FAC5CBAEC5CF487F4C0D944E13D0FDABA2CEA219EB9FC30594FD7FA0FB7D44B4530AD3EF3D92F75A6BEA57786A44804CEDE255FCEB658C645345"
-    },
-    {
-      "id": "Microsoft.Android.Runtime.CoreCLR.37.android-arm",
-      "version": "37.0.0-rc.1.2257",
-      "rid": "android-arm",
-      "sha512": "B5432BE2502C186B9D3F2F2EEF37F6619236C3F461001C65DF7E06A8E3EAF7BBFCAB2A27C7DE8EA0B19A67FF8A2B569BCE0E7F5D1AAF799AFBD403B9D2F304D3"
-    },
-    {
       "id": "Microsoft.Android.Runtime.37.android",
       "version": "37.0.0-rc.1.2257",
       "rid": null,
@@ -114,27 +96,15 @@
   "sources": [
     {
       "path": "minimal-assembly-order.txt",
-      "sha256": "75C97740B3A93C04636CB109D1C2990D0C123D290C9246BC43FF5F37EEF377CB",
+      "sha256": "C91B3EE51FD7000EE910AA65F350A889CD47BD3A15CC8693DC8DEF95A8A1C03D",
       "url": null,
-      "role": "Ordered 96-name minimal assembly payload. Architecture-neutral IL, used for every target."
+      "role": "Ordered 91-name minimal assembly payload. Architecture-neutral IL, used for every target."
     },
     {
       "path": "ic_launcher.png",
       "sha256": "5AB2CB3CA7AE6BFD5C584BE3B670199D1D3595717764FDD331EE51C302748E1E",
       "url": null,
       "role": "Launcher icon, 1024x1024 PNG. Packaged as res/mipmap/ic_launcher.png behind the emitted resources.arsc."
-    },
-    {
-      "path": "classes.dex",
-      "sha256": "FB7E9A0B251526164C630C2AFBED1C0CCF0AB0F9F5F9029FA1CB52D2F468E88B",
-      "url": null,
-      "role": "TRAINING WHEELS, to be removed. Produced by MSBuild from the reference csproj facade against the same pinned packs, so it is version-matched to the shipped runtime and reproducible locally, but it is still not emitted by setup.ps1. The replacement path is known and requires no build tool: Microsoft.Android.Sdk ships tools/java_runtime_clr.dex, 8728 bytes, already dexed, holding mono.android.Runtime, MonoPackageManager, GCUserPeer and IGCUserPeer. That plus an emitted mono.MonoRuntimeProvider and the peers setup.ps1 already emits replaces this 423KB artifact entirely."
-    },
-    {
-      "path": "AndroidManifest.xamarin.xml",
-      "sha256": "36DA5B3FB494DACC99B6433E7C47ACC0BC8AE047AC8F26C0B5A3826D13A9BA57",
-      "url": null,
-      "role": "Test fixture. The Xamarin-mode binary AndroidManifest.xml proven on hardware; -ValidateManifest requires the emitter to reproduce it byte for byte. Re-pin only as a deliberate manifest change."
     },
     {
       "path": "android-native-producer.contract.json",
@@ -249,18 +219,6 @@
       "sha256": "17D279CD45A6881E87EB1801E08D2D29BE200FF47811A1FF3168947CAD2029BD",
       "url": "https://raw.githubusercontent.com/facebook/zstd/073c7fb6eaf4d121d3757d83d2433d413fe789ef/lib/zstd.h",
       "role": "XAZS frame reference, retained for the optional compressed store phase."
-    },
-    {
-      "path": "ApplicationConfigCLR.cs",
-      "sha256": "A8407DDCDC70DE91804119160AAB787F15076C0B93755F1582AABDBFEC6FB380",
-      "url": "https://raw.githubusercontent.com/dotnet/android/8f7c4d4fa53c6682f2c4f2d2caf08e9fb4d8cd60/src/Xamarin.Android.Build.Tasks/Utilities/ApplicationConfigCLR.cs",
-      "role": "Upstream reference only. The C# mirror of the ApplicationConfig structure, whose field order and types must correspond exactly to xamarin-app.hh. Defines what setup.ps1 emits into libxamarin-app.so."
-    },
-    {
-      "path": "ApplicationConfigNativeAssemblyGeneratorCLR.cs",
-      "sha256": "77CA4A3F341CAE8C39835B1C7C3E668C119568031C6C80D72683DC6535BC3C6F",
-      "url": "https://raw.githubusercontent.com/dotnet/android/8f7c4d4fa53c6682f2c4f2d2caf08e9fb4d8cd60/src/Xamarin.Android.Build.Tasks/Utilities/ApplicationConfigNativeAssemblyGeneratorCLR.cs",
-      "role": "Upstream reference only. The generator that produces libxamarin-app.so for CoreCLR, and therefore the authoritative list of symbols it must export."
     },
     {
       "path": "AssemblyStoreBuilder.cs",

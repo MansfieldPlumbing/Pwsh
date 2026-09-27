@@ -84,9 +84,7 @@ Pwsh's performance comes from lowering, not from interpreting faster.
 - `setup.ps1` is the build. Its steps are nodes in `$script:StepGraph`.
 - `lib/` holds pinned inputs only. Every file is listed in `lib/manifest.json`
   with its SHA-256; `setup.ps1` holds only the manifest's digest.
-- `setup.ps1 -Debug` writes the intermediates and cross-checks against a .NET
-  for Android reference build made in a temporary folder. The reference build
-  is removed when `lib/classes.dex` is emitted.
+- `setup.ps1 -Debug` writes the intermediates (as `-KeepIntermediates`).
 - `docs/` holds forward-looking design, clearly separated from proofs.
 - Generated files live only in `build/` at the repository root, which git
   ignores: the signed APK, and the intermediates when `-KeepIntermediates`
@@ -158,8 +156,8 @@ only when that group's evidence exists. Name the source for every new fact.
   reproduce bytes proven on hardware. Do not make them agree as part of any
   other change.
 - The payload is the names in `lib/minimal-assembly-order.txt`, pinned
-  by digest; its length (96) is the assembly count every step checks.
-- With `-Admission NativeActivity`, `libpwsh-host.so` (x86-64, arm64, and arm32 in
+  by digest; its length (91) is the assembly count every step checks.
+- `libpwsh-host.so` (x86-64, arm64, and arm32 in
   Thumb-2)
   starts CoreCLR: `DT_NEEDED` libc, liblog, libcoreclr and the store library;
   three runtime properties as the pinned .NET for Android host sets them; an
@@ -217,8 +215,9 @@ only when that group's evidence exists. Name the source for every new fact.
   included) match the bytes LLVM 23.1.1's integrated assembler emits for the same
   instructions. `dumpbin` no longer supports ARM32, so `clang` is the diagnostic
   oracle here, kept out of tree and never used to produce output.
-- `-Debug` compares the emitted type-map name and `classes.dex` against a .NET
-  SDK reference build.
+- Until the .NET for Android path was removed (2026-09-26), `-Debug` compared
+  the emitted type-map name and `classes.dex` against a .NET SDK reference
+  build.
 
 ### Proven on a device or the emulator
 
@@ -298,6 +297,14 @@ only when that group's evidence exists. Name the source for every new fact.
   from 0.51-0.55 s to 0.97-1.03 s on the S23 and from 3.8-4.0 s to
   6.8-7.2 s on the onn; the JIT now compiles the CoreLib and `System.*` code
   that ran precompiled.
+- Without .NET for Android, 2026-09-26: the `-Admission Xamarin` path, the DEX
+  and `libxamarin-app` steps, type maps, the `-Debug` reference build,
+  `classes.dex`, and `Mono.Android`, `Mono.Android.Runtime`, `Java.Interop`,
+  the resource designer and `Probe.dll` are gone; the payload is 91
+  assemblies and the managed host assembly is `Dev.MansfieldPlumbing.Pwsh`.
+  The build emits the same manifest bytes as before. Gates 2a-2d pass on the
+  x86_64 emulator, the S23 and the onn 4K Plus with no crash for the process;
+  the arm64 APK is 16,547,569 bytes. CellCanvas does not run until gate 2e.
 - The current payload contains no cmdlet modules, so commands such as
   `Join-Path` and `Write-Error` are unavailable in this `CreateDefault2`
   runspace. Profile fixtures use the language and .NET only.

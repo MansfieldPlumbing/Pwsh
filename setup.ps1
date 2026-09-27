@@ -30,11 +30,6 @@ param(
     [ValidateSet('arm64', 'x64', 'arm32')]
     [string] $Architecture = 'arm64',
 
-    # Xamarin: the .NET for Android host (the proven build).
-    # NativeActivity: gate 1 of leaving it. The framework NativeActivity loads
-    # an emitted libpwsh-host.so that logs one line; no DEX, no runtime.
-    [ValidateSet('Xamarin', 'NativeActivity')]
-    [string] $Admission = 'Xamarin',
 
     # Validate the manifest emitter and reader only, then exit: no packages, no
     # store, no APK, and nothing written. -Aapt2Path additionally has an
@@ -81,7 +76,7 @@ param(
     # interactive menu offers the same choice.
     [switch] $DeletePackages,
 
-    # GNU-style spellings (--help, --step 11, --payload=standard). pwsh -File
+    # GNU-style spellings (--help, --step 9, --payload=standard). pwsh -File
     # already maps --name to -name; this catches them under & and dot-sourcing.
     [Parameter(ValueFromRemainingArguments)]
     [string[]] $LongArguments = @()
@@ -90,8 +85,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# -Debug: write the intermediates and cross-check against a .NET for Android
-# reference build.
+# -Debug: write the intermediates.
 $Debug = $PSBoundParameters.ContainsKey('Debug')
 
 for ($i = 0; $i -lt $LongArguments.Count; $i++) {
@@ -170,7 +164,7 @@ OPTIONS
   -c, -Console, -Headless   Run directly in non-TUI console mode.
   -Interactive              Require the interactive interface.
   -Step <n|a-b|a,b>         Run steps: 5, 1-5, 4-5, or 2,3. Each step runs the
-                            steps it depends on first, so -Step 11 is a full
+                            steps it depends on first, so -Step 9 is a full
                             build.
                               1  Verify pinned specifications against upstream
                               2  Acquire and hash the pinned NuGet packages
@@ -179,10 +173,8 @@ OPTIONS
                               5  Emit and verify the XABA assembly store
                               6  Wrap the store in an ELF64 library for the target
                               7  Emit the binary AndroidManifest.xml
-                              8  Emit the Java peer class as Dalvik bytecode
-                              9  Emit libxamarin-app.so, the app data library
-                             10  Assemble the unsigned APK archive
-                             11  Sign the APK with Signature Scheme v2
+                              8  Assemble the unsigned APK archive
+                              9  Sign the APK with Signature Scheme v2
   -OutputDirectory <path>   Where emitted artifacts are written.
   -SigningKeyPath <path>    The APK signing identity (.pfx). Reused across
                             builds; created there if missing.
@@ -211,19 +203,11 @@ OPTIONS
                             Target. arm64 for phones, x64 for the x86_64
                             emulator. arm32 for 32-bit ARMv7 devices.
   -ValidateManifest         Check the manifest emitter and reader in seconds:
-                            the Xamarin manifest against its pinned fixture,
-                            both manifests through the production reader and
+                            the manifest through the production reader and
                             resource-id check, and malformed-document controls.
                             Writes nothing. -Aapt2Path <aapt2.exe> adds an
                             independent parse (one temporary file, deleted).
-  -Admission <Xamarin|NativeActivity>
-                            Xamarin (default) builds the proven host.
-                            NativeActivity builds gate 1: a DEX-free APK whose
-                            emitted host library logs one line.
-  -Debug                    Write the intermediates and cross-check against a
-                            .NET for Android reference build (needs the .NET
-                            SDK with the Android workload; built in a temp
-                            folder that is deleted afterwards).
+  -Debug                    Write the intermediates (as -KeepIntermediates).
   -Payload <Minimal|Standard|SDK>
                             Minimal: the pinned assembly set, IL only, no
                             ReadyToRun (R2R) code. Standard: every runtime
@@ -243,16 +227,16 @@ EXAMPLES
   .\setup.ps1
   .\setup.ps1 -h
   .\setup.ps1 -c -Step 1
-  .\setup.ps1 -c -Step 11
+  .\setup.ps1 -c -Step 9
   .\setup.ps1 -c -Step 1-5
-  .\setup.ps1 -c -Step 11 -DeletePackages
+  .\setup.ps1 -c -Step 9 -DeletePackages
   .\setup.ps1 -Interactive
 
 EXECUTION CONTRACT
   With no mode switch, an attached interactive console opens the setup
   interface. Redirected and unattended sessions run headlessly. The same
   phase functions execute in both modes. Every switch also takes a GNU
-  spelling: --help, --console, --step 11, --payload=standard,
+  spelling: --help, --console, --step 9, --payload=standard,
   --delete-packages, --output-directory <path>, --signing-key-path <path>,
   --accept-write-plan.
 '@
@@ -285,7 +269,7 @@ function Test-InteractiveConsole {
 # Indexed by key, never by position: an OrderedDictionary indexed with an [int]
 # indexes by position instead of by key, which silently rewires every edge.
 # StepIds carries the order a hashtable does not guarantee.
-$script:StepIds = @(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+$script:StepIds = @(1, 2, 3, 4, 5, 6, 7, 8, 9)
 $script:StepGraph = @{
     1  = @{
         Key = 'Verify'; DependsOn = @()
@@ -330,25 +314,13 @@ $script:StepGraph = @{
         Action = { Invoke-ManifestStep }
     }
     8  = @{
-        Key = 'Dex'; DependsOn = @(7)
-        Title = 'Emit the Java peer class as Dalvik bytecode'
-        Caption = 'Checksum, SHA-1, and string ordering verified.'
-        Action = { Invoke-DexStep }
-    }
-    9  = @{
-        Key = 'AppData'; DependsOn = @(8)
-        Title = 'Emit libxamarin-app.so, the application data library'
-        Caption = 'application_config, the type map, and the runtime''s undefined symbols.'
-        Action = { Invoke-AppDataStep }
-    }
-    10 = @{
-        Key = 'Assemble'; DependsOn = @(9)
+        Key = 'Assemble'; DependsOn = @(7)
         Title = 'Assemble the unsigned APK archive'
         Caption = 'Every entry read back byte-identical by an independent reader.'
         Action = { Invoke-AssembleStep }
     }
-    11 = @{
-        Key = 'Sign'; DependsOn = @(10)
+    9  = @{
+        Key = 'Sign'; DependsOn = @(8)
         Title = 'Sign the APK with Signature Scheme v2'
         Caption = 'Signature re-verified against the recomputed content digest.'
         Action = { Invoke-SignStep }
@@ -497,7 +469,6 @@ function Resolve-WritePlan {
         'Package cache' = if ($Packages -eq 'Folder') { $script:CacheDirectory } else { 'none (packages stay in memory)' }
     }
     if ($Packages -eq 'Folder') { $plan['lib sources'] = Join-Path $script:CacheDirectory 'lib' }
-    if ($Debug) { $plan['Reference'] = (Join-Path ([System.IO.Path]::GetTempPath()) 'pwsh-reference-*') + ' (deleted after the check)' }
 
     foreach ($entry in @(
             @{ Name = 'APK'; Path = $script:ApkPath },
@@ -609,115 +580,6 @@ function Compare-RepositorySnapshot {
     $changed
 }
 
-function Invoke-ReferenceCrossCheck {
-    # -Debug only. Builds a minimal .NET for Android app with the .NET SDK in a
-    # temporary folder, then compares it with what this script derives: the
-    # Java peer package name and the pinned lib/classes.dex. The folder is
-    # deleted afterwards; the reference APK is kept with the intermediates.
-    $dotnet = Get-Command dotnet -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $dotnet) { throw '-Debug needs the .NET SDK (dotnet) with the Android workload for the reference build.' }
-
-    $root = Join-Path ([System.IO.Path]::GetTempPath()) ('pwsh-reference-' + [Guid]::NewGuid().ToString('N'))
-    $script:ApprovedWriteRoots.Add($root)
-    try {
-        $project = @'
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <TargetFramework>net11.0-android37.0</TargetFramework>
-    <OutputType>Exe</OutputType>
-    <RuntimeIdentifier>$(TargetRid)</RuntimeIdentifier>
-    <ApplicationId>dev.mansfieldplumbing.terminal.reference</ApplicationId>
-    <SupportedOSPlatformVersion>26</SupportedOSPlatformVersion>
-    <RunAOTCompilation>false</RunAOTCompilation>
-    <AndroidUseAssemblyStore>true</AndroidUseAssemblyStore>
-    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
-    <PublishReadyToRun>false</PublishReadyToRun>
-    <Optimize>true</Optimize>
-    <DebugSymbols>false</DebugSymbols>
-    <EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
-    <AndroidUseSharedRuntime>false</AndroidUseSharedRuntime>
-  </PropertyGroup>
-  <ItemGroup>
-    <Compile Include="ReferenceActivity.cs" />
-    <PackageReference Include="System.Management.Automation" Version="$(PowerShellPackageVersion)" />
-    <PackageReference Include="Microsoft.PowerShell.Commands.Management" Version="$(PowerShellPackageVersion)" />
-    <PackageReference Include="Microsoft.PowerShell.Commands.Utility" Version="$(PowerShellPackageVersion)" />
-    <PackageReference Include="Microsoft.PowerShell.Security" Version="$(PowerShellPackageVersion)" />
-    <TrimmerRootAssembly Include="System.Management.Automation" />
-    <TrimmerRootAssembly Include="Microsoft.PowerShell.Commands.Management" />
-    <TrimmerRootAssembly Include="Microsoft.PowerShell.Commands.Utility" />
-    <TrimmerRootAssembly Include="Microsoft.PowerShell.Security" />
-  </ItemGroup>
-</Project>
-'@
-        $activity = @'
-using Android.App;
-using Android.OS;
-
-namespace Terminal.ReferenceBuild;
-
-[Activity(Label = "Terminal Reference Build", MainLauncher = true, Exported = true)]
-public sealed class ReferenceActivity : Activity
-{
-    protected override void OnCreate(Bundle? state)
-    {
-        base.OnCreate(state);
-    }
-}
-'@
-        $utf8 = [System.Text.UTF8Encoding]::new($false)
-        $projectPath = Join-Path $root 'Terminal.Reference.csproj'
-        Write-BuildFile -Path $projectPath -Bytes $utf8.GetBytes($project)
-        Write-BuildFile -Path (Join-Path $root 'ReferenceActivity.cs') -Bytes $utf8.GetBytes($activity)
-
-        $sma = @(Get-Variable -Name PackageManifest -Scope Script -ValueOnly -ErrorAction Ignore | Where-Object Id -eq 'System.Management.Automation')
-        if ($sma.Count -eq 0) { throw '-Debug needs step 2 or later so the PowerShell version is resolved.' }
-        $powerShellVersion = $sma[0].Version
-        Write-Host ('[ .. ] Reference build (dotnet publish, PowerShell {0}) in {1}' -f $powerShellVersion, $root) -ForegroundColor DarkCyan
-        & $dotnet.Source publish $projectPath -c Release -r $script:Target.Rid -nologo "-p:TargetRid=$($script:Target.Rid)" `
-            "-p:PowerShellPackageVersion=$powerShellVersion" `
-            "-p:BaseOutputPath=$root\bin\" "-p:BaseIntermediateOutputPath=$root\obj\" | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Reference build failed (dotnet exit code $LASTEXITCODE)." }
-
-        # Java peer package name.
-        $map = Get-ChildItem -LiteralPath (Join-Path $root 'obj') -Recurse -Filter 'acw-map.txt' | Select-Object -First 1
-        if (-not $map) { throw 'Reference build produced no acw-map.txt.' }
-        $line = Select-String -LiteralPath $map.FullName -Pattern '^Terminal\.ReferenceBuild\.ReferenceActivity[^;]*;(crc64[0-9a-f]+)\.' | Select-Object -First 1
-        if (-not $line) { throw 'acw-map.txt does not map Terminal.ReferenceBuild.ReferenceActivity.' }
-        $expected = $line.Matches[0].Groups[1].Value
-        $derived = Get-JavaPeerPackage -Namespace 'Terminal.ReferenceBuild' -AssemblyName 'Terminal.Reference'
-        if ($derived -cne $expected) { throw "Java peer naming differs: reference $expected, derived $derived." }
-        Write-Host ('[PASS] Reference Java peer package matches: {0}' -f $expected) -ForegroundColor Green
-
-        # classes.dex against the pinned copy.
-        $apk = Get-ChildItem -LiteralPath (Join-Path $root 'bin') -Recurse -Filter '*-Signed.apk' | Select-Object -First 1
-        if (-not $apk) { throw 'Reference build produced no signed APK.' }
-        $apkStream = [System.IO.File]::OpenRead($apk.FullName)
-        $archive = [System.IO.Compression.ZipArchive]::new($apkStream, [System.IO.Compression.ZipArchiveMode]::Read, $false)
-        try {
-            $entry = $archive.GetEntry('classes.dex')
-            $buffer = [System.IO.MemoryStream]::new()
-            $source = $entry.Open(); try { $source.CopyTo($buffer) } finally { $source.Dispose() }
-            $referenceDex = $buffer.ToArray()
-        }
-        finally { $archive.Dispose() }
-        $referenceHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($referenceDex))
-        $pinnedHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData([byte[]](Import-LibSourceBytes -Path 'classes.dex')))
-        if ($referenceHash -ceq $pinnedHash) {
-            Write-Host ('[PASS] Reference classes.dex matches the pinned lib/classes.dex: {0}' -f $referenceHash) -ForegroundColor Green
-        }
-        else {
-            Write-Host ('[WARN] Reference classes.dex {0} differs from the pinned lib/classes.dex {1}.' -f $referenceHash, $pinnedHash) -ForegroundColor Yellow
-        }
-
-        Write-BuildFile -Intermediate -Path (Join-Path (Join-Path $OutputDirectory 'reference') $apk.Name) -Bytes ([System.IO.File]::ReadAllBytes($apk.FullName))
-    }
-    finally {
-        if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
-        [void]$script:ApprovedWriteRoots.Remove($root)
-    }
-}
-
 function Show-WrittenFiles {
     if ($script:WrittenFiles.Count -eq 0) { Write-Host 'Files written: none.'; return }
     Write-Host ('Files written: {0}' -f $script:WrittenFiles.Count)
@@ -742,7 +604,7 @@ $script:KeepPackageCache = -not $DeletePackages -and $Packages -eq 'Folder'
 # any of them fails verification before a single byte is parsed.
 $script:RepositoryLibBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/27fbeff8b1add634ec76a62074d5fbd18a9a9591/lib/'
 $script:LibRootManifestPath = 'manifest.json'
-$script:LibRootManifestSha256 = '6935434D62D096F1F465C1A3D4855D064ECC200F7FBABC0AA72D22C6A5B97590'
+$script:LibRootManifestSha256 = 'DFF9A7F419A0CFA56A6CFF632687527879A8B1A7E907E8816D58FFE89A62A945'
 $script:LibSourceManifest = $null
 
 function Get-LibFileBytes {
@@ -1096,9 +958,6 @@ function Get-MinimalAssemblyManifest {
         if (-not $trimmed.EndsWith('.dll', [StringComparison]::Ordinal)) {
             throw "The minimal assembly order contains a non-assembly entry: '$trimmed'."
         }
-        # The pinned list names the managed assembly 'Pwsh.dll'; translate that
-        # slot to the admission's assembly name.
-        if ($trimmed -ceq "$($script:AssemblyName).dll") { $trimmed = "$(Get-ManagedAssemblyName).dll" }
         $names.Add($trimmed)
     }
 
@@ -1149,7 +1008,6 @@ function Invoke-VerifyStep {
             $pin.path, $remoteBytes.Length, $remoteHash) -ForegroundColor Green
     }
 
-    Test-JavaPeerNaming
     $attributeCount = Test-AndroidAttributeIds
     $names = Get-MinimalAssemblyManifest
     $contract = Get-AndroidNativeContract
@@ -1170,34 +1028,18 @@ $script:BuildContext = [ordered]@{
     StoreLibrary     = $null
     PslNative        = $null
     AndroidManifest  = $null
-    PeerDex          = $null
     UnsignedApk      = $null
     SignedApk        = $null
-    XamarinApp       = $null
 }
 
-# Application identity. The activity class is the type emitted into Pwsh.dll.
+# Application identity.
 $script:PackageName = 'dev.mansfieldplumbing.pwsh'
 $script:ActivityClassName = 'MainActivity'
 $script:ApplicationLabel = 'Pwsh'
 $script:ResourceChunkConstants = $null
 
-# The Java peer class Android instantiates for the activity. Derived, not
-# chosen: the package is a hash of the managed identity.
-$script:AssemblyName = 'Pwsh'
+# The managed host assembly and its namespace share the package's name.
 $script:ManagedNamespace = 'Dev.MansfieldPlumbing.Pwsh'
-
-function Get-ManagedAssemblyName {
-    # NativeActivity names the managed assembly after the package. The Xamarin
-    # path keeps 'Pwsh' until it is deleted: its Java peer name, pinned in
-    # lib/classes.dex and checked by step 1, is derived from that identity.
-    if ($Admission -eq 'NativeActivity') { $script:ManagedNamespace } else { $script:AssemblyName }
-}
-
-# When an activity declares an explicit Name, .NET Android emits the Java peer
-# under that exact name instead of a crc64 package. The manifest, the peer in
-# classes2.dex, and the ActivityAttribute must all agree on this one string.
-$script:JavaPeerName = 'dev.mansfieldplumbing.pwsh.MainActivity'
 
 function Get-Sha256Hex {
     param([Parameter(Mandatory)][System.IO.Stream] $Stream)
@@ -1741,28 +1583,6 @@ function Set-DeterministicMvid {
     return ,$result
 }
 
-function New-EmptyManagedAssemblyBytes {
-    param(
-        [Parameter(Mandatory)][string] $AssemblyName,
-        [Parameter(Mandatory)][string] $TypeName
-    )
-
-    $identity = [Reflection.AssemblyName]::new($AssemblyName)
-    $builder = [Reflection.Emit.PersistedAssemblyBuilder]::new($identity, [object].Assembly)
-    $module = $builder.DefineDynamicModule("$AssemblyName.dll")
-    $type = $module.DefineType($TypeName, [Reflection.TypeAttributes]'Public,Class,Sealed')
-    $type.DefineDefaultConstructor([Reflection.MethodAttributes]'Public') | Out-Null
-    $type.CreateType() | Out-Null
-    $stream = [IO.MemoryStream]::new()
-    try {
-        $builder.Save($stream)
-        return ,(Set-DeterministicMvid -Assembly $stream.ToArray())
-    }
-    finally {
-        $stream.Dispose()
-    }
-}
-
 # Methods compiled from expression trees during this build.
 $script:PersistedMethods = [System.Collections.Generic.List[object]]::new()
 
@@ -1776,14 +1596,9 @@ $script:PersistedMethods = [System.Collections.Generic.List[object]]::new()
 # Ported from the pre-migration tree, where this produced the whole recovery
 # screen as roughly thirty compiled methods.
 # ==============================================================================
-$script:AndroidAssembly = $null
 $script:ExpressionFactories = $null
 
 function Initialize-ExpressionKit {
-    param([Parameter(Mandatory)][Reflection.Assembly] $AndroidAssembly)
-
-    $script:AndroidAssembly = $AndroidAssembly
-
     # Expression.New/Call/Block/Lambda/Invoke are heavily overloaded. Bind the
     # exact overload once by signature rather than letting PowerShell's method
     # resolution pick per call site.
@@ -1805,14 +1620,6 @@ function Initialize-ExpressionKit {
         }
     }
     $script:ExpressionFactories = $factories
-}
-
-function Get-AndroidType {
-    param([Parameter(Mandatory)][string] $Name)
-
-    $type = $script:AndroidAssembly.GetType($Name, $false)
-    if ($null -eq $type) { throw "Android type not found: $Name" }
-    $type
 }
 
 # Exact member binding. Every lookup names the full signature and throws with it
@@ -2164,464 +1971,6 @@ function New-ReturnBlock {
     [Linq.Expressions.Expression]::Block($Type, [Linq.Expressions.Expression[]]$Expressions)
 }
 
-function New-HomePath([Linq.Expressions.Expression] $Path, [Reflection.MethodInfo] $Concat, [Reflection.MethodInfo] $GetFileName) {
-    # HOME/<file name>: the form the recovery screen shows for a path.
-    New-StaticCall $Concat @((New-ClrConstant 'HOME/' ([string])), (New-StaticCall $GetFileName @($Path)))
-}
-
-function Add-AndroidHostDeclarations {
-    # Resolves the Android and runtime members the host methods bind to, and declares the RecoveryProgram type and its static fields.
-    # Part of New-AndroidHostTypes; the statements keep their emission order.
-    param([Parameter(Mandatory)][hashtable] $State)
-
-    $Android = $State['Android']
-    $Main = $State['Main']
-    $Module = $State['Module']
-
-    Initialize-ExpressionKit -AndroidAssembly $Android
-
-
-    $activityType = Get-AndroidType 'Android.App.Activity'
-    $buttonType = Get-AndroidType 'Android.Widget.Button'
-    $clipDataType = Get-AndroidType 'Android.Content.ClipData'
-    $clipboardManagerType = Get-AndroidType 'Android.Content.ClipboardManager'
-    $complexUnitType = Get-AndroidType 'Android.Util.ComplexUnitType'
-    $contextType = Get-AndroidType 'Android.Content.Context'
-    $displayMetricsType = Get-AndroidType 'Android.Util.DisplayMetrics'
-    $intentType = Get-AndroidType 'Android.Content.Intent'
-    $javaFileType = Get-AndroidType 'Java.IO.File'
-    $javaObjectType = Get-AndroidType 'Java.Lang.Object'
-    $linearLayoutType = Get-AndroidType 'Android.Widget.LinearLayout'
-    $layoutParamsType = Get-AndroidType 'Android.Widget.LinearLayout+LayoutParams'
-    $orientationType = Get-AndroidType 'Android.Widget.Orientation'
-    $resourcesType = Get-AndroidType 'Android.Content.Res.Resources'
-    $scrollViewType = Get-AndroidType 'Android.Widget.ScrollView'
-    $textViewType = Get-AndroidType 'Android.Widget.TextView'
-    $typedValueType = Get-AndroidType 'Android.Util.TypedValue'
-    $viewType = Get-AndroidType 'Android.Views.View'
-    $viewGroupLayoutParamsType = Get-AndroidType 'Android.Views.ViewGroup+LayoutParams'
-    $colorType = Get-AndroidType 'Android.Graphics.Color'
-
-    $eventHandlerType = [EventHandler]
-
-    $linearLayoutConstructor = Get-ExactConstructor $linearLayoutType @($contextType)
-    $textViewConstructor = Get-ExactConstructor $textViewType @($contextType)
-    $scrollViewConstructor = Get-ExactConstructor $scrollViewType @($contextType)
-    $buttonConstructor = Get-ExactConstructor $buttonType @($contextType)
-    $layoutParamsConstructor = Get-ExactConstructor $layoutParamsType @([int], [int], [single])
-    $buttonLayoutParamsConstructor = Get-ExactConstructor $layoutParamsType @([int], [int])
-    $intentConstructor = Get-ExactConstructor $intentType @([string])
-
-    $orientationProperty = Get-ExactProperty $linearLayoutType 'Orientation'
-    $textViewTextProperty = Get-ExactProperty $textViewType 'Text'
-    $buttonTextProperty = Get-ExactProperty $buttonType 'Text'
-    $topMarginProperty = Get-ExactProperty $layoutParamsType 'TopMargin'
-    $bottomMarginProperty = Get-ExactProperty $layoutParamsType 'BottomMargin'
-    $filesDirProperty = Get-ExactProperty $contextType 'FilesDir'
-    $absolutePathProperty = Get-ExactProperty $javaFileType 'AbsolutePath'
-    $resourcesProperty = Get-ExactProperty $contextType 'Resources'
-    $displayMetricsProperty = Get-ExactProperty $resourcesType 'DisplayMetrics'
-    $primaryClipProperty = Get-ExactProperty $clipboardManagerType 'PrimaryClip'
-    $actionOpenDocumentField = $intentType.GetField('ActionOpenDocument', [Reflection.BindingFlags]'Public,Static')
-    $categoryOpenableField = $intentType.GetField('CategoryOpenable', [Reflection.BindingFlags]'Public,Static')
-    $whiteProperty = Get-ExactProperty $colorType 'White' ([Reflection.BindingFlags]'Public,Static')
-    $matchParentField = $viewGroupLayoutParamsType.GetField('MatchParent', [Reflection.BindingFlags]'Public,Static')
-    $wrapContentField = $viewGroupLayoutParamsType.GetField('WrapContent', [Reflection.BindingFlags]'Public,Static')
-    if ($null -eq $actionOpenDocumentField -or $null -eq $categoryOpenableField -or
-        $null -eq $matchParentField -or $null -eq $wrapContentField) {
-        throw 'Required Android constant fields were not found.'
-    }
-
-    $setBackgroundColor = Get-ExactMethod $viewType 'SetBackgroundColor' @($colorType)
-    $setPadding = Get-ExactMethod $viewType 'SetPadding' @([int], [int], [int], [int])
-    $setTextColor = Get-ExactMethod $textViewType 'SetTextColor' @($colorType)
-    $setTextSize = Get-ExactMethod $textViewType 'SetTextSize' @($complexUnitType, [single])
-    $setTextIsSelectable = Get-ExactMethod $textViewType 'SetTextIsSelectable' @([bool])
-    $addView = Get-ExactMethod $linearLayoutType 'AddView' @($viewType)
-    $addViewWithParams = Get-ExactMethod $linearLayoutType 'AddView' @($viewType, $viewGroupLayoutParamsType)
-    $scrollAddView = Get-ExactMethod $scrollViewType 'AddView' @($viewType)
-    $buttonAddClick = Get-ExactMethod $buttonType 'add_Click' @($eventHandlerType)
-    $rgb = Get-ExactMethod $colorType 'Rgb' @([int], [int], [int]) ([Reflection.BindingFlags]'Public,Static')
-    $applyDimension = Get-ExactMethod $typedValueType 'ApplyDimension' @($complexUnitType, [single], $displayMetricsType) ([Reflection.BindingFlags]'Public,Static')
-    $setContentView = Get-ExactMethod $activityType 'SetContentView' @($viewType)
-    $getSystemService = Get-ExactMethod $contextType 'GetSystemService' @([string])
-    $newPlainText = Get-ExactMethod $clipDataType 'NewPlainText' @([string], [string]) ([Reflection.BindingFlags]'Public,Static')
-    $addCategory = Get-ExactMethod $intentType 'AddCategory' @([string])
-    $setType = Get-ExactMethod $intentType 'SetType' @([string])
-    $startActivityForResult = Get-ExactMethod $activityType 'StartActivityForResult' @($intentType, [int])
-    $pathCombine = Get-ExactMethod ([IO.Path]) 'Combine' @([string], [string]) ([Reflection.BindingFlags]'Public,Static')
-    $readAllText = Get-ExactMethod ([IO.File]) 'ReadAllText' @([string]) ([Reflection.BindingFlags]'Public,Static')
-    $getFileSystemEntries = Get-ExactMethod ([IO.Directory]) 'GetFileSystemEntries' @([string]) ([Reflection.BindingFlags]'Public,Static')
-    $stringConcat3 = Get-ExactMethod ([string]) 'Concat' @([string], [string], [string]) ([Reflection.BindingFlags]'Public,Static')
-
-    $stringBuilderType = [Text.StringBuilder]
-    $stringBuilderConstructor = Get-ExactConstructor $stringBuilderType @()
-    $appendString = Get-ExactMethod $stringBuilderType 'Append' @([string])
-    $appendLineString = Get-ExactMethod $stringBuilderType 'AppendLine' @([string])
-    $builderToString = Get-ExactMethod $stringBuilderType 'ToString' @()
-    $currentDomainProperty = Get-ExactProperty ([AppDomain]) 'CurrentDomain' ([Reflection.BindingFlags]'Public,Static')
-    $getAssemblies = Get-ExactMethod ([AppDomain]) 'GetAssemblies' @()
-    $assemblyFullNameProperty = Get-ExactProperty ([Reflection.Assembly]) 'FullName'
-    $assemblyLocationProperty = Get-ExactProperty ([Reflection.Assembly]) 'Location'
-    $packageNameProperty = Get-ExactProperty $contextType 'PackageName'
-    $manufacturerProperty = Get-ExactProperty (Get-AndroidType 'Android.OS.Build') 'Manufacturer' ([Reflection.BindingFlags]'Public,Static')
-    $modelProperty = Get-ExactProperty (Get-AndroidType 'Android.OS.Build') 'Model' ([Reflection.BindingFlags]'Public,Static')
-    $androidReleaseProperty = Get-ExactProperty (Get-AndroidType 'Android.OS.Build+VERSION') 'Release' ([Reflection.BindingFlags]'Public,Static')
-    $androidSdkProperty = Get-ExactProperty (Get-AndroidType 'Android.OS.Build+VERSION') 'SdkInt' ([Reflection.BindingFlags]'Public,Static')
-    $supportedAbisProperty = Get-ExactProperty (Get-AndroidType 'Android.OS.Build') 'SupportedAbis' ([Reflection.BindingFlags]'Public,Static')
-    $frameworkDescriptionProperty = Get-ExactProperty ([Runtime.InteropServices.RuntimeInformation]) 'FrameworkDescription' ([Reflection.BindingFlags]'Public,Static')
-    $processArchitectureProperty = Get-ExactProperty ([Runtime.InteropServices.RuntimeInformation]) 'ProcessArchitecture' ([Reflection.BindingFlags]'Public,Static')
-    $osArchitectureProperty = Get-ExactProperty ([Runtime.InteropServices.RuntimeInformation]) 'OSArchitecture' ([Reflection.BindingFlags]'Public,Static')
-    $joinStrings = Get-ExactMethod ([string]) 'Join' @(
-        [string], [Collections.Generic.IEnumerable[string]]) ([Reflection.BindingFlags]'Public,Static')
-
-    $programType = $Module.DefineType(
-        'Dev.MansfieldPlumbing.Pwsh.RecoveryProgram',
-        [Reflection.TypeAttributes]'Public,Abstract,Sealed,BeforeFieldInit')
-    $mainType = $Main
-    $runspaceType = [Management.Automation.Runspaces.Runspace]
-    $runspaceField = $programType.DefineField(
-        's_runspace', $runspaceType,
-        [Reflection.FieldAttributes]'Private,Static')
-    $powerShellLoadContextInitializedField = $programType.DefineField(
-        's_powerShellLoadContextInitialized', [bool],
-        [Reflection.FieldAttributes]'Private,Static')
-    $animationCallbackField = $programType.DefineField(
-        's_animationCallback', [Action],
-        [Reflection.FieldAttributes]'Private,Static')
-
-    $emitted = [Collections.Generic.List[object]]::new()
-    $publicStatic = [Reflection.MethodAttributes]'Public,Static,HideBySig'
-    $privateStatic = [Reflection.MethodAttributes]'Private,Static,HideBySig'
-
-    $State['absolutePathProperty'] = $absolutePathProperty
-    $State['actionOpenDocumentField'] = $actionOpenDocumentField
-    $State['activityType'] = $activityType
-    $State['addCategory'] = $addCategory
-    $State['addView'] = $addView
-    $State['addViewWithParams'] = $addViewWithParams
-    $State['androidReleaseProperty'] = $androidReleaseProperty
-    $State['androidSdkProperty'] = $androidSdkProperty
-    $State['animationCallbackField'] = $animationCallbackField
-    $State['applyDimension'] = $applyDimension
-    $State['assemblyFullNameProperty'] = $assemblyFullNameProperty
-    $State['bottomMarginProperty'] = $bottomMarginProperty
-    $State['buttonAddClick'] = $buttonAddClick
-    $State['buttonConstructor'] = $buttonConstructor
-    $State['buttonLayoutParamsConstructor'] = $buttonLayoutParamsConstructor
-    $State['buttonTextProperty'] = $buttonTextProperty
-    $State['buttonType'] = $buttonType
-    $State['categoryOpenableField'] = $categoryOpenableField
-    $State['clipboardManagerType'] = $clipboardManagerType
-    $State['complexUnitType'] = $complexUnitType
-    $State['contextType'] = $contextType
-    $State['displayMetricsProperty'] = $displayMetricsProperty
-    $State['emitted'] = $emitted
-    $State['filesDirProperty'] = $filesDirProperty
-    $State['frameworkDescriptionProperty'] = $frameworkDescriptionProperty
-    $State['getFileSystemEntries'] = $getFileSystemEntries
-    $State['getSystemService'] = $getSystemService
-    $State['intentConstructor'] = $intentConstructor
-    $State['intentType'] = $intentType
-    $State['layoutParamsConstructor'] = $layoutParamsConstructor
-    $State['layoutParamsType'] = $layoutParamsType
-    $State['linearLayoutConstructor'] = $linearLayoutConstructor
-    $State['linearLayoutType'] = $linearLayoutType
-    $State['mainType'] = $mainType
-    $State['manufacturerProperty'] = $manufacturerProperty
-    $State['matchParentField'] = $matchParentField
-    $State['modelProperty'] = $modelProperty
-    $State['newPlainText'] = $newPlainText
-    $State['orientationProperty'] = $orientationProperty
-    $State['orientationType'] = $orientationType
-    $State['packageNameProperty'] = $packageNameProperty
-    $State['pathCombine'] = $pathCombine
-    $State['powerShellLoadContextInitializedField'] = $powerShellLoadContextInitializedField
-    $State['primaryClipProperty'] = $primaryClipProperty
-    $State['privateStatic'] = $privateStatic
-    $State['programType'] = $programType
-    $State['publicStatic'] = $publicStatic
-    $State['readAllText'] = $readAllText
-    $State['resourcesProperty'] = $resourcesProperty
-    $State['rgb'] = $rgb
-    $State['runspaceField'] = $runspaceField
-    $State['runspaceType'] = $runspaceType
-    $State['scrollAddView'] = $scrollAddView
-    $State['scrollViewConstructor'] = $scrollViewConstructor
-    $State['scrollViewType'] = $scrollViewType
-    $State['setBackgroundColor'] = $setBackgroundColor
-    $State['setContentView'] = $setContentView
-    $State['setPadding'] = $setPadding
-    $State['setTextColor'] = $setTextColor
-    $State['setTextIsSelectable'] = $setTextIsSelectable
-    $State['setTextSize'] = $setTextSize
-    $State['setType'] = $setType
-    $State['startActivityForResult'] = $startActivityForResult
-    $State['textViewConstructor'] = $textViewConstructor
-    $State['textViewTextProperty'] = $textViewTextProperty
-    $State['textViewType'] = $textViewType
-    $State['topMarginProperty'] = $topMarginProperty
-    $State['viewType'] = $viewType
-    $State['whiteProperty'] = $whiteProperty
-    $State['wrapContentField'] = $wrapContentField
-}
-
-function Add-RecoveryScreenMethods {
-    # The recovery screen: layout factories and ShowRecovery.
-    # Part of New-AndroidHostTypes; the statements keep their emission order.
-    param([Parameter(Mandatory)][hashtable] $State)
-
-    $activityType = $State['activityType']
-    $addView = $State['addView']
-    $addViewWithParams = $State['addViewWithParams']
-    $applyDimension = $State['applyDimension']
-    $bottomMarginProperty = $State['bottomMarginProperty']
-    $buttonAddClick = $State['buttonAddClick']
-    $buttonConstructor = $State['buttonConstructor']
-    $buttonLayoutParamsConstructor = $State['buttonLayoutParamsConstructor']
-    $buttonTextProperty = $State['buttonTextProperty']
-    $buttonType = $State['buttonType']
-    $complexUnitType = $State['complexUnitType']
-    $displayMetricsProperty = $State['displayMetricsProperty']
-    $layoutParamsConstructor = $State['layoutParamsConstructor']
-    $layoutParamsType = $State['layoutParamsType']
-    $linearLayoutConstructor = $State['linearLayoutConstructor']
-    $linearLayoutType = $State['linearLayoutType']
-    $matchParentField = $State['matchParentField']
-    $orientationProperty = $State['orientationProperty']
-    $orientationType = $State['orientationType']
-    $privateStatic = $State['privateStatic']
-    $programType = $State['programType']
-    $publicStatic = $State['publicStatic']
-    $resourcesProperty = $State['resourcesProperty']
-    $rgb = $State['rgb']
-    $scrollAddView = $State['scrollAddView']
-    $scrollViewConstructor = $State['scrollViewConstructor']
-    $scrollViewType = $State['scrollViewType']
-    $setBackgroundColor = $State['setBackgroundColor']
-    $setContentView = $State['setContentView']
-    $setPadding = $State['setPadding']
-    $setTextColor = $State['setTextColor']
-    $setTextIsSelectable = $State['setTextIsSelectable']
-    $setTextSize = $State['setTextSize']
-    $textViewConstructor = $State['textViewConstructor']
-    $textViewTextProperty = $State['textViewTextProperty']
-    $textViewType = $State['textViewType']
-    $topMarginProperty = $State['topMarginProperty']
-    $viewType = $State['viewType']
-    $whiteProperty = $State['whiteProperty']
-    $wrapContentField = $State['wrapContentField']
-
-    # Small factories keep every persisted method closure-free.
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $v = [Linq.Expressions.Expression]::Parameter([int], 'value')
-    $dpBody = [Linq.Expressions.Expression]::Convert(
-        (New-ClrCall $null $applyDimension @(
-            (New-ClrConstant ([Enum]::Parse($complexUnitType, 'Dip')) $complexUnitType),
-            ([Linq.Expressions.Expression]::Convert($v, [single])),
-            (New-ClrProperty (New-ClrProperty $a $resourcesProperty) $displayMetricsProperty))),
-        [int])
-    $dpMethod = Add-PersistedMethod $programType 'Dp' $privateStatic ([int]) @($activityType, [int]) `
-        ([Func``3].MakeGenericType($activityType, [int], [int])) @($a, $v) $dpBody
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $parameters = [Linq.Expressions.Expression]::Parameter($layoutParamsType, 'parameters')
-    $margin = New-StaticCall $dpMethod @($a, (New-ClrConstant 8 ([int])))
-    $buttonParamsBody = New-ReturnBlock $layoutParamsType @(
-        (New-ClrAssign (New-ClrProperty $parameters $topMarginProperty) $margin),
-        $parameters)
-    $buttonParamsMethod = Add-PersistedMethod $programType 'ConfigureButtonParameters' $privateStatic $layoutParamsType `
-        @($activityType, $layoutParamsType) `
-        ([Func``3].MakeGenericType($activityType, $layoutParamsType, $layoutParamsType)) `
-        @($a, $parameters) $buttonParamsBody
-
-    $typeGetType = Get-ExactMethod ([Type]) 'GetType' @([string], [bool]) ([Reflection.BindingFlags]'Public,Static')
-    $typeGetMethod = Get-ExactMethod ([Type]) 'GetMethod' @([string], [Reflection.BindingFlags])
-    $createDelegate = Get-ExactMethod ([Delegate]) 'CreateDelegate' @([Type], [Reflection.MethodInfo]) ([Reflection.BindingFlags]'Public,Static')
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $handlerName = [Linq.Expressions.Expression]::Parameter([string], 'handlerName')
-    $recoveryProgramRuntimeType = New-StaticCall $typeGetType @(
-        (New-ClrConstant 'Dev.MansfieldPlumbing.Pwsh.RecoveryProgram, Pwsh' ([string])),
-        (New-ClrConstant $true ([bool])))
-    $eventHandlerRuntimeType = New-StaticCall $typeGetType @(
-        (New-ClrConstant 'System.EventHandler' ([string])),
-        (New-ClrConstant $true ([bool])))
-    $handlerMethodInfo = New-ClrCall $recoveryProgramRuntimeType $typeGetMethod @(
-        $handlerName,
-        (New-ClrConstant ([Reflection.BindingFlags]'Public,Static') ([Reflection.BindingFlags])))
-    $handlerBody = [Linq.Expressions.Expression]::Convert(
-        (New-StaticCall $createDelegate @($eventHandlerRuntimeType, $handlerMethodInfo)),
-        [EventHandler])
-    $createHandlerMethod = Add-PersistedMethod $programType 'CreateHandler' $privateStatic ([EventHandler]) `
-        @($activityType, [string]) ([Func``3].MakeGenericType($activityType, [string], [EventHandler])) `
-        @($a, $handlerName) $handlerBody
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $parent = [Linq.Expressions.Expression]::Parameter($linearLayoutType, 'parent')
-    $buttonText = [Linq.Expressions.Expression]::Parameter([string], 'text')
-    $handlerName = [Linq.Expressions.Expression]::Parameter([string], 'handlerName')
-    $buttonDetails = [Linq.Expressions.Expression]::Parameter([string], 'details')
-    $button = [Linq.Expressions.Expression]::Parameter($buttonType, 'button')
-    $contentDescriptionProperty = Get-ExactProperty $viewType 'ContentDescription'
-    $focusableProperty = Get-ExactProperty $viewType 'Focusable'
-    $focusableInTouchModeProperty = Get-ExactProperty $viewType 'FocusableInTouchMode'
-    $configureButtonBody = New-ReturnBlock ([void]) @(
-        (New-ClrAssign (New-ClrProperty $button $buttonTextProperty) $buttonText),
-        (New-ClrAssign (New-ClrProperty $button $contentDescriptionProperty) $buttonDetails),
-        (New-ClrAssign (New-ClrProperty $button $focusableProperty) (New-ClrConstant $true ([bool]))),
-        (New-ClrCall $button $buttonAddClick @(
-            (New-StaticCall $createHandlerMethod @($a, $handlerName)))),
-        (New-ClrCall $parent $addViewWithParams @(
-            $button,
-            (New-StaticCall $buttonParamsMethod @(
-                $a,
-                (New-ClrNew $buttonLayoutParamsConstructor @(
-                    ([Linq.Expressions.Expression]::Field($null, $matchParentField)),
-                    ([Linq.Expressions.Expression]::Field($null, $wrapContentField)))))))),
-        [Linq.Expressions.Expression]::Empty())
-    $configureButtonMethod = Add-PersistedMethod $programType 'ConfigureButton' $privateStatic ([void]) `
-        @($activityType, $linearLayoutType, [string], [string], [string], $buttonType) `
-        ([Action``6].MakeGenericType($activityType, $linearLayoutType, [string], [string], [string], $buttonType)) `
-        @($a, $parent, $buttonText, $handlerName, $buttonDetails, $button) $configureButtonBody
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $parent = [Linq.Expressions.Expression]::Parameter($linearLayoutType, 'parent')
-    $buttonText = [Linq.Expressions.Expression]::Parameter([string], 'text')
-    $handlerName = [Linq.Expressions.Expression]::Parameter([string], 'handlerName')
-    $buttonDetails = [Linq.Expressions.Expression]::Parameter([string], 'details')
-    $addButtonBody = New-StaticCall $configureButtonMethod @(
-        $a, $parent, $buttonText, $handlerName, $buttonDetails, (New-ClrNew $buttonConstructor @($a)))
-    $addButtonMethod = Add-PersistedMethod $programType 'AddButton' $privateStatic ([void]) `
-        @($activityType, $linearLayoutType, [string], [string], [string]) `
-        ([Action``5].MakeGenericType($activityType, $linearLayoutType, [string], [string], [string])) `
-        @($a, $parent, $buttonText, $handlerName, $buttonDetails) $addButtonBody
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $headingText = [Linq.Expressions.Expression]::Parameter([string], 'text')
-    $heading = [Linq.Expressions.Expression]::Parameter($textViewType, 'heading')
-    $headingBody = New-ReturnBlock $textViewType @(
-        (New-ClrAssign (New-ClrProperty $heading $textViewTextProperty) $headingText),
-        (New-ClrCall $heading $setTextColor @((New-ClrProperty $null $whiteProperty))),
-        (New-ClrCall $heading $setTextSize @(
-            (New-ClrConstant ([Enum]::Parse($complexUnitType, 'Sp')) $complexUnitType),
-            (New-ClrConstant ([single]64) ([single])))),
-        $heading)
-    $headingMethod = Add-PersistedMethod $programType 'ConfigureHeading' $privateStatic $textViewType `
-        @($activityType, [string], $textViewType) `
-        ([Func``4].MakeGenericType($activityType, [string], $textViewType, $textViewType)) `
-        @($a, $headingText, $heading) $headingBody
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $messageText = [Linq.Expressions.Expression]::Parameter([string], 'text')
-    $message = [Linq.Expressions.Expression]::Parameter($textViewType, 'message')
-    $messageBody = New-ReturnBlock $textViewType @(
-        (New-ClrAssign (New-ClrProperty $message $textViewTextProperty) $messageText),
-        (New-ClrCall $message $setTextIsSelectable @((New-ClrConstant $true ([bool])))),
-        (New-ClrCall $message $setTextColor @((New-ClrProperty $null $whiteProperty))),
-        (New-ClrCall $message $setTextSize @(
-            (New-ClrConstant ([Enum]::Parse($complexUnitType, 'Sp')) $complexUnitType),
-            (New-ClrConstant ([single]15) ([single])))),
-        $message)
-    $messageMethod = Add-PersistedMethod $programType 'ConfigureMessage' $privateStatic $textViewType `
-        @($activityType, [string], $textViewType) `
-        ([Func``4].MakeGenericType($activityType, [string], $textViewType, $textViewType)) `
-        @($a, $messageText, $message) $messageBody
-
-    $scroll = [Linq.Expressions.Expression]::Parameter($scrollViewType, 'scroll')
-    $message = [Linq.Expressions.Expression]::Parameter($textViewType, 'message')
-    $scrollBody = New-ReturnBlock $scrollViewType @(
-        (New-ClrCall $scroll $scrollAddView @($message)),
-        $scroll)
-    $scrollMethod = Add-PersistedMethod $programType 'ConfigureScroll' $privateStatic $scrollViewType `
-        @($scrollViewType, $textViewType) `
-        ([Func``3].MakeGenericType($scrollViewType, $textViewType, $scrollViewType)) `
-        @($scroll, $message) $scrollBody
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $messageParameters = [Linq.Expressions.Expression]::Parameter($layoutParamsType, 'parameters')
-    $dp16 = New-StaticCall $dpMethod @($a, (New-ClrConstant 16 ([int])))
-    $messageParamsBody = New-ReturnBlock $layoutParamsType @(
-        (New-ClrAssign (New-ClrProperty $messageParameters $topMarginProperty) $dp16),
-        (New-ClrAssign (New-ClrProperty $messageParameters $bottomMarginProperty) $dp16),
-        $messageParameters)
-    $messageParamsMethod = Add-PersistedMethod $programType 'ConfigureMessageParameters' $privateStatic $layoutParamsType `
-        @($activityType, $layoutParamsType) `
-        ([Func``3].MakeGenericType($activityType, $layoutParamsType, $layoutParamsType)) `
-        @($a, $messageParameters) $messageParamsBody
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $layoutTitle = [Linq.Expressions.Expression]::Parameter([string], 'title')
-    $layoutDetails = [Linq.Expressions.Expression]::Parameter([string], 'details')
-    $layout = [Linq.Expressions.Expression]::Parameter($linearLayoutType, 'layout')
-    $padding24 = New-StaticCall $dpMethod @($a, (New-ClrConstant 24 ([int])))
-    $newHeading = New-StaticCall $headingMethod @($a, $layoutTitle, (New-ClrNew $textViewConstructor @($a)))
-    $newMessage = New-StaticCall $messageMethod @($a, $layoutDetails, (New-ClrNew $textViewConstructor @($a)))
-    $newScroll = New-StaticCall $scrollMethod @(
-        (New-ClrNew $scrollViewConstructor @($a)), $newMessage)
-    $messageParametersValue = New-StaticCall $messageParamsMethod @(
-        $a,
-        (New-ClrNew $layoutParamsConstructor @(
-            ([Linq.Expressions.Expression]::Field($null, $matchParentField)),
-            (New-ClrConstant 0 ([int])),
-            (New-ClrConstant ([single]1) ([single])))))
-    $copyCondition = New-If `
-        ([Linq.Expressions.Expression]::Equal($layoutTitle, (New-ClrConstant ':(' ([string])))) `
-        (New-StaticCall $addButtonMethod @(
-            $a, $layout,
-            (New-ClrConstant 'COPY TO CLIPBOARD' ([string])),
-            (New-ClrConstant 'CopyClick' ([string])),
-            $layoutDetails)) `
-        ([Linq.Expressions.Expression]::Empty())
-    $layoutBody = New-ReturnBlock $linearLayoutType @(
-        (New-ClrAssign `
-            (New-ClrProperty $layout $orientationProperty) `
-            (New-ClrConstant ([Enum]::Parse($orientationType, 'Vertical')) $orientationType)),
-        (New-ClrCall $layout $setBackgroundColor @(
-            (New-StaticCall $rgb @(
-                (New-ClrConstant 11 ([int])),
-                (New-ClrConstant 61 ([int])),
-                (New-ClrConstant 46 ([int])))))),
-        (New-ClrCall $layout $setPadding @($padding24, $padding24, $padding24, $padding24)),
-        (New-ClrCall $layout $addView @($newHeading)),
-        (New-ClrCall $layout $addViewWithParams @($newScroll, $messageParametersValue)),
-        $copyCondition,
-        (New-StaticCall $addButtonMethod @(
-            $a, $layout,
-            (New-ClrConstant 'IMPORT FILE' ([string])),
-            (New-ClrConstant 'ImportClick' ([string])),
-            $layoutDetails)),
-        (New-StaticCall $addButtonMethod @(
-            $a, $layout,
-            (New-ClrConstant 'RETRY' ([string])),
-            (New-ClrConstant 'RetryClick' ([string])),
-            $layoutDetails)),
-        $layout)
-    $buildLayoutMethod = Add-PersistedMethod $programType 'BuildRecoveryLayout' $privateStatic $linearLayoutType `
-        @($activityType, [string], [string], $linearLayoutType) `
-        ([Func``5].MakeGenericType($activityType, [string], [string], $linearLayoutType, $linearLayoutType)) `
-        @($a, $layoutTitle, $layoutDetails, $layout) $layoutBody
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $showTitle = [Linq.Expressions.Expression]::Parameter([string], 'title')
-    $showDetails = [Linq.Expressions.Expression]::Parameter([string], 'details')
-    $shownLayout = [Linq.Expressions.Expression]::Parameter($linearLayoutType, 'layout')
-    $getChildAt = Get-ExactMethod $linearLayoutType 'GetChildAt' @([int])
-    $requestFocus = Get-ExactMethod $viewType 'RequestFocus' @()
-    $showBody = New-ClrBlock @($shownLayout) @(
-        (New-ClrAssign $shownLayout (New-StaticCall $buildLayoutMethod @(
-            $a, $showTitle, $showDetails, (New-ClrNew $linearLayoutConstructor @($a))))),
-        (New-ClrCall $a $setContentView @($shownLayout)),
-        [Linq.Expressions.Expression]::Empty())
-    $showRecoveryMethod = Add-PersistedMethod $programType 'ShowRecovery' $publicStatic ([void]) `
-        @($activityType, [string], [string]) `
-        ([Action``3].MakeGenericType($activityType, [string], [string])) `
-        @($a, $showTitle, $showDetails) $showBody
-
-    $State['a'] = $a
-    $State['contentDescriptionProperty'] = $contentDescriptionProperty
-    $State['showRecoveryMethod'] = $showRecoveryMethod
-}
-
 function New-FindProfileMethod {
     # FindProfile(files, index, fallback): the first of files whose name is
     # Profile.ps1 ignoring case, else fallback. The Xamarin program type and the
@@ -2661,1194 +2010,177 @@ function New-FindProfileMethod {
     [pscustomobject]@{ Method = $findProfileMethod; GetFiles = $getFiles; GetFileName = $getFileName }
 }
 
-function Add-RecoverySupportMethods {
-    # The distress beacon, the case-insensitive Profile.ps1 lookup, and toasts.
-    # Part of New-AndroidHostTypes; the statements keep their emission order.
-    param([Parameter(Mandatory)][hashtable] $State)
+function New-ManagedHostAssemblyBytes {
+    # Dev.MansfieldPlumbing.Pwsh: the managed entries the emitted native host
+    # reaches through coreclr_create_delegate. It references SMA and CoreLib
+    # only; no Android binding assembly is loaded or referenced.
+    $identity = [Reflection.AssemblyName]::new($script:ManagedNamespace)
+    $builder = [Reflection.Emit.PersistedAssemblyBuilder]::new($identity, [object].Assembly)
+    $module = $builder.DefineDynamicModule("$($script:ManagedNamespace).dll")
+    # The New-Clr* helpers bind the Expression factory overloads through this.
+    Initialize-ExpressionKit
 
-    $a = $State['a']
-    $absolutePathProperty = $State['absolutePathProperty']
-    $activityType = $State['activityType']
-    $contextType = $State['contextType']
-    $filesDirProperty = $State['filesDirProperty']
-    $pathCombine = $State['pathCombine']
-    $privateStatic = $State['privateStatic']
-    $programType = $State['programType']
+        # The managed entries the emitted native host reaches through
+        # coreclr_create_delegate. They touch no Android type, so Mono.Android
+        # is never loaded. RunPowerShell (gates 2b and 2c) opens a runspace on
+        # the calling (main) thread, runs a script whose value is 'PWSH'
+        # (0x50575348) and returns that value, or the HResult of the first
+        # exception.
+        # Boundary markers go to logcat through liblog, bound by P/Invoke.
+        $logType = $module.DefineType('Dev.MansfieldPlumbing.Pwsh.NativeLog',
+            [Reflection.TypeAttributes]'NotPublic,Abstract,Sealed,BeforeFieldInit')
+        $logWrite = $logType.DefinePInvokeMethod('__android_log_write', 'liblog.so',
+            [Reflection.MethodAttributes]'Public,Static,PinvokeImpl,HideBySig', [Reflection.CallingConventions]::Standard,
+            [int], [type[]]@([int], [string], [string]),
+            [Runtime.InteropServices.CallingConvention]::Cdecl, [Runtime.InteropServices.CharSet]::Ansi)
+        $logWrite.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)
+        $logType.CreateType() | Out-Null
+        $infoPriority = Get-AndroidLogPriority -Name 'ANDROID_LOG_INFO'
+        $errorPriority = Get-AndroidLogPriority -Name 'ANDROID_LOG_ERROR'
+        $log = { param([int] $Priority, [Linq.Expressions.Expression] $Text)
+            New-StaticCall $logWrite @((New-ClrConstant $Priority ([int])), (New-ClrConstant 'Pwsh' ([string])), $Text) }
+        $mark = { param([string] $Text) & $log $infoPriority (New-ClrConstant $Text ([string])) }
 
-    # The emitted recovery floor owns its own distress beacon. This remains usable
-    # when SMA can load but the application runspace or Profile.ps1 cannot start.
-    $androidLogType = Get-AndroidType 'Android.Util.Log'
-    $androidLogError = Get-ExactMethod $androidLogType 'Error' @([string], [string]) `
-        ([Reflection.BindingFlags]'Public,Static')
-    $distressMessage = [Linq.Expressions.Expression]::Parameter([string], 'message')
-    $writeDistressBody = New-ClrBlock @() @(
-        (New-StaticCall $androidLogError @(
-            (New-ClrConstant 'Pwsh' ([string])),
-            $distressMessage)),
-        [Linq.Expressions.Expression]::Empty())
-    $writeDistressMethod = Add-PersistedMethod $programType 'WriteDistress' $privateStatic ([void]) `
-        @([string]) ([Action``1].MakeGenericType([string])) @($distressMessage) $writeDistressBody
+        $rs = [Management.Automation.Runspaces.RunspaceFactory]
+        # Borrowed for this NativeActivity invocation; never publish one
+        # process-global current Activity. native_activity.h owns its lifetime.
+        $nativeActivity = [Linq.Expressions.Expression]::Parameter([IntPtr], 'nativeActivity')
+        $runspaceType = [Management.Automation.Runspaces.Runspace]
+        $issVar = [Linq.Expressions.Expression]::Variable([Management.Automation.Runspaces.InitialSessionState], 'iss')
+        $runspaceVar = [Linq.Expressions.Expression]::Variable($runspaceType, 'runspace')
+        $shellVar = [Linq.Expressions.Expression]::Variable([powershell], 'shell')
+        $resultVar = [Linq.Expressions.Expression]::Variable([int], 'result')
+        $filesVar = [Linq.Expressions.Expression]::Variable([string], 'files')
+        $profileVar = [Linq.Expressions.Expression]::Variable([string], 'profile')
+        $profileShell = [Linq.Expressions.Expression]::Variable([powershell], 'profileShell')
+        $stateShell = [Linq.Expressions.Expression]::Variable([powershell], 'stateShell')
+        $startCommand = [Linq.Expressions.Expression]::Variable([Management.Automation.CommandInfo], 'startCommand')
+        $errorVar = [Linq.Expressions.Expression]::Variable([Exception], 'error')
+        $invoke = @([powershell].GetMethods() | Where-Object { $_.Name -eq 'Invoke' -and -not $_.IsGenericMethodDefinition -and $_.GetParameters().Count -eq 0 })
+        if ($invoke.Count -ne 1) { throw "PowerShell.Invoke(): $($invoke.Count) non-generic parameterless overloads." }
+        $results = New-ClrCall $shellVar $invoke[0]
+        $first = [Linq.Expressions.Expression]::Property($results, 'Item', [Linq.Expressions.Expression[]]@(New-ClrConstant 0 ([int])))
+        $firstValue = [Linq.Expressions.Expression]::Unbox(
+            (New-ClrProperty $first (Get-ExactProperty ([psobject]) 'BaseObject')), [int])
+        $nativeHostType = $module.DefineType('Dev.MansfieldPlumbing.Pwsh.NativeHost',
+            [Reflection.TypeAttributes]'Public,Abstract,Sealed,BeforeFieldInit')
+        $concat = Get-ExactMethod ([string]) 'Concat' @([string], [string])
+        $hexText = { param($value) New-ClrCall $value (Get-ExactMethod ([int]) 'ToString' @([string])) @((New-ClrConstant 'x8' ([string]))) }
+        # Gate 2d substrate: Profile.ps1 through the product's path, less
+        # what needs an Activity ($Activity, recovery UI, animation), which
+        # waits for gate 2e. The files directory is internalDataPath, the
+        # base directory the host passes without its trailing separator;
+        # FindProfile is the product's case-insensitive lookup.
+        $nativeFind = New-FindProfileMethod -Owner $nativeHostType -Attributes ([Reflection.MethodAttributes]'Private,Static,HideBySig')
+        $sessionState = New-ClrProperty $runspaceVar (Get-ExactProperty $runspaceType 'SessionStateProxy')
+        $profileErrors = New-ClrProperty (New-ClrProperty $profileShell (Get-ExactProperty ([powershell]) 'Streams')) (Get-ExactProperty ([Management.Automation.PSDataStreams]) 'Error')
+        $errorCollection = (Get-ExactProperty ([Management.Automation.PSDataStreams]) 'Error').PropertyType
+        $firstError = [Linq.Expressions.Expression]::MakeIndex($profileErrors, $errorCollection.GetProperty('Item', [type[]]@([int])), [Linq.Expressions.Expression[]]@((New-ClrConstant 0 ([int]))))
+        $stateResults = New-ClrCall $stateShell $invoke[0]
+        $stateValue = [Linq.Expressions.Expression]::Unbox((New-ClrProperty ([Linq.Expressions.Expression]::Property($stateResults, 'Item', [Linq.Expressions.Expression[]]@(New-ClrConstant 0 ([int])))) (Get-ExactProperty ([psobject]) 'BaseObject')), [int])
+        $profilePhase = New-ClrBlock @() @(
+            (New-ClrAssign $filesVar (New-StaticCall (Get-ExactMethod ([IO.Path]) 'TrimEndingDirectorySeparator' @([string])) @((New-ClrProperty $null (Get-ExactProperty ([AppContext]) 'BaseDirectory'))))),
+            (New-ClrAssign $profileVar (New-StaticCall $nativeFind.Method @(
+                (New-StaticCall $nativeFind.GetFiles @($filesVar)),
+                (New-ClrConstant 0 ([int])),
+                (New-StaticCall (Get-ExactMethod ([IO.Path]) 'Combine' @([string], [string])) @($filesVar, (New-ClrConstant 'Profile.ps1' ([string]))))))),
+            [Linq.Expressions.Expression]::IfThenElse(
+                (New-StaticCall (Get-ExactMethod ([IO.File]) 'Exists' @([string])) @($profileVar)),
+                (New-ClrBlock @() @(
+                    (& $log $infoPriority (New-StaticCall $concat @((New-ClrConstant 'GATE2D found ' ([string])), (New-StaticCall $nativeFind.GetFileName @($profileVar))))),
+                    (New-ClrCall $sessionState (Get-ExactMethod ([Management.Automation.Runspaces.SessionStateProxy]) 'SetVariable' @([string], [object])) @(
+                        (New-ClrConstant 'PSScriptRoot' ([string])), [Linq.Expressions.Expression]::Convert($filesVar, [object]))),
+                    (New-ClrAssign $startCommand (New-ClrCall (New-ClrProperty $sessionState (Get-ExactProperty ([Management.Automation.Runspaces.SessionStateProxy]) 'InvokeCommand')) `
+                        (Get-ExactMethod ([Management.Automation.CommandInvocationIntrinsics]) 'GetCommand' @([string], [Management.Automation.CommandTypes])) @(
+                            $profileVar, (New-ClrConstant ([Management.Automation.CommandTypes]::ExternalScript) ([Management.Automation.CommandTypes]))))),
+                    (New-ClrAssign $profileShell (New-StaticCall (Get-ExactMethod ([powershell]) 'Create' @($runspaceType)) @($runspaceVar))),
+                    (New-ClrCall $profileShell (Get-ExactMethod ([powershell]) 'AddCommand' @([Management.Automation.CommandInfo])) @($startCommand)),
+                    (& $mark 'GATE2D START_INVOKE_BEGIN'),
+                    (New-ClrCall $profileShell $invoke[0]),
+                    (& $mark 'GATE2D START_INVOKE_END'),
+                    [Linq.Expressions.Expression]::IfThen(
+                        (New-ClrProperty $profileShell (Get-ExactProperty ([powershell]) 'HadErrors')),
+                        [Linq.Expressions.Expression]::Throw((New-ClrNew ([InvalidOperationException].GetConstructor([type[]]@([string]))) @(
+                            [Linq.Expressions.Expression]::Condition(
+                                [Linq.Expressions.Expression]::GreaterThan((New-ClrProperty $profileErrors (Get-ExactProperty $errorCollection 'Count')), (New-ClrConstant 0 ([int]))),
+                                (New-ClrCall $firstError (Get-ExactMethod ([Management.Automation.ErrorRecord]) 'ToString' @())),
+                                (New-ClrConstant 'Profile.ps1 reported one or more PowerShell errors.' ([string]))))))),
+                    # State the profile left in the runspace, read by a second pipeline.
+                    (New-ClrAssign $stateShell (New-StaticCall (Get-ExactMethod ([powershell]) 'Create' @($runspaceType)) @($runspaceVar))),
+                    (New-ClrCall $stateShell (Get-ExactMethod ([powershell]) 'AddScript' @([string])) @((New-ClrConstant '[int]$global:Gate2d' ([string])))),
+                    (& $log $infoPriority (New-StaticCall $concat @((New-ClrConstant 'GATE2D profile state 0x' ([string])), (& $hexText $stateValue)))))),
+                (& $mark 'GATE2D START_MISSING')))
+        $try = New-ClrBlock @() @(
+            [Linq.Expressions.Expression]::IfThen(
+                [Linq.Expressions.Expression]::Equal($nativeActivity, [Linq.Expressions.Expression]::Default([IntPtr])),
+                [Linq.Expressions.Expression]::Throw((New-ClrNew ([ArgumentNullException].GetConstructor([type[]]@([string]))) @(
+                    (New-ClrConstant 'nativeActivity' ([string])))))),
+            (New-StaticCall ([Management.Automation.PowerShellAssemblyLoadContextInitializer].GetMethod(
+                'SetPowerShellAssemblyLoadContext', [Reflection.BindingFlags]'Public,Static', $null, [type[]]@([string]), $null)) @(
+                (New-ClrProperty $null (Get-ExactProperty ([AppContext]) 'BaseDirectory')))),
+            (& $mark 'GATE2B managed resolution complete'),
+            (& $mark 'GATE2C CreateDefault2'),
+            (New-ClrAssign $issVar (New-StaticCall (Get-ExactMethod ([Management.Automation.Runspaces.InitialSessionState]) 'CreateDefault2' @()))),
+            (New-ClrAssign (New-ClrProperty $issVar (Get-ExactProperty ([Management.Automation.Runspaces.InitialSessionState]) 'LanguageMode')) `
+                (New-ClrConstant ([Management.Automation.PSLanguageMode]::FullLanguage) ([Management.Automation.PSLanguageMode]))),
+            (& $mark 'GATE2C CreateRunspace'),
+            (New-ClrAssign $runspaceVar (New-StaticCall (Get-ExactMethod $rs 'CreateRunspace' @([Management.Automation.Runspaces.InitialSessionState])) @($issVar))),
+            (New-ClrAssign (New-ClrProperty $runspaceVar (Get-ExactProperty $runspaceType 'ThreadOptions')) `
+                (New-ClrConstant ([Management.Automation.Runspaces.PSThreadOptions]::UseCurrentThread) ([Management.Automation.Runspaces.PSThreadOptions]))),
+            (& $mark 'GATE2C Open'),
+            (New-ClrCall $runspaceVar (Get-ExactMethod $runspaceType 'Open' @())),
+            (New-ClrAssign (New-ClrProperty $null (Get-ExactProperty $runspaceType 'DefaultRunspace')) $runspaceVar),
+            (& $mark 'GATE2C DefaultRunspace set'),
+            # Gate 2e admission prerequisite. The facade may read env/vm/
+            # clazz from this borrowed pointer on the owning main thread.
+            # Revocation at onDestroy belongs to the lifecycle gate.
+            (New-ClrCall $sessionState (Get-ExactMethod ([Management.Automation.Runspaces.SessionStateProxy]) 'SetVariable' @([string], [object])) @(
+                (New-ClrConstant 'NativeActivityHandle' ([string])), [Linq.Expressions.Expression]::Convert($nativeActivity, [object]))),
+            (New-ClrAssign $shellVar (New-StaticCall (Get-ExactMethod ([powershell]) 'Create' @($runspaceType)) @($runspaceVar))),
+            (New-ClrCall $shellVar (Get-ExactMethod ([powershell]) 'AddScript' @([string])) @((New-ClrConstant '0x50575348' ([string])))),
+            (New-ClrAssign $resultVar $firstValue),
+            (& $log $infoPriority (New-StaticCall (Get-ExactMethod ([string]) 'Concat' @([string], [string])) @(
+                (New-ClrConstant 'GATE2C script result 0x' ([string])),
+                (New-ClrCall $resultVar (Get-ExactMethod ([int]) 'ToString' @([string])) @((New-ClrConstant 'x8' ([string]))))))),
+            $profilePhase,
+            $resultVar)
+        # Run holds every SMA reference. Admit references none, so a load or
+        # JIT failure of Run surfaces as an exception inside Admit's try.
+        $run = Add-PersistedMethod $nativeHostType 'Run' ([Reflection.MethodAttributes]'Private,Static,HideBySig') ([int]) @([IntPtr]) `
+            ([Func[IntPtr,int]]) @($nativeActivity) (New-ClrBlock @($issVar, $runspaceVar, $shellVar, $resultVar, $filesVar, $profileVar, $profileShell, $stateShell, $startCommand) @($try))
+        # RunPowerShell returns the HResult of any exception, and the native
+        # host logs it. The handler first logs the exception's type and
+        # message (not ToString, which pulls in stack-trace machinery), inside
+        # its own try, so the HResult comes back even if that logging fails.
+        $describe = New-StaticCall (Get-ExactMethod ([string]) 'Concat' @([string], [string], [string], [string])) @(
+            (New-ClrConstant 'GATE2B exception ' ([string])),
+            (New-ClrProperty (New-ClrCall $errorVar (Get-ExactMethod ([object]) 'GetType' @())) (Get-ExactProperty ([type]) 'FullName')),
+            (New-ClrConstant ': ' ([string])),
+            (New-ClrProperty $errorVar (Get-ExactProperty ([Exception]) 'Message')))
+        $catch = [Linq.Expressions.Expression]::Catch($errorVar, (New-ClrBlock @() @(
+            [Linq.Expressions.Expression]::TryCatch(
+                (New-ClrBlock @() @((& $log $errorPriority $describe), [Linq.Expressions.Expression]::Empty())),
+                [Linq.Expressions.Expression]::Catch([Exception], [Linq.Expressions.Expression]::Empty())),
+            (New-ClrProperty $errorVar (Get-ExactProperty ([Exception]) 'HResult')))))
+        [void](Add-PersistedMethod $nativeHostType 'RunPowerShell' ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([int]) @([IntPtr]) `
+            ([Func[IntPtr,int]]) @($nativeActivity) ([Linq.Expressions.Expression]::TryCatch((New-StaticCall $run @($nativeActivity)), $catch)))
+        # Gate 2a, kept as an in-process invariant: the host calls it first
+        # and requires 'PWSH' (0x50575348) before it calls RunPowerShell.
+        [void](Add-PersistedMethod $nativeHostType 'Admit' ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([int]) @() `
+            ([Func[int]]) @() ([Linq.Expressions.Expression]::Constant([int]0x50575348, [int])))
+        $nativeHostType.CreateType() | Out-Null
 
-    $findProfile = New-FindProfileMethod -Owner $programType -Attributes $privateStatic
-    $getFiles = $findProfile.GetFiles
-    $getFileName = $findProfile.GetFileName
-    $findProfileMethod = $findProfile.Method
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $homeRoot = New-ClrProperty (New-ClrProperty $a $filesDirProperty) $absolutePathProperty
-    $resolveProfileBody = New-StaticCall $findProfileMethod @(
-        (New-StaticCall $getFiles @($homeRoot)),
-        (New-ClrConstant 0 ([int])),
-        (New-StaticCall $pathCombine @($homeRoot, (New-ClrConstant 'Profile.ps1' ([string])))))
-    $resolveProfileMethod = Add-PersistedMethod $programType 'ResolveProfilePath' $privateStatic ([string]) `
-        @($activityType) ([Func``2].MakeGenericType($activityType, [string])) @($a) $resolveProfileBody
-
-    # Every action says what it did. A toast is enough to tell a retry that
-    # changed nothing apart from a tap that did nothing.
-    $toastType = Get-AndroidType 'Android.Widget.Toast'
-    $toastLengthType = Get-AndroidType 'Android.Widget.ToastLength'
-    $makeText = Get-ExactMethod $toastType 'MakeText' @($contextType, [string], $toastLengthType) ([Reflection.BindingFlags]'Public,Static')
-    $toastShow = Get-ExactMethod $toastType 'Show' @()
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $toastText = [Linq.Expressions.Expression]::Parameter([string], 'text')
-    $showToastBody = New-ClrBlock @() @(
-        (New-ClrCall (New-StaticCall $makeText @(
-            $a, $toastText,
-            (New-ClrConstant ([Enum]::Parse($toastLengthType, 'Short')) $toastLengthType))) $toastShow @()),
-        [Linq.Expressions.Expression]::Empty())
-    $showToastMethod = Add-PersistedMethod $programType 'ShowToast' $privateStatic ([void]) `
-        @($activityType, [string]) ([Action``2].MakeGenericType($activityType, [string])) @($a, $toastText) $showToastBody
-
-    $retryCountField = $programType.DefineField('s_retryCount', [int], [Reflection.FieldAttributes]'Private,Static')
-    $nowProperty = Get-ExactProperty ([DateTime]) 'Now' ([Reflection.BindingFlags]'Public,Static')
-    $dateToString = Get-ExactMethod ([DateTime]) 'ToString' @([string])
-    $objectToString = Get-ExactMethod ([Convert]) 'ToString' @([object]) ([Reflection.BindingFlags]'Public,Static')
-    $fileInfoCtor = Get-ExactConstructor ([IO.FileInfo]) @([string])
-    $fileLengthProperty = Get-ExactProperty ([IO.FileInfo]) 'Length'
-
-    $State['a'] = $a
-    $State['dateToString'] = $dateToString
-    $State['fileInfoCtor'] = $fileInfoCtor
-    $State['fileLengthProperty'] = $fileLengthProperty
-    $State['getFileName'] = $getFileName
-    $State['nowProperty'] = $nowProperty
-    $State['objectToString'] = $objectToString
-    $State['resolveProfileMethod'] = $resolveProfileMethod
-    $State['retryCountField'] = $retryCountField
-    $State['showToastMethod'] = $showToastMethod
-    $State['writeDistressMethod'] = $writeDistressMethod
-}
-
-function Add-ProfileRuntimeMethods {
-    # The Profile.ps1 runtime: runspace creation, the animation callback, ExecuteProfile and StartProfile.
-    # Part of New-AndroidHostTypes; the statements keep their emission order.
-    param([Parameter(Mandatory)][hashtable] $State)
-
-    $a = $State['a']
-    $absolutePathProperty = $State['absolutePathProperty']
-    $activityType = $State['activityType']
-    $animationCallbackField = $State['animationCallbackField']
-    $filesDirProperty = $State['filesDirProperty']
-    $getFileName = $State['getFileName']
-    $privateStatic = $State['privateStatic']
-    $programType = $State['programType']
-    $publicStatic = $State['publicStatic']
-    $resolveProfileMethod = $State['resolveProfileMethod']
-    $runspaceField = $State['runspaceField']
-    $runspaceType = $State['runspaceType']
-    $showRecoveryMethod = $State['showRecoveryMethod']
-    $writeDistressMethod = $State['writeDistressMethod']
-
-    # Profile.ps1 runtime. The runspace remains alive after successful startup so
-    # event handlers and application state created by the Start script remain usable.
-    $defaultRunspaceProperty = Get-ExactProperty $runspaceType 'DefaultRunspace' ([Reflection.BindingFlags]'Public,Static')
-    $runspaceDispose = Get-ExactMethod $runspaceType 'Dispose' @()
-    $runspaceOpen = Get-ExactMethod $runspaceType 'Open' @()
-    $runspaceSessionState = Get-ExactProperty $runspaceType 'SessionStateProxy'
-    $sessionStateType = [Management.Automation.Runspaces.SessionStateProxy]
-    $setVariable = Get-ExactMethod $sessionStateType 'SetVariable' @([string], [object])
-    $initialStateType = [Management.Automation.Runspaces.InitialSessionState]
-    $createInitialState = Get-ExactMethod $initialStateType 'CreateDefault2' @() ([Reflection.BindingFlags]'Public,Static')
-    $languageModeProperty = Get-ExactProperty $initialStateType 'LanguageMode'
-    $threadOptionsProperty = Get-ExactProperty $initialStateType 'ThreadOptions'
-    $createRunspace = Get-ExactMethod ([Management.Automation.Runspaces.RunspaceFactory]) 'CreateRunspace' @($initialStateType) ([Reflection.BindingFlags]'Public,Static')
-    $powerShellType = [Management.Automation.PowerShell]
-    $createPowerShell = Get-ExactMethod $powerShellType 'Create' @() ([Reflection.BindingFlags]'Public,Static')
-    $powerShellRunspace = Get-ExactProperty $powerShellType 'Runspace'
-    $commandInfoType = [Management.Automation.CommandInfo]
-    $commandTypesType = [Management.Automation.CommandTypes]
-    $invokeCommandProperty = Get-ExactProperty $sessionStateType 'InvokeCommand'
-    $getCommand = Get-ExactMethod ([Management.Automation.CommandInvocationIntrinsics]) 'GetCommand' `
-        @([string], $commandTypesType)
-    $powerShellAddCommand = Get-ExactMethod $powerShellType 'AddCommand' @($commandInfoType)
-    $powerShellAddParameter = Get-ExactMethod $powerShellType 'AddParameter' @([string], [object])
-    $powerShellInvoke = $powerShellType.GetMethods([Reflection.BindingFlags]'Public,Instance') |
-        Where-Object { $_.Name -eq 'Invoke' -and -not $_.IsGenericMethod -and $_.GetParameters().Count -eq 0 } |
-        Select-Object -First 1
-    if (-not $powerShellInvoke) { throw 'PowerShell.Invoke() could not be resolved.' }
-    $powerShellHadErrors = Get-ExactProperty $powerShellType 'HadErrors'
-    $powerShellStreams = Get-ExactProperty $powerShellType 'Streams'
-    $errorStreamProperty = Get-ExactProperty ([Management.Automation.PSDataStreams]) 'Error'
-    $errorCollectionType = $errorStreamProperty.PropertyType
-    $errorCountProperty = Get-ExactProperty $errorCollectionType 'Count'
-    $errorItemProperty = $errorCollectionType.GetProperty('Item', [type[]]@([int]))
-    $errorRecordToString = Get-ExactMethod ([Management.Automation.ErrorRecord]) 'ToString' @()
-    $powerShellDispose = Get-ExactMethod $powerShellType 'Dispose' @()
-    $invalidOperationCtor = Get-ExactConstructor ([InvalidOperationException]) @([string])
-    $exceptionToString = Get-ExactMethod ([Exception]) 'ToString' @()
-    $concat2 = Get-ExactMethod ([string]) 'Concat' @([string], [string]) ([Reflection.BindingFlags]'Public,Static')
-    $concat3 = Get-ExactMethod ([string]) 'Concat' @([string], [string], [string]) ([Reflection.BindingFlags]'Public,Static')
-    $fileExists = Get-ExactMethod ([IO.File]) 'Exists' @([string]) ([Reflection.BindingFlags]'Public,Static')
-
-    $runspaceFieldExpression = [Linq.Expressions.Expression]::Field($null, $runspaceField)
-    $nullRunspace = [Linq.Expressions.Expression]::Constant($null, $runspaceType)
-    $resetBody = New-ClrBlock @() @(
-        ([Linq.Expressions.Expression]::IfThen(
-            ([Linq.Expressions.Expression]::NotEqual(
-                $runspaceFieldExpression,
-                $nullRunspace)),
-            (New-ClrCall $runspaceFieldExpression $runspaceDispose @()))),
-        (New-ClrAssign $runspaceFieldExpression $nullRunspace),
-        (New-ClrAssign (New-ClrProperty $null $defaultRunspaceProperty) $nullRunspace),
-        [Linq.Expressions.Expression]::Empty())
-    $resetRuntimeMethod = Add-PersistedMethod $programType 'ResetRuntime' $privateStatic ([void]) @() `
-        ([Action]) @() $resetBody
-
-    $callback = [Linq.Expressions.Expression]::Parameter([Action], 'callback')
-    $animationCallbackFieldExpression = [Linq.Expressions.Expression]::Field($null, $animationCallbackField)
-    $setAnimationCallbackMethod = Add-PersistedMethod $programType 'SetAnimationCallback' $publicStatic ([void]) `
-        @([Action]) ([Action``1].MakeGenericType([Action])) @($callback) `
-        (New-ClrAssign $animationCallbackFieldExpression $callback)
-
-    $actionInvoke = Get-ExactMethod ([Action]) 'Invoke' @()
-    $runAnimationBody = New-ClrBlock @() @(
-        (New-ClrAssign (New-ClrProperty $null $defaultRunspaceProperty) $runspaceFieldExpression),
-        ([Linq.Expressions.Expression]::IfThen(
-            ([Linq.Expressions.Expression]::NotEqual(
-                $animationCallbackFieldExpression,
-                ([Linq.Expressions.Expression]::Constant($null, [Action])))),
-            (New-ClrCall $animationCallbackFieldExpression $actionInvoke @()))),
-        [Linq.Expressions.Expression]::Empty())
-    $runAnimationCallbackMethod = Add-PersistedMethod $programType 'RunAnimationCallback' $publicStatic ([void]) `
-        @() ([Action]) @() $runAnimationBody
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $profilePath = [Linq.Expressions.Expression]::Parameter([string], 'profilePath')
-    $initialState = [Linq.Expressions.Expression]::Parameter($initialStateType, 'initialState')
-    $shell = [Linq.Expressions.Expression]::Parameter($powerShellType, 'shell')
-    $startCommand = [Linq.Expressions.Expression]::Parameter($commandInfoType, 'startCommand')
-    $createRunspaceBlock = New-ClrBlock @($initialState) @(
-        (New-StaticCall $writeDistressMethod @((New-ClrConstant 'HOST_CREATEDEFAULT2_BEGIN' ([string])))),
-        (New-ClrAssign $initialState (New-StaticCall $createInitialState @())),
-        (New-StaticCall $writeDistressMethod @((New-ClrConstant 'HOST_CREATEDEFAULT2_END' ([string])))),
-        (New-ClrAssign (New-ClrProperty $initialState $languageModeProperty) `
-            (New-ClrConstant ([Management.Automation.PSLanguageMode]::FullLanguage) ([Management.Automation.PSLanguageMode]))),
-        (New-ClrAssign (New-ClrProperty $initialState $threadOptionsProperty) `
-            (New-ClrConstant ([Management.Automation.Runspaces.PSThreadOptions]::UseCurrentThread) ([Management.Automation.Runspaces.PSThreadOptions]))),
-        (New-ClrAssign $runspaceFieldExpression (New-StaticCall $createRunspace @($initialState))),
-        (New-ClrCall $runspaceFieldExpression $runspaceOpen @()),
-        (New-StaticCall $writeDistressMethod @((New-ClrConstant 'HOST_RUNSPACE_OPEN' ([string])))))
-    $profileErrors = New-ClrProperty (New-ClrProperty $shell $powerShellStreams) $errorStreamProperty
-    $firstProfileError = [Linq.Expressions.Expression]::MakeIndex(
-        $profileErrors, $errorItemProperty,
-        [Linq.Expressions.Expression[]]@((New-ClrConstant 0 ([int]))))
-    $profileErrorMessage = [Linq.Expressions.Expression]::Condition(
-        ([Linq.Expressions.Expression]::GreaterThan(
-            (New-ClrProperty $profileErrors $errorCountProperty),
-            (New-ClrConstant 0 ([int])))),
-        (New-ClrCall $firstProfileError $errorRecordToString @()),
-        (New-ClrConstant 'Profile.ps1 reported one or more PowerShell errors.' ([string])))
-    $hadErrorsException = New-ClrNew $invalidOperationCtor @($profileErrorMessage)
-    $throwHadErrors = [Linq.Expressions.Expression]::Throw($hadErrorsException)
-    $throwOnErrors = [Linq.Expressions.Expression]::IfThen(
-        (New-ClrProperty $shell $powerShellHadErrors),
-        $throwHadErrors)
-    $resolveStartCommand = New-ClrCall `
-        (New-ClrProperty (New-ClrProperty $runspaceFieldExpression $runspaceSessionState) $invokeCommandProperty) `
-        $getCommand @(
-            $profilePath,
-            (New-ClrConstant ([Management.Automation.CommandTypes]::ExternalScript) $commandTypesType))
-    $executeShellBody = New-ClrBlock @($startCommand) @(
-        (New-ClrAssign (New-ClrProperty $shell $powerShellRunspace) $runspaceFieldExpression),
-        (New-ClrCall (New-ClrProperty $runspaceFieldExpression $runspaceSessionState) $setVariable @(
-            (New-ClrConstant 'Activity' ([string])), [Linq.Expressions.Expression]::Convert($a, [object]))),
-        (New-ClrCall (New-ClrProperty $runspaceFieldExpression $runspaceSessionState) $setVariable @(
-            (New-ClrConstant 'PSScriptRoot' ([string])),
-            [Linq.Expressions.Expression]::Convert((New-ClrProperty (New-ClrProperty $a $filesDirProperty) $absolutePathProperty), [object]))),
-        (New-ClrAssign $startCommand $resolveStartCommand),
-        (New-ClrCall $shell $powerShellAddCommand @($startCommand)),
-        (New-ClrCall $shell $powerShellAddParameter @(
-            (New-ClrConstant 'Activity' ([string])),
-            [Linq.Expressions.Expression]::Convert($a, [object]))),
-        (New-StaticCall $writeDistressMethod @((New-ClrConstant 'START_INVOKE_BEGIN' ([string])))),
-        (New-ClrCall $shell $powerShellInvoke @()),
-        (New-StaticCall $writeDistressMethod @((New-ClrConstant 'START_INVOKE_END' ([string])))),
-        $throwOnErrors,
-        (New-StaticCall $runAnimationCallbackMethod @()),
-        [Linq.Expressions.Expression]::Empty())
-    $executeProfileBody = New-ClrBlock @($shell) @(
-        ([Linq.Expressions.Expression]::IfThen(
-            ([Linq.Expressions.Expression]::Equal(
-                $runspaceFieldExpression,
-                $nullRunspace)),
-            $createRunspaceBlock)),
-        (New-ClrAssign (New-ClrProperty $null $defaultRunspaceProperty) $runspaceFieldExpression),
-        (New-ClrAssign $shell (New-StaticCall $createPowerShell @())),
-        ([Linq.Expressions.Expression]::TryFinally(
-            $executeShellBody,
-            (New-ClrCall $shell $powerShellDispose @()))),
-        [Linq.Expressions.Expression]::Empty())
-    $executeProfileMethod = Add-PersistedMethod $programType 'ExecuteProfile' $privateStatic ([void]) `
-        @($activityType, [string]) ([Action``2].MakeGenericType($activityType, [string])) `
-        @($a, $profilePath) $executeProfileBody
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $profilePath = [Linq.Expressions.Expression]::Parameter([string], 'profilePath')
-    $startupError = [Linq.Expressions.Expression]::Parameter([Exception], 'error')
-    $profilePathValue = New-StaticCall $resolveProfileMethod @($a)
-    $missingDetails = New-StaticCall $concat2 @(
-        (New-ClrConstant "message: Profile.ps1 is missing.`nsource: " ([string])),
-        (New-HomePath $profilePath $concat2 $getFileName))
-    $failedStartup = New-ClrBlock @() @(
-        (New-StaticCall $writeDistressMethod @(
-            (New-StaticCall $concat2 @(
-                (New-ClrConstant 'START_FAILURE ' ([string])),
-                (New-ClrCall $startupError $exceptionToString @()))))),
-        (New-StaticCall $resetRuntimeMethod @()),
-        (New-StaticCall $showRecoveryMethod @(
-            $a,
-            (New-ClrConstant ':(' ([string])),
-            (New-ClrCall $startupError $exceptionToString @()))))
-    $executeOrRecover = [Linq.Expressions.Expression]::TryCatch(
-        (New-StaticCall $executeProfileMethod @($a, $profilePath)),
-        ([Linq.Expressions.Expression]::Catch($startupError, $failedStartup)))
-    $missingRecovery = New-StaticCall $showRecoveryMethod @(
-        $a,
-        (New-ClrConstant ':(' ([string])),
-        $missingDetails)
-    $missingRecovery = New-ClrBlock @() @(
-        (New-StaticCall $writeDistressMethod @(
-            (New-StaticCall $concat2 @(
-                (New-ClrConstant 'START_MISSING ' ([string])),
-                $missingDetails)))),
-        $missingRecovery,
-        [Linq.Expressions.Expression]::Empty())
-    $startupChoice = [Linq.Expressions.Expression]::IfThenElse(
-        (New-StaticCall $fileExists @($profilePath)),
-        $executeOrRecover,
-        $missingRecovery)
-    $startProfileBody = New-ClrBlock @($profilePath) @(
-        (New-ClrAssign $profilePath $profilePathValue),
-        $startupChoice,
-        [Linq.Expressions.Expression]::Empty())
-    $startProfileMethod = Add-PersistedMethod $programType 'StartProfile' $publicStatic ([void]) `
-        @($activityType) ([Action``1].MakeGenericType($activityType)) @($a) $startProfileBody
-
-    $State['a'] = $a
-    $State['concat2'] = $concat2
-    $State['concat3'] = $concat3
-    $State['exceptionToString'] = $exceptionToString
-    $State['fileExists'] = $fileExists
-    $State['profilePathValue'] = $profilePathValue
-    $State['resetRuntimeMethod'] = $resetRuntimeMethod
-    $State['startProfileMethod'] = $startProfileMethod
-}
-
-function Add-ActivityAdmissionMethod {
-    # AdmitActivity, the Android-to-PowerShell admission OnCreate delegates to.
-    # Part of New-AndroidHostTypes; the statements keep their emission order.
-    param([Parameter(Mandatory)][hashtable] $State)
-
-    $a = $State['a']
-    $absolutePathProperty = $State['absolutePathProperty']
-    $activityType = $State['activityType']
-    $filesDirProperty = $State['filesDirProperty']
-    $powerShellLoadContextInitializedField = $State['powerShellLoadContextInitializedField']
-    $programType = $State['programType']
-    $publicStatic = $State['publicStatic']
-    $startProfileMethod = $State['startProfileMethod']
-
-    # Irreducible Android-to-PowerShell admission. The Activity override performs
-    # only the nonvirtual CLR base call, then enters this persisted expression body.
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $setPowerShellAssemblyLoadContext =
-        [Management.Automation.PowerShellAssemblyLoadContextInitializer].GetMethod(
-            'SetPowerShellAssemblyLoadContext',
-            [Reflection.BindingFlags]'Public,Static', $null, [type[]]@([string]), $null)
-    $setAppContextData = Get-ExactMethod ([AppContext]) 'SetData' @([string], [object]) `
-        ([Reflection.BindingFlags]'Public,Static')
-    $applicationBase = New-ClrProperty (New-ClrProperty $a $filesDirProperty) $absolutePathProperty
-    $powerShellLoadContextInitialized = [Linq.Expressions.Expression]::Field(
-        $null, $powerShellLoadContextInitializedField)
-    $initializePowerShellLoadContext = New-StaticCall $setPowerShellAssemblyLoadContext @(
-        $applicationBase)
-    # libpsl-native carries SMA's Unix P/Invoke surface. The host waits for a
-    # Java-side load of libraries it has no cache entry for, so load it here
-    # before the runspace opens. This goes away with the .NET for Android host.
-    $loadLibrary = Get-ExactMethod (Get-AndroidType 'Java.Lang.JavaSystem') 'LoadLibrary' @([string]) `
-        ([Reflection.BindingFlags]'Public,Static')
-    $admitActivityBody = New-ClrBlock @() @(
-        ([Linq.Expressions.Expression]::IfThen(
-            ([Linq.Expressions.Expression]::IsFalse($powerShellLoadContextInitialized)),
-            (New-ClrBlock @() @(
-                (New-StaticCall $loadLibrary @((New-ClrConstant 'psl-native' ([string])))),
-                (New-StaticCall $setAppContextData @(
-                    (New-ClrConstant 'APP_CONTEXT_BASE_DIRECTORY' ([string])),
-                    ([Linq.Expressions.Expression]::Convert($applicationBase, [object])))),
-                $initializePowerShellLoadContext,
-                (New-ClrAssign $powerShellLoadContextInitialized (New-ClrConstant $true ([bool]))),
-                [Linq.Expressions.Expression]::Empty())))),
-        (New-StaticCall $startProfileMethod @($a)),
-        [Linq.Expressions.Expression]::Empty())
-    $admitActivityMethod = Add-PersistedMethod $programType 'AdmitActivity' $publicStatic ([void]) `
-        @($activityType) ([Action``1].MakeGenericType($activityType)) @($a) $admitActivityBody
-
-    $State['a'] = $a
-    $State['admitActivityMethod'] = $admitActivityMethod
-}
-
-function Add-DocumentImportMethods {
-    # Document import from the file picker: display names, ImportDocument and HandleActivityResult.
-    # Part of New-AndroidHostTypes; the statements keep their emission order.
-    param([Parameter(Mandatory)][hashtable] $State)
-
-    $a = $State['a']
-    $absolutePathProperty = $State['absolutePathProperty']
-    $activityType = $State['activityType']
-    $concat2 = $State['concat2']
-    $concat3 = $State['concat3']
-    $exceptionToString = $State['exceptionToString']
-    $fileInfoCtor = $State['fileInfoCtor']
-    $fileLengthProperty = $State['fileLengthProperty']
-    $filesDirProperty = $State['filesDirProperty']
-    $getFileName = $State['getFileName']
-    $intentType = $State['intentType']
-    $objectToString = $State['objectToString']
-    $pathCombine = $State['pathCombine']
-    $privateStatic = $State['privateStatic']
-    $programType = $State['programType']
-    $publicStatic = $State['publicStatic']
-    $resetRuntimeMethod = $State['resetRuntimeMethod']
-    $resolveProfileMethod = $State['resolveProfileMethod']
-    $showRecoveryMethod = $State['showRecoveryMethod']
-    $showToastMethod = $State['showToastMethod']
-    $startProfileMethod = $State['startProfileMethod']
-
-    # File-picker completion. Selected documents retain their display name in the
-    # private app directory; Profile.ps1 is restarted immediately after import.
-    $intentType = Get-AndroidType 'Android.Content.Intent'
-    $uriType = Get-AndroidType 'Android.Net.Uri'
-    $contentResolverType = Get-AndroidType 'Android.Content.ContentResolver'
-    $cursorType = Get-AndroidType 'Android.Database.ICursor'
-    $resultType = Get-AndroidType 'Android.App.Result'
-    $contentResolverProperty = Get-ExactProperty $activityType 'ContentResolver'
-    $intentDataProperty = Get-ExactProperty $intentType 'Data'
-    $queryMethod = Get-ExactMethod $contentResolverType 'Query' @(
-        $uriType, [string[]], [string], [string[]], [string])
-    $openInputStream = Get-ExactMethod $contentResolverType 'OpenInputStream' @($uriType)
-    $moveToFirst = Get-ExactMethod $cursorType 'MoveToFirst' @()
-    $getColumnIndex = Get-ExactMethod $cursorType 'GetColumnIndex' @([string])
-    $cursorGetString = Get-ExactMethod $cursorType 'GetString' @([int])
-    $disposeMethod = Get-ExactMethod ([IDisposable]) 'Dispose' @()
-    $displayNameField = (Get-AndroidType 'Android.Provider.IOpenableColumns').GetField(
-        'DisplayName', [Reflection.BindingFlags]'Public,Static')
-    $ioExceptionCtor = Get-ExactConstructor ([IO.IOException]) @([string])
-    $isNullOrWhiteSpace = Get-ExactMethod ([string]) 'IsNullOrWhiteSpace' @([string]) ([Reflection.BindingFlags]'Public,Static')
-    $stringEqualsComparison = Get-ExactMethod ([string]) 'Equals' @([string], [string], [StringComparison]) ([Reflection.BindingFlags]'Public,Static')
-    $stringContainsChar = Get-ExactMethod ([string]) 'Contains' @([char])
-    $fileStreamCtor = Get-ExactConstructor ([IO.FileStream]) @([string], [IO.FileMode], [IO.FileAccess], [IO.FileShare])
-    $streamCopyTo = Get-ExactMethod ([IO.Stream]) 'CopyTo' @([IO.Stream])
-    $fileStreamFlushDisk = Get-ExactMethod ([IO.FileStream]) 'Flush' @([bool])
-    $fileMoveOverwrite = Get-ExactMethod ([IO.File]) 'Move' @([string], [string], [bool]) ([Reflection.BindingFlags]'Public,Static')
-    $fileDelete = Get-ExactMethod ([IO.File]) 'Delete' @([string]) ([Reflection.BindingFlags]'Public,Static')
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $uri = [Linq.Expressions.Expression]::Parameter($uriType, 'uri')
-    $cursor = [Linq.Expressions.Expression]::Parameter($cursorType, 'cursor')
-    $column = [Linq.Expressions.Expression]::Parameter([int], 'column')
-    $displayName = [Linq.Expressions.Expression]::Parameter([string], 'displayName')
-    $nullCursor = [Linq.Expressions.Expression]::Constant($null, $cursorType)
-    $noDisplayName = New-ClrNew $ioExceptionCtor @(
-        (New-ClrConstant 'The selected document has no display name.' ([string])))
-    $queryCursor = New-ClrCall (New-ClrProperty $a $contentResolverProperty) $queryMethod @(
-        $uri,
-        ([Linq.Expressions.Expression]::NewArrayInit([string], @(
-            (New-ClrConstant ([string]$displayNameField.GetValue($null)) ([string]))))),
-        [Linq.Expressions.Expression]::Constant($null, [string]),
-        [Linq.Expressions.Expression]::Constant($null, [string[]]),
-        [Linq.Expressions.Expression]::Constant($null, [string]))
-    $readDisplayName = New-ReturnBlock ([string]) @(
-        ([Linq.Expressions.Expression]::IfThen(
-            ([Linq.Expressions.Expression]::OrElse(
-                ([Linq.Expressions.Expression]::Equal($cursor, $nullCursor)),
-                ([Linq.Expressions.Expression]::Not((New-ClrCall $cursor $moveToFirst @()))))),
-            ([Linq.Expressions.Expression]::Throw($noDisplayName)))),
-        (New-ClrAssign $column (New-ClrCall $cursor $getColumnIndex @(
-            (New-ClrConstant ([string]$displayNameField.GetValue($null)) ([string]))))),
-        ([Linq.Expressions.Expression]::IfThen(
-            ([Linq.Expressions.Expression]::LessThan($column, (New-ClrConstant 0 ([int])))),
-            ([Linq.Expressions.Expression]::Throw($noDisplayName)))),
-        (New-ClrAssign $displayName (New-ClrCall $cursor $cursorGetString @($column))),
-        ([Linq.Expressions.Expression]::IfThen(
-            (New-StaticCall $isNullOrWhiteSpace @($displayName)),
-            ([Linq.Expressions.Expression]::Throw($noDisplayName)))),
-        $displayName)
-    $closeCursor = [Linq.Expressions.Expression]::IfThen(
-        ([Linq.Expressions.Expression]::NotEqual($cursor, $nullCursor)),
-        (New-ClrCall ([Linq.Expressions.Expression]::Convert($cursor, [IDisposable])) $disposeMethod @()))
-    $getDisplayNameBody = New-ClrBlock @($cursor, $column, $displayName) @(
-        (New-ClrAssign $cursor $queryCursor),
-        ([Linq.Expressions.Expression]::TryFinally($readDisplayName, $closeCursor)))
-    $getDisplayNameMethod = Add-PersistedMethod $programType 'GetDisplayName' $privateStatic ([string]) `
-        @($activityType, $uriType) ([Func``3].MakeGenericType($activityType, $uriType, [string])) `
-        @($a, $uri) $getDisplayNameBody
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $intent = [Linq.Expressions.Expression]::Parameter($intentType, 'data')
-    $uri = [Linq.Expressions.Expression]::Parameter($uriType, 'uri')
-    $displayName = [Linq.Expressions.Expression]::Parameter([string], 'displayName')
-    $destination = [Linq.Expressions.Expression]::Parameter([string], 'destination')
-    $incoming = [Linq.Expressions.Expression]::Parameter([string], 'incoming')
-    $source = [Linq.Expressions.Expression]::Parameter([IO.Stream], 'source')
-    $target = [Linq.Expressions.Expression]::Parameter([IO.FileStream], 'target')
-    $importError = [Linq.Expressions.Expression]::Parameter([Exception], 'error')
-    $invalidDotName = [Linq.Expressions.Expression]::OrElse(
-        ([Linq.Expressions.Expression]::Equal($displayName, (New-ClrConstant '.' ([string])))),
-        ([Linq.Expressions.Expression]::Equal($displayName, (New-ClrConstant '..' ([string])))))
-    $slashCharacter = New-ClrConstant ([char]47) ([char])
-    $backslashCharacter = New-ClrConstant ([char]92) ([char])
-    $hasSlash = New-ClrCall $displayName $stringContainsChar @($slashCharacter)
-    $hasBackslash = New-ClrCall $displayName $stringContainsChar @($backslashCharacter)
-    $invalidSeparator = [Linq.Expressions.Expression]::OrElse($hasSlash, $hasBackslash)
-    $invalidName = [Linq.Expressions.Expression]::OrElse(
-        (New-StaticCall $isNullOrWhiteSpace @($displayName)),
-        ([Linq.Expressions.Expression]::OrElse($invalidDotName, $invalidSeparator)))
-    $invalidNameThrow = [Linq.Expressions.Expression]::Throw(
-        (New-ClrNew $ioExceptionCtor @(
-            (New-ClrConstant 'The selected document name is invalid.' ([string])))))
-    $isProfile = New-StaticCall $stringEqualsComparison @(
-        $displayName,
-        (New-ClrConstant 'Profile.ps1' ([string])),
-        (New-ClrConstant ([StringComparison]::OrdinalIgnoreCase) ([StringComparison])))
-    $copyFileBody = New-ClrBlock @() @(
-        (New-ClrCall $source $streamCopyTo @($target)),
-        (New-ClrCall $target $fileStreamFlushDisk @((New-ClrConstant $true ([bool])))),
-        [Linq.Expressions.Expression]::Empty())
-    $disposeTarget = New-ClrCall ([Linq.Expressions.Expression]::Convert($target, [IDisposable])) $disposeMethod @()
-    $disposeSource = New-ClrCall ([Linq.Expressions.Expression]::Convert($source, [IDisposable])) $disposeMethod @()
-    $restartAfterImport = New-ClrBlock @() @(
-        (New-StaticCall $resetRuntimeMethod @()),
-        (New-StaticCall $startProfileMethod @($a)))
-    $importedTitle = New-StaticCall $concat2 @(
-        (New-ClrConstant 'IMPORTED: ' ([string])), $displayName)
-    $importedDetails = New-StaticCall $concat2 @(
-        (New-ClrConstant 'source: ' ([string])), (New-HomePath $destination $concat2 $getFileName))
-    $showImported = New-StaticCall $showRecoveryMethod @(
-        $a, $importedTitle, $importedDetails)
-    $afterImport = [Linq.Expressions.Expression]::IfThenElse(
-        $isProfile, $restartAfterImport, $showImported)
-    $importSuccess = New-ClrBlock @() @(
-        (New-ClrAssign $uri (New-ClrProperty $intent $intentDataProperty)),
-        (New-ClrAssign $displayName (New-StaticCall $getDisplayNameMethod @($a, $uri))),
-        ([Linq.Expressions.Expression]::IfThen($invalidName, $invalidNameThrow)),
-        ([Linq.Expressions.Expression]::IfThen(
-            $isProfile,
-            (New-ClrAssign $displayName (New-ClrConstant 'Profile.ps1' ([string]))))),
-        (New-ClrAssign $destination ([Linq.Expressions.Expression]::Condition(
-            $isProfile,
-            (New-StaticCall $resolveProfileMethod @($a)),
-            (New-StaticCall $pathCombine @(
-                (New-ClrProperty (New-ClrProperty $a $filesDirProperty) $absolutePathProperty),
-                $displayName))))),
-        (New-ClrAssign $incoming (New-StaticCall $concat2 @(
-            $destination, (New-ClrConstant '.incoming' ([string]))))),
-        (New-ClrAssign $source (New-ClrCall (New-ClrProperty $a $contentResolverProperty) $openInputStream @($uri))),
-        (New-ClrAssign $target (New-ClrNew $fileStreamCtor @(
-            $incoming,
-            (New-ClrConstant ([IO.FileMode]::Create) ([IO.FileMode])),
-            (New-ClrConstant ([IO.FileAccess]::Write) ([IO.FileAccess])),
-            (New-ClrConstant ([IO.FileShare]::None) ([IO.FileShare]))))),
-        ([Linq.Expressions.Expression]::TryFinally(
-            ([Linq.Expressions.Expression]::TryFinally($copyFileBody, $disposeTarget)),
-            $disposeSource)),
-        (New-StaticCall $fileMoveOverwrite @(
-            $incoming, $destination, (New-ClrConstant $true ([bool])))),
-        (New-StaticCall $showToastMethod @(
-            $a,
-            (New-StaticCall $concat3 @(
-                (New-ClrConstant 'Imported ' ([string])),
-                (New-HomePath $destination $concat2 $getFileName),
-                (New-StaticCall $concat3 @(
-                    (New-ClrConstant ' (' ([string])),
-                    (New-StaticCall $objectToString @(
-                        [Linq.Expressions.Expression]::Convert(
-                            (New-ClrProperty (New-ClrNew $fileInfoCtor @($destination)) $fileLengthProperty),
-                            [object]))),
-                    (New-ClrConstant ' bytes)' ([string])))))))),
-        $afterImport,
-        [Linq.Expressions.Expression]::Empty())
-    $importFailure = New-ClrBlock @() @(
-        ([Linq.Expressions.Expression]::IfThen(
-            ([Linq.Expressions.Expression]::NotEqual(
-                $incoming, ([Linq.Expressions.Expression]::Constant($null, [string])))),
-            (New-StaticCall $fileDelete @($incoming)))),
-        (New-StaticCall $showRecoveryMethod @(
-            $a,
-            (New-ClrConstant ':(' ([string])),
-            (New-ClrCall $importError $exceptionToString @()))))
-    $importDocumentBody = New-ClrBlock @($uri, $displayName, $destination, $incoming, $source, $target) @(
-        (New-ClrAssign $incoming ([Linq.Expressions.Expression]::Constant($null, [string]))),
-        ([Linq.Expressions.Expression]::TryCatch(
-            $importSuccess,
-            ([Linq.Expressions.Expression]::Catch($importError, $importFailure)))),
-        [Linq.Expressions.Expression]::Empty())
-    $importDocumentMethod = Add-PersistedMethod $programType 'ImportDocument' $privateStatic ([void]) `
-        @($activityType, $intentType) ([Action``2].MakeGenericType($activityType, $intentType)) `
-        @($a, $intent) $importDocumentBody
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $requestCode = [Linq.Expressions.Expression]::Parameter([int], 'requestCode')
-    $resultCode = [Linq.Expressions.Expression]::Parameter($resultType, 'resultCode')
-    $intent = [Linq.Expressions.Expression]::Parameter($intentType, 'data')
-    $requestMatches = [Linq.Expressions.Expression]::Equal(
-        $requestCode, (New-ClrConstant 1001 ([int])))
-    $resultMatches = [Linq.Expressions.Expression]::Equal(
-        $resultCode,
-        (New-ClrConstant ([Enum]::Parse($resultType, 'Ok')) $resultType))
-    $hasIntent = [Linq.Expressions.Expression]::NotEqual(
-        $intent, ([Linq.Expressions.Expression]::Constant($null, $intentType)))
-    $hasUri = [Linq.Expressions.Expression]::NotEqual(
-        (New-ClrProperty $intent $intentDataProperty),
-        ([Linq.Expressions.Expression]::Constant($null, $uriType)))
-    $hasIntentAndUri = [Linq.Expressions.Expression]::AndAlso($hasIntent, $hasUri)
-    $resultAndDataMatch = [Linq.Expressions.Expression]::AndAlso($resultMatches, $hasIntentAndUri)
-    $validResult = [Linq.Expressions.Expression]::AndAlso($requestMatches, $resultAndDataMatch)
-    $handleResultBody = New-ClrBlock @() @(
-        ([Linq.Expressions.Expression]::IfThen(
-            $validResult,
-            (New-StaticCall $importDocumentMethod @($a, $intent)))),
-        [Linq.Expressions.Expression]::Empty())
-    $handleResultMethod = Add-PersistedMethod $programType 'HandleActivityResult' $publicStatic ([void]) `
-        @($activityType, [int], $resultType, $intentType) `
-        ([Action``4].MakeGenericType($activityType, [int], $resultType, $intentType)) `
-        @($a, $requestCode, $resultCode, $intent) $handleResultBody
-
-    $State['a'] = $a
-    $State['handleResultMethod'] = $handleResultMethod
-    $State['intentType'] = $intentType
-    $State['resultType'] = $resultType
-}
-
-function Add-RecoveryActionMethods {
-    # The recovery screen actions: the clipboard payload, CopyClick, ImportClick and RetryClick.
-    # Part of New-AndroidHostTypes; the statements keep their emission order.
-    param([Parameter(Mandatory)][hashtable] $State)
-
-    $a = $State['a']
-    $absolutePathProperty = $State['absolutePathProperty']
-    $actionOpenDocumentField = $State['actionOpenDocumentField']
-    $activityType = $State['activityType']
-    $addCategory = $State['addCategory']
-    $androidReleaseProperty = $State['androidReleaseProperty']
-    $androidSdkProperty = $State['androidSdkProperty']
-    $assemblyFullNameProperty = $State['assemblyFullNameProperty']
-    $buttonType = $State['buttonType']
-    $categoryOpenableField = $State['categoryOpenableField']
-    $clipboardManagerType = $State['clipboardManagerType']
-    $concat2 = $State['concat2']
-    $concat3 = $State['concat3']
-    $contentDescriptionProperty = $State['contentDescriptionProperty']
-    $contextType = $State['contextType']
-    $dateToString = $State['dateToString']
-    $emitted = $State['emitted']
-    $fileExists = $State['fileExists']
-    $filesDirProperty = $State['filesDirProperty']
-    $frameworkDescriptionProperty = $State['frameworkDescriptionProperty']
-    $getFileSystemEntries = $State['getFileSystemEntries']
-    $getSystemService = $State['getSystemService']
-    $handleResultMethod = $State['handleResultMethod']
-    $intentConstructor = $State['intentConstructor']
-    $intentType = $State['intentType']
-    $manufacturerProperty = $State['manufacturerProperty']
-    $modelProperty = $State['modelProperty']
-    $newPlainText = $State['newPlainText']
-    $nowProperty = $State['nowProperty']
-    $objectToString = $State['objectToString']
-    $packageNameProperty = $State['packageNameProperty']
-    $primaryClipProperty = $State['primaryClipProperty']
-    $privateStatic = $State['privateStatic']
-    $profilePathValue = $State['profilePathValue']
-    $programType = $State['programType']
-    $publicStatic = $State['publicStatic']
-    $readAllText = $State['readAllText']
-    $resetRuntimeMethod = $State['resetRuntimeMethod']
-    $resolveProfileMethod = $State['resolveProfileMethod']
-    $resultType = $State['resultType']
-    $retryCountField = $State['retryCountField']
-    $setType = $State['setType']
-    $showToastMethod = $State['showToastMethod']
-    $startActivityForResult = $State['startActivityForResult']
-    $startProfileMethod = $State['startProfileMethod']
-    $viewType = $State['viewType']
-
-    # Clipboard payload: recursive helpers avoid persisted local variables while
-    # retaining a complete inventory of assemblies, files, runtime, and Profile.ps1.
-    $builderType = [Text.StringBuilder]
-    $appendLine = Get-ExactMethod $builderType 'AppendLine' @([string])
-    $append = Get-ExactMethod $builderType 'Append' @([string])
-    $builderToStringMethod = Get-ExactMethod $builderType 'ToString' @()
-    $builderCtor = Get-ExactConstructor $builderType @()
-    $assembliesType = [Reflection.Assembly[]]
-    $getAssembliesMethod = Get-ExactMethod ([AppDomain]) 'GetAssemblies' @()
-    $currentDomain = Get-ExactProperty ([AppDomain]) 'CurrentDomain' ([Reflection.BindingFlags]'Public,Static')
-    $index = [Linq.Expressions.Expression]::Parameter([int], 'index')
-    $builder = [Linq.Expressions.Expression]::Parameter($builderType, 'builder')
-    $assemblies = [Linq.Expressions.Expression]::Parameter($assembliesType, 'assemblies')
-    $appendAssembliesMethod = $programType.DefineMethod(
-        'AppendAssemblies', $privateStatic, [void], [Type[]]@($builderType, $assembliesType, [int]))
-    $assemblyAtIndex = [Linq.Expressions.Expression]::ArrayIndex($assemblies, $index)
-    $nextAssemblyIndex = [Linq.Expressions.Expression]::Add($index, (New-ClrConstant 1 ([int])))
-    $appendNextAssembly = New-StaticCall $appendAssembliesMethod @(
-        $builder, $assemblies, $nextAssemblyIndex)
-    $appendAssemblyStep = New-ClrBlock @() @(
-        (New-ClrCall $builder $appendLine @((New-ClrProperty $assemblyAtIndex $assemblyFullNameProperty))),
-        $appendNextAssembly)
-    $appendAssembliesBody = [Linq.Expressions.Expression]::IfThen(
-        ([Linq.Expressions.Expression]::LessThan($index, [Linq.Expressions.Expression]::ArrayLength($assemblies))),
-        $appendAssemblyStep)
-    $appendAssembliesLambda = New-ClrLambda `
-        ([Action``3].MakeGenericType($builderType, $assembliesType, [int])) `
-        $appendAssembliesBody @($builder, $assemblies, $index)
-    $null = Write-MicrosoftLambdaToMethodBuilder $appendAssembliesLambda $appendAssembliesMethod
-    $emitted.Add([pscustomobject]@{ Name = 'AppendAssemblies'; Method = $appendAssembliesMethod; Success = $true })
-
-    $files = [Linq.Expressions.Expression]::Parameter([string[]], 'files')
-    $index = [Linq.Expressions.Expression]::Parameter([int], 'index')
-    $builder = [Linq.Expressions.Expression]::Parameter($builderType, 'builder')
-    $appendFilesMethod = $programType.DefineMethod(
-        'AppendFiles', $privateStatic, [void], [Type[]]@($builderType, [string[]], [int]))
-    $nextFileIndex = [Linq.Expressions.Expression]::Add($index, (New-ClrConstant 1 ([int])))
-    $appendNextFile = New-StaticCall $appendFilesMethod @($builder, $files, $nextFileIndex)
-    $appendFileStep = New-ClrBlock @() @(
-        (New-ClrCall $builder $appendLine @([Linq.Expressions.Expression]::ArrayIndex($files, $index))),
-        $appendNextFile)
-    $appendFilesBody = [Linq.Expressions.Expression]::IfThen(
-        ([Linq.Expressions.Expression]::LessThan($index, [Linq.Expressions.Expression]::ArrayLength($files))),
-        $appendFileStep)
-    $appendFilesLambda = New-ClrLambda ([Action``3].MakeGenericType($builderType, [string[]], [int])) `
-        $appendFilesBody @($builder, $files, $index)
-    $null = Write-MicrosoftLambdaToMethodBuilder $appendFilesLambda $appendFilesMethod
-    $emitted.Add([pscustomobject]@{ Name = 'AppendFiles'; Method = $appendFilesMethod; Success = $true })
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $profilePathValue = New-StaticCall $resolveProfileMethod @($a)
-    $fileExists = Get-ExactMethod ([IO.File]) 'Exists' @([string]) ([Reflection.BindingFlags]'Public,Static')
-    $readProfileBody = [Linq.Expressions.Expression]::Condition(
-        (New-StaticCall $fileExists @($profilePathValue)),
-        (New-StaticCall $readAllText @($profilePathValue)),
-        (New-ClrConstant 'Profile.ps1: unavailable' ([string])))
-    $readProfileMethod = Add-PersistedMethod $programType 'ReadProfileOrUnavailable' $privateStatic ([string]) `
-        @($activityType) ([Func``2].MakeGenericType($activityType, [string])) @($a) $readProfileBody
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $payloadDetails = [Linq.Expressions.Expression]::Parameter([string], 'details')
-    $builder = [Linq.Expressions.Expression]::Parameter($builderType, 'builder')
-    $convertObjectToString = Get-ExactMethod ([Convert]) 'ToString' @([object]) ([Reflection.BindingFlags]'Public,Static')
-    function New-AppendLiteral([string] $Text) {
-        New-ClrCall $builder $appendLine @((New-ClrConstant $Text ([string])))
-    }
-    function New-AppendFact([string] $Label, [Linq.Expressions.Expression] $Value) {
-        New-ClrBlock @() @(
-            (New-ClrCall $builder $append @((New-ClrConstant $Label ([string])))),
-            (New-ClrCall $builder $appendLine @($Value)))
-    }
-    $privateRootValue = New-ClrProperty (New-ClrProperty $a $filesDirProperty) $absolutePathProperty
-    $payloadBody = New-ReturnBlock ([string]) @(
-        (New-AppendLiteral 'PWSH RECOVERY REPORT'),
-        (New-AppendLiteral ''),
-        (New-AppendLiteral 'REQUEST TO OUTSIDE MODEL'),
-        (New-AppendLiteral 'Diagnose this startup failure and return a complete replacement Profile.ps1.'),
-        (New-AppendLiteral 'Use only assemblies and files actually listed in this report.'),
-        (New-AppendLiteral ''),
-        (New-AppendLiteral 'RUNTIME CONTRACT'),
-        (New-AppendLiteral 'Profile.ps1 runs in-process in a PowerShell runspace.'),
-        (New-AppendLiteral '$Activity is the live Android.App.Activity.'),
-        (New-AppendLiteral '$PSScriptRoot is the private app-files directory.'),
-        (New-AppendLiteral 'IMPORT FILE copies a selected document there; RETRY starts Profile.ps1 again.'),
-        (New-AppendLiteral ''),
-        (New-AppendLiteral 'FAILURE DETAILS'),
-        (New-ClrCall $builder $appendLine @($payloadDetails)),
-        (New-AppendLiteral ''),
-        (New-AppendLiteral 'ENVIRONMENT'),
-        (New-AppendFact 'privateRoot: ' $privateRootValue),
-        (New-AppendFact 'package: ' (New-ClrProperty $a $packageNameProperty)),
-        (New-AppendFact 'manufacturer: ' (New-ClrProperty $null $manufacturerProperty)),
-        (New-AppendFact 'model: ' (New-ClrProperty $null $modelProperty)),
-        (New-AppendFact 'android: ' (New-ClrProperty $null $androidReleaseProperty)),
-        (New-AppendFact 'api: ' (New-StaticCall $convertObjectToString @(
-            [Linq.Expressions.Expression]::Convert((New-ClrProperty $null $androidSdkProperty), [object])))),
-        (New-AppendFact 'dotnet: ' (New-ClrProperty $null $frameworkDescriptionProperty)),
-        (New-AppendLiteral ''),
-        (New-AppendLiteral 'LOADED ASSEMBLIES'),
-        (New-StaticCall $appendAssembliesMethod @(
-            $builder,
-            (New-ClrCall (New-ClrProperty $null $currentDomain) $getAssembliesMethod @()),
-            (New-ClrConstant 0 ([int])))),
-        (New-AppendLiteral ''),
-        (New-AppendLiteral 'PRIVATE FILES'),
-        (New-StaticCall $appendFilesMethod @(
-            $builder,
-            (New-StaticCall $getFileSystemEntries @($privateRootValue)),
-            (New-ClrConstant 0 ([int])))),
-        (New-AppendLiteral ''),
-        (New-AppendLiteral '--- Profile.ps1 BEGIN ---'),
-        (New-ClrCall $builder $appendLine @((New-StaticCall $readProfileMethod @($a)))),
-        (New-AppendLiteral '--- Profile.ps1 END ---'),
-        (New-ClrCall $builder $builderToStringMethod @()))
-    $buildPayloadCoreMethod = Add-PersistedMethod $programType 'BuildClipboardPayloadCore' $privateStatic ([string]) `
-        @($activityType, [string], $builderType) `
-        ([Func``4].MakeGenericType($activityType, [string], $builderType, [string])) `
-        @($a, $payloadDetails, $builder) $payloadBody
-
-    $a = [Linq.Expressions.Expression]::Parameter($activityType, 'activity')
-    $payloadDetails = [Linq.Expressions.Expression]::Parameter([string], 'details')
-    $buildPayloadBody = New-StaticCall $buildPayloadCoreMethod @(
-        $a, $payloadDetails, (New-ClrNew $builderCtor @()))
-    $buildPayloadMethod = Add-PersistedMethod $programType 'BuildClipboardPayload' $publicStatic ([string]) `
-        @($activityType, [string]) ([Func``3].MakeGenericType($activityType, [string], [string])) `
-        @($a, $payloadDetails) $buildPayloadBody
-
-    $sender = [Linq.Expressions.Expression]::Parameter([object], 'sender')
-    $eventArgs = [Linq.Expressions.Expression]::Parameter([EventArgs], 'args')
-    $senderButton = [Linq.Expressions.Expression]::Convert($sender, $buttonType)
-    $senderActivity = [Linq.Expressions.Expression]::Convert(
-        (New-ClrProperty $senderButton (Get-ExactProperty $viewType 'Context')), $activityType)
-    $clipboard = [Linq.Expressions.Expression]::Convert(
-        (New-ClrCall $senderActivity $getSystemService @(
-            (New-ClrConstant ([string]$contextType.GetField('ClipboardService').GetValue($null)) ([string])))),
-        $clipboardManagerType)
-    $copyBody = New-ClrAssign (New-ClrProperty $clipboard $primaryClipProperty) `
-        (New-StaticCall $newPlainText @(
-            (New-ClrConstant 'Pwsh recovery report' ([string])),
-            (New-StaticCall $buildPayloadMethod @(
-                $senderActivity, (New-ClrProperty $senderButton $contentDescriptionProperty)))))
-    $null = Add-PersistedMethod $programType 'CopyClick' $publicStatic ([void]) @([object], [EventArgs]) `
-        ([EventHandler]) @($sender, $eventArgs) $copyBody
-
-    $sender = [Linq.Expressions.Expression]::Parameter([object], 'sender')
-    $eventArgs = [Linq.Expressions.Expression]::Parameter([EventArgs], 'args')
-    $senderButton = [Linq.Expressions.Expression]::Convert($sender, $buttonType)
-    $senderActivity = [Linq.Expressions.Expression]::Convert(
-        (New-ClrProperty $senderButton (Get-ExactProperty $viewType 'Context')), $activityType)
-    $picker = New-ClrNew $intentConstructor @(
-        (New-ClrConstant ([string]$actionOpenDocumentField.GetValue($null)) ([string])))
-    $pickConfiguredMethod = $programType.DefineMethod(
-        'ConfigurePicker', $privateStatic, $intentType, [Type[]]@($intentType))
-    $pickerParameter = [Linq.Expressions.Expression]::Parameter($intentType, 'picker')
-    $pickerBody = New-ReturnBlock $intentType @(
-        (New-ClrCall $pickerParameter $addCategory @(
-            (New-ClrConstant ([string]$categoryOpenableField.GetValue($null)) ([string])))),
-        (New-ClrCall $pickerParameter $setType @((New-ClrConstant '*/*' ([string])))),
-        $pickerParameter)
-    $pickerLambda = New-ClrLambda ([Func``2].MakeGenericType($intentType, $intentType)) $pickerBody @($pickerParameter)
-    $null = Write-MicrosoftLambdaToMethodBuilder $pickerLambda $pickConfiguredMethod
-    $emitted.Add([pscustomobject]@{ Name = 'ConfigurePicker'; Method = $pickConfiguredMethod; Success = $true })
-    $importBody = New-ClrCall $senderActivity $startActivityForResult @(
-        (New-StaticCall $pickConfiguredMethod @($picker)), (New-ClrConstant 1001 ([int])))
-    $null = Add-PersistedMethod $programType 'ImportClick' $publicStatic ([void]) @([object], [EventArgs]) `
-        ([EventHandler]) @($sender, $eventArgs) $importBody
-
-    $sender = [Linq.Expressions.Expression]::Parameter([object], 'sender')
-    $eventArgs = [Linq.Expressions.Expression]::Parameter([EventArgs], 'args')
-    $senderButton = [Linq.Expressions.Expression]::Convert($sender, $buttonType)
-    $senderActivity = [Linq.Expressions.Expression]::Convert(
-        (New-ClrProperty $senderButton (Get-ExactProperty $viewType 'Context')), $activityType)
-    $retryCount = New-ClrField $null $retryCountField
-    $retryBody = New-ClrBlock @() @(
-        (New-ClrAssign $retryCount ([Linq.Expressions.Expression]::Add($retryCount, (New-ClrConstant 1 ([int]))))),
-        (New-StaticCall $resetRuntimeMethod @()),
-        (New-StaticCall $startProfileMethod @($senderActivity)),
-        (New-StaticCall $showToastMethod @(
-            $senderActivity,
-            (New-StaticCall $concat3 @(
-                (New-ClrConstant 'RETRY #' ([string])),
-                (New-StaticCall $objectToString @([Linq.Expressions.Expression]::Convert($retryCount, [object]))),
-                (New-StaticCall $concat2 @(
-                    (New-ClrConstant ' at ' ([string])),
-                    (New-ClrCall (New-ClrProperty $null $nowProperty) $dateToString @(
-                        (New-ClrConstant 'HH:mm:ss' ([string])))))))))),
-        [Linq.Expressions.Expression]::Empty())
-    $null = Add-PersistedMethod $programType 'RetryClick' $publicStatic ([void]) @([object], [EventArgs]) `
-        ([EventHandler]) @($sender, $eventArgs) $retryBody
-
-    $resultType = Get-AndroidType 'Android.App.Result'
-    $resultSelf = [Linq.Expressions.Expression]::Parameter($activityType, 'self')
-    $resultRequest = [Linq.Expressions.Expression]::Parameter([int], 'requestCode')
-    $resultCodeParameter = [Linq.Expressions.Expression]::Parameter($resultType, 'resultCode')
-    $resultData = [Linq.Expressions.Expression]::Parameter($intentType, 'data')
-    $onActivityResultBody = New-StaticCall $handleResultMethod @(
-        $resultSelf, $resultRequest, $resultCodeParameter, $resultData)
-    $onActivityResultDelegate = [Action``4].MakeGenericType(
-        $activityType, [int], $resultType, $intentType)
-    $onActivityResultLambda = New-ClrLambda $onActivityResultDelegate $onActivityResultBody @(
-        $resultSelf, $resultRequest, $resultCodeParameter, $resultData)
-
-    $State['onActivityResultLambda'] = $onActivityResultLambda
-    $State['resultType'] = $resultType
-}
-
-function Complete-AndroidHostTypes {
-    # The OnActivityResult override on the activity, then the finished RecoveryProgram type.
-    # Part of New-AndroidHostTypes; the statements keep their emission order.
-    param([Parameter(Mandatory)][hashtable] $State)
-
-    $activityType = $State['activityType']
-    $admitActivityMethod = $State['admitActivityMethod']
-    $emitted = $State['emitted']
-    $intentType = $State['intentType']
-    $mainType = $State['mainType']
-    $onActivityResultLambda = $State['onActivityResultLambda']
-    $programType = $State['programType']
-    $resultType = $State['resultType']
-
-    $onActivityResultMethod = $mainType.DefineMethod(
-        'OnActivityResult',
-        [Reflection.MethodAttributes]'Family,Virtual,HideBySig',
-        [void],
-        [type[]]@([int], $resultType, $intentType))
-    $null = Write-MicrosoftLambdaToMethodBuilder `
-        -Lambda $onActivityResultLambda `
-        -MethodBuilder $onActivityResultMethod `
-        -ExplicitThis
-    $baseOnActivityResult = $activityType.GetMethod(
-        'OnActivityResult', [Reflection.BindingFlags]'Instance,NonPublic', $null,
-        [type[]]@([int], $resultType, $intentType), $null)
-    $mainType.DefineMethodOverride($onActivityResultMethod, $baseOnActivityResult)
-    $emitted.Add([pscustomobject]@{
-        Name = 'OnActivityResult'
-        Method = $onActivityResultMethod
-        Success = $true
-    })
-    $programType.CreateType() | Out-Null
-
-    [pscustomobject]@{
-        ProgramType  = $programType
-        AdmitMethod  = $admitActivityMethod
-        ActivityType = $activityType
-        MethodCount  = $script:PersistedMethods.Count + $emitted.Count
-    }
-}
-
-function New-AndroidHostTypes {
-    <#
-        Builds the Android host as compiled methods on RecoveryProgram: the
-        Profile.ps1 runtime, AdmitActivity, the recovery screen it falls back to
-        (COPY TO CLIPBOARD, IMPORT FILE, RETRY), the document importer, and the
-        OnActivityResult override. Every body is an expression tree compiled by
-        the framework's LambdaCompiler. OnCreate is the one method this does not
-        build: it needs a non-virtual base call, which has no expression-tree
-        form, so the caller emits it as a six-opcode shim that delegates to
-        AdmitActivity. The phases below run in emission order.
-
-        Ported from the predecessor appliance's emitter.
-    #>
-    param(
-        [Parameter(Mandatory)][Reflection.Emit.ModuleBuilder] $Module,
-        [Parameter(Mandatory)][Reflection.Emit.TypeBuilder] $Main,
-        [Parameter(Mandatory)][Reflection.Assembly] $Android
-    )
-
-    $state = @{ Module = $Module; Main = $Main; Android = $Android }
-    # Each phase takes the state it needs from $state and puts back what later
-    # phases read. A phase writes nothing to the pipeline.
-    foreach ($phase in 'Add-AndroidHostDeclarations',
-            'Add-RecoveryScreenMethods',
-            'Add-RecoverySupportMethods',
-            'Add-ProfileRuntimeMethods',
-            'Add-ActivityAdmissionMethod',
-            'Add-DocumentImportMethods',
-            'Add-RecoveryActionMethods') {
-        $output = @(& $phase -State $state)
-        if ($output.Count -ne 0) { throw "Host phase $phase wrote $($output.Count) objects to the pipeline." }
-    }
-    Complete-AndroidHostTypes -State $state
-}
-
-function New-PwshActivityAssemblyBytes {
-    param([Parameter(Mandatory)][System.Collections.Generic.List[object]] $Candidates)
-
-    $loadNames = 'Java.Interop.dll', 'Mono.Android.Runtime.dll', 'Mono.Android.dll', 'System.Management.Automation.dll'
-    $imageMap = @{}
-    foreach ($name in $loadNames) {
-        $candidate = $Candidates |
-            Where-Object { -not $_.ReferenceOnly -and $_.Name -ceq $name } |
-            Sort-Object @{ Expression = { Get-PayloadCandidateRank -Candidate $_ } } |
-            Select-Object -First 1
-        if ($null -eq $candidate) { throw "Cannot emit $(Get-ManagedAssemblyName).dll without '$name'." }
-        $imageMap[[IO.Path]::GetFileNameWithoutExtension($name)] = $candidate.Bytes
-    }
-
-    $context = [Runtime.Loader.AssemblyLoadContext]::new('Pwsh.Target.Android', $true)
-    $resolver = [Func[Runtime.Loader.AssemblyLoadContext, Reflection.AssemblyName, Reflection.Assembly]] {
-        param($loadContext, $requestedName)
-        if (-not $imageMap.ContainsKey($requestedName.Name)) { return $null }
-        $dependencyStream = [IO.MemoryStream]::new([byte[]]$imageMap[$requestedName.Name], $false)
-        try { return $loadContext.LoadFromStream($dependencyStream) }
-        finally { $dependencyStream.Dispose() }
-    }
-    $context.add_Resolving($resolver)
-
+    $stream = [IO.MemoryStream]::new()
     try {
-        $monoStream = [IO.MemoryStream]::new([byte[]]$imageMap['Mono.Android'], $false)
-        try { $android = $context.LoadFromStream($monoStream) }
-        finally { $monoStream.Dispose() }
-
-        $activityAttributeType = $android.GetType('Android.App.ActivityAttribute', $true)
-
-        $identity = [Reflection.AssemblyName]::new((Get-ManagedAssemblyName))
-        $builder = [Reflection.Emit.PersistedAssemblyBuilder]::new($identity, [object].Assembly)
-        $module = $builder.DefineDynamicModule("$(Get-ManagedAssemblyName).dll")
-
-        $activityType = $android.GetType('Android.App.Activity', $true)
-        $main = $module.DefineType(
-            'Dev.MansfieldPlumbing.Pwsh.MainActivity',
-            [Reflection.TypeAttributes]'Public,Class,Sealed,BeforeFieldInit',
-            $activityType)
-
-        # The recovery menu, as compiled methods. This also gives the activity
-        # its OnActivityResult override, which needs no hand-written IL.
-        $screen = New-AndroidHostTypes -Module $module -Main $main -Android $android
-        $main.DefineDefaultConstructor(
-            [Reflection.MethodAttributes]'Public,HideBySig,SpecialName,RTSpecialName') | Out-Null
-
-        $attributeConstructor = Get-ExactConstructor $activityAttributeType @()
-        $attributeProperties = [Reflection.PropertyInfo[]]@(
-            (Get-ExactProperty $activityAttributeType 'Name'),
-            (Get-ExactProperty $activityAttributeType 'Label'),
-            (Get-ExactProperty $activityAttributeType 'MainLauncher'),
-            (Get-ExactProperty $activityAttributeType 'Exported'))
-        $attributeValues = [object[]]@(
-            'dev.mansfieldplumbing.pwsh.MainActivity',
-            'Pwsh',
-            $true,
-            $true)
-        $main.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new(
-            $attributeConstructor,
-            [object[]]@(),
-            $attributeProperties,
-            $attributeValues))
-
-        $bundleType = $android.GetType('Android.OS.Bundle', $true)
-        $baseOnCreate = $activityType.GetMethod(
-            'OnCreate',
-            [Reflection.BindingFlags]'Instance,NonPublic',
-            $null,
-            [Type[]]@($bundleType),
-            $null)
-        if ($null -eq $baseOnCreate -or $baseOnCreate.DeclaringType -ne $activityType) {
-            throw 'Android.App.Activity.OnCreate(Bundle) could not be identified unambiguously.'
-        }
-
-        $onCreate = $main.DefineMethod(
-            'OnCreate',
-            [Reflection.MethodAttributes]'Family,Virtual,HideBySig',
-            [void],
-            [Type[]]@($bundleType))
-
-        # The only hand-written IL in the build, and it carries no behaviour.
-        # base.OnCreate is a non-virtual call to a virtual method, which has no
-        # expression-tree form: Expression.Call on a virtual method emits
-        # callvirt, which would dispatch straight back into this override. So
-        # the shim performs the base call and delegates. Everything the screen
-        # actually does lives in AdmitActivity, which was compiled from a tree.
-        #
-        #   base.OnCreate (bundle);
-        #   RecoveryProgram.AdmitActivity (this);
-        $il = $onCreate.GetILGenerator()
-        $il.Emit([Reflection.Emit.OpCodes]::Ldarg_0)
-        $il.Emit([Reflection.Emit.OpCodes]::Ldarg_1)
-        $il.Emit([Reflection.Emit.OpCodes]::Call, $baseOnCreate)
-        $il.Emit([Reflection.Emit.OpCodes]::Ldarg_0)
-        $il.Emit([Reflection.Emit.OpCodes]::Call, $screen.AdmitMethod)
-        $il.Emit([Reflection.Emit.OpCodes]::Ret)
-        $main.DefineMethodOverride($onCreate, $baseOnCreate)
-        $main.CreateType() | Out-Null
-
-        if ($Admission -eq 'NativeActivity') {
-            # The managed entries the emitted native host reaches through
-            # coreclr_create_delegate. They touch no Android type, so Mono.Android
-            # is never loaded. RunPowerShell (gates 2b and 2c) opens a runspace on
-            # the calling (main) thread, runs a script whose value is 'PWSH'
-            # (0x50575348) and returns that value, or the HResult of the first
-            # exception.
-            # Boundary markers go to logcat through liblog, bound by P/Invoke.
-            $logType = $module.DefineType('Dev.MansfieldPlumbing.Pwsh.NativeLog',
-                [Reflection.TypeAttributes]'NotPublic,Abstract,Sealed,BeforeFieldInit')
-            $logWrite = $logType.DefinePInvokeMethod('__android_log_write', 'liblog.so',
-                [Reflection.MethodAttributes]'Public,Static,PinvokeImpl,HideBySig', [Reflection.CallingConventions]::Standard,
-                [int], [type[]]@([int], [string], [string]),
-                [Runtime.InteropServices.CallingConvention]::Cdecl, [Runtime.InteropServices.CharSet]::Ansi)
-            $logWrite.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)
-            $logType.CreateType() | Out-Null
-            $infoPriority = Get-AndroidLogPriority -Name 'ANDROID_LOG_INFO'
-            $errorPriority = Get-AndroidLogPriority -Name 'ANDROID_LOG_ERROR'
-            $log = { param([int] $Priority, [Linq.Expressions.Expression] $Text)
-                New-StaticCall $logWrite @((New-ClrConstant $Priority ([int])), (New-ClrConstant 'Pwsh' ([string])), $Text) }
-            $mark = { param([string] $Text) & $log $infoPriority (New-ClrConstant $Text ([string])) }
-
-            $rs = [Management.Automation.Runspaces.RunspaceFactory]
-            # Borrowed for this NativeActivity invocation; never publish one
-            # process-global current Activity. native_activity.h owns its lifetime.
-            $nativeActivity = [Linq.Expressions.Expression]::Parameter([IntPtr], 'nativeActivity')
-            $runspaceType = [Management.Automation.Runspaces.Runspace]
-            $issVar = [Linq.Expressions.Expression]::Variable([Management.Automation.Runspaces.InitialSessionState], 'iss')
-            $runspaceVar = [Linq.Expressions.Expression]::Variable($runspaceType, 'runspace')
-            $shellVar = [Linq.Expressions.Expression]::Variable([powershell], 'shell')
-            $resultVar = [Linq.Expressions.Expression]::Variable([int], 'result')
-            $filesVar = [Linq.Expressions.Expression]::Variable([string], 'files')
-            $profileVar = [Linq.Expressions.Expression]::Variable([string], 'profile')
-            $profileShell = [Linq.Expressions.Expression]::Variable([powershell], 'profileShell')
-            $stateShell = [Linq.Expressions.Expression]::Variable([powershell], 'stateShell')
-            $startCommand = [Linq.Expressions.Expression]::Variable([Management.Automation.CommandInfo], 'startCommand')
-            $errorVar = [Linq.Expressions.Expression]::Variable([Exception], 'error')
-            $invoke = @([powershell].GetMethods() | Where-Object { $_.Name -eq 'Invoke' -and -not $_.IsGenericMethodDefinition -and $_.GetParameters().Count -eq 0 })
-            if ($invoke.Count -ne 1) { throw "PowerShell.Invoke(): $($invoke.Count) non-generic parameterless overloads." }
-            $results = New-ClrCall $shellVar $invoke[0]
-            $first = [Linq.Expressions.Expression]::Property($results, 'Item', [Linq.Expressions.Expression[]]@(New-ClrConstant 0 ([int])))
-            $firstValue = [Linq.Expressions.Expression]::Unbox(
-                (New-ClrProperty $first (Get-ExactProperty ([psobject]) 'BaseObject')), [int])
-            $nativeHostType = $module.DefineType('Dev.MansfieldPlumbing.Pwsh.NativeHost',
-                [Reflection.TypeAttributes]'Public,Abstract,Sealed,BeforeFieldInit')
-            $concat = Get-ExactMethod ([string]) 'Concat' @([string], [string])
-            $hexText = { param($value) New-ClrCall $value (Get-ExactMethod ([int]) 'ToString' @([string])) @((New-ClrConstant 'x8' ([string]))) }
-            # Gate 2d substrate: Profile.ps1 through the product's path, less
-            # what needs an Activity ($Activity, recovery UI, animation), which
-            # waits for gate 2e. The files directory is internalDataPath, the
-            # base directory the host passes without its trailing separator;
-            # FindProfile is the product's case-insensitive lookup.
-            $nativeFind = New-FindProfileMethod -Owner $nativeHostType -Attributes ([Reflection.MethodAttributes]'Private,Static,HideBySig')
-            $sessionState = New-ClrProperty $runspaceVar (Get-ExactProperty $runspaceType 'SessionStateProxy')
-            $profileErrors = New-ClrProperty (New-ClrProperty $profileShell (Get-ExactProperty ([powershell]) 'Streams')) (Get-ExactProperty ([Management.Automation.PSDataStreams]) 'Error')
-            $errorCollection = (Get-ExactProperty ([Management.Automation.PSDataStreams]) 'Error').PropertyType
-            $firstError = [Linq.Expressions.Expression]::MakeIndex($profileErrors, $errorCollection.GetProperty('Item', [type[]]@([int])), [Linq.Expressions.Expression[]]@((New-ClrConstant 0 ([int]))))
-            $stateResults = New-ClrCall $stateShell $invoke[0]
-            $stateValue = [Linq.Expressions.Expression]::Unbox((New-ClrProperty ([Linq.Expressions.Expression]::Property($stateResults, 'Item', [Linq.Expressions.Expression[]]@(New-ClrConstant 0 ([int])))) (Get-ExactProperty ([psobject]) 'BaseObject')), [int])
-            $profilePhase = New-ClrBlock @() @(
-                (New-ClrAssign $filesVar (New-StaticCall (Get-ExactMethod ([IO.Path]) 'TrimEndingDirectorySeparator' @([string])) @((New-ClrProperty $null (Get-ExactProperty ([AppContext]) 'BaseDirectory'))))),
-                (New-ClrAssign $profileVar (New-StaticCall $nativeFind.Method @(
-                    (New-StaticCall $nativeFind.GetFiles @($filesVar)),
-                    (New-ClrConstant 0 ([int])),
-                    (New-StaticCall (Get-ExactMethod ([IO.Path]) 'Combine' @([string], [string])) @($filesVar, (New-ClrConstant 'Profile.ps1' ([string]))))))),
-                [Linq.Expressions.Expression]::IfThenElse(
-                    (New-StaticCall (Get-ExactMethod ([IO.File]) 'Exists' @([string])) @($profileVar)),
-                    (New-ClrBlock @() @(
-                        (& $log $infoPriority (New-StaticCall $concat @((New-ClrConstant 'GATE2D found ' ([string])), (New-StaticCall $nativeFind.GetFileName @($profileVar))))),
-                        (New-ClrCall $sessionState (Get-ExactMethod ([Management.Automation.Runspaces.SessionStateProxy]) 'SetVariable' @([string], [object])) @(
-                            (New-ClrConstant 'PSScriptRoot' ([string])), [Linq.Expressions.Expression]::Convert($filesVar, [object]))),
-                        (New-ClrAssign $startCommand (New-ClrCall (New-ClrProperty $sessionState (Get-ExactProperty ([Management.Automation.Runspaces.SessionStateProxy]) 'InvokeCommand')) `
-                            (Get-ExactMethod ([Management.Automation.CommandInvocationIntrinsics]) 'GetCommand' @([string], [Management.Automation.CommandTypes])) @(
-                                $profileVar, (New-ClrConstant ([Management.Automation.CommandTypes]::ExternalScript) ([Management.Automation.CommandTypes]))))),
-                        (New-ClrAssign $profileShell (New-StaticCall (Get-ExactMethod ([powershell]) 'Create' @($runspaceType)) @($runspaceVar))),
-                        (New-ClrCall $profileShell (Get-ExactMethod ([powershell]) 'AddCommand' @([Management.Automation.CommandInfo])) @($startCommand)),
-                        (& $mark 'GATE2D START_INVOKE_BEGIN'),
-                        (New-ClrCall $profileShell $invoke[0]),
-                        (& $mark 'GATE2D START_INVOKE_END'),
-                        [Linq.Expressions.Expression]::IfThen(
-                            (New-ClrProperty $profileShell (Get-ExactProperty ([powershell]) 'HadErrors')),
-                            [Linq.Expressions.Expression]::Throw((New-ClrNew ([InvalidOperationException].GetConstructor([type[]]@([string]))) @(
-                                [Linq.Expressions.Expression]::Condition(
-                                    [Linq.Expressions.Expression]::GreaterThan((New-ClrProperty $profileErrors (Get-ExactProperty $errorCollection 'Count')), (New-ClrConstant 0 ([int]))),
-                                    (New-ClrCall $firstError (Get-ExactMethod ([Management.Automation.ErrorRecord]) 'ToString' @())),
-                                    (New-ClrConstant 'Profile.ps1 reported one or more PowerShell errors.' ([string]))))))),
-                        # State the profile left in the runspace, read by a second pipeline.
-                        (New-ClrAssign $stateShell (New-StaticCall (Get-ExactMethod ([powershell]) 'Create' @($runspaceType)) @($runspaceVar))),
-                        (New-ClrCall $stateShell (Get-ExactMethod ([powershell]) 'AddScript' @([string])) @((New-ClrConstant '[int]$global:Gate2d' ([string])))),
-                        (& $log $infoPriority (New-StaticCall $concat @((New-ClrConstant 'GATE2D profile state 0x' ([string])), (& $hexText $stateValue)))))),
-                    (& $mark 'GATE2D START_MISSING')))
-            $try = New-ClrBlock @() @(
-                [Linq.Expressions.Expression]::IfThen(
-                    [Linq.Expressions.Expression]::Equal($nativeActivity, [Linq.Expressions.Expression]::Default([IntPtr])),
-                    [Linq.Expressions.Expression]::Throw((New-ClrNew ([ArgumentNullException].GetConstructor([type[]]@([string]))) @(
-                        (New-ClrConstant 'nativeActivity' ([string])))))),
-                (New-StaticCall ([Management.Automation.PowerShellAssemblyLoadContextInitializer].GetMethod(
-                    'SetPowerShellAssemblyLoadContext', [Reflection.BindingFlags]'Public,Static', $null, [type[]]@([string]), $null)) @(
-                    (New-ClrProperty $null (Get-ExactProperty ([AppContext]) 'BaseDirectory')))),
-                (& $mark 'GATE2B managed resolution complete'),
-                (& $mark 'GATE2C CreateDefault2'),
-                (New-ClrAssign $issVar (New-StaticCall (Get-ExactMethod ([Management.Automation.Runspaces.InitialSessionState]) 'CreateDefault2' @()))),
-                (New-ClrAssign (New-ClrProperty $issVar (Get-ExactProperty ([Management.Automation.Runspaces.InitialSessionState]) 'LanguageMode')) `
-                    (New-ClrConstant ([Management.Automation.PSLanguageMode]::FullLanguage) ([Management.Automation.PSLanguageMode]))),
-                (& $mark 'GATE2C CreateRunspace'),
-                (New-ClrAssign $runspaceVar (New-StaticCall (Get-ExactMethod $rs 'CreateRunspace' @([Management.Automation.Runspaces.InitialSessionState])) @($issVar))),
-                (New-ClrAssign (New-ClrProperty $runspaceVar (Get-ExactProperty $runspaceType 'ThreadOptions')) `
-                    (New-ClrConstant ([Management.Automation.Runspaces.PSThreadOptions]::UseCurrentThread) ([Management.Automation.Runspaces.PSThreadOptions]))),
-                (& $mark 'GATE2C Open'),
-                (New-ClrCall $runspaceVar (Get-ExactMethod $runspaceType 'Open' @())),
-                (New-ClrAssign (New-ClrProperty $null (Get-ExactProperty $runspaceType 'DefaultRunspace')) $runspaceVar),
-                (& $mark 'GATE2C DefaultRunspace set'),
-                # Gate 2e admission prerequisite. The facade may read env/vm/
-                # clazz from this borrowed pointer on the owning main thread.
-                # Revocation at onDestroy belongs to the lifecycle gate.
-                (New-ClrCall $sessionState (Get-ExactMethod ([Management.Automation.Runspaces.SessionStateProxy]) 'SetVariable' @([string], [object])) @(
-                    (New-ClrConstant 'NativeActivityHandle' ([string])), [Linq.Expressions.Expression]::Convert($nativeActivity, [object]))),
-                (New-ClrAssign $shellVar (New-StaticCall (Get-ExactMethod ([powershell]) 'Create' @($runspaceType)) @($runspaceVar))),
-                (New-ClrCall $shellVar (Get-ExactMethod ([powershell]) 'AddScript' @([string])) @((New-ClrConstant '0x50575348' ([string])))),
-                (New-ClrAssign $resultVar $firstValue),
-                (& $log $infoPriority (New-StaticCall (Get-ExactMethod ([string]) 'Concat' @([string], [string])) @(
-                    (New-ClrConstant 'GATE2C script result 0x' ([string])),
-                    (New-ClrCall $resultVar (Get-ExactMethod ([int]) 'ToString' @([string])) @((New-ClrConstant 'x8' ([string]))))))),
-                $profilePhase,
-                $resultVar)
-            # Run holds every SMA reference. Admit references none, so a load or
-            # JIT failure of Run surfaces as an exception inside Admit's try.
-            $run = Add-PersistedMethod $nativeHostType 'Run' ([Reflection.MethodAttributes]'Private,Static,HideBySig') ([int]) @([IntPtr]) `
-                ([Func[IntPtr,int]]) @($nativeActivity) (New-ClrBlock @($issVar, $runspaceVar, $shellVar, $resultVar, $filesVar, $profileVar, $profileShell, $stateShell, $startCommand) @($try))
-            # RunPowerShell returns the HResult of any exception, and the native
-            # host logs it. The handler first logs the exception's type and
-            # message (not ToString, which pulls in stack-trace machinery), inside
-            # its own try, so the HResult comes back even if that logging fails.
-            $describe = New-StaticCall (Get-ExactMethod ([string]) 'Concat' @([string], [string], [string], [string])) @(
-                (New-ClrConstant 'GATE2B exception ' ([string])),
-                (New-ClrProperty (New-ClrCall $errorVar (Get-ExactMethod ([object]) 'GetType' @())) (Get-ExactProperty ([type]) 'FullName')),
-                (New-ClrConstant ': ' ([string])),
-                (New-ClrProperty $errorVar (Get-ExactProperty ([Exception]) 'Message')))
-            $catch = [Linq.Expressions.Expression]::Catch($errorVar, (New-ClrBlock @() @(
-                [Linq.Expressions.Expression]::TryCatch(
-                    (New-ClrBlock @() @((& $log $errorPriority $describe), [Linq.Expressions.Expression]::Empty())),
-                    [Linq.Expressions.Expression]::Catch([Exception], [Linq.Expressions.Expression]::Empty())),
-                (New-ClrProperty $errorVar (Get-ExactProperty ([Exception]) 'HResult')))))
-            [void](Add-PersistedMethod $nativeHostType 'RunPowerShell' ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([int]) @([IntPtr]) `
-                ([Func[IntPtr,int]]) @($nativeActivity) ([Linq.Expressions.Expression]::TryCatch((New-StaticCall $run @($nativeActivity)), $catch)))
-            # Gate 2a, kept as an in-process invariant: the host calls it first
-            # and requires 'PWSH' (0x50575348) before it calls RunPowerShell.
-            [void](Add-PersistedMethod $nativeHostType 'Admit' ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([int]) @() `
-                ([Func[int]]) @() ([Linq.Expressions.Expression]::Constant([int]0x50575348, [int])))
-            $nativeHostType.CreateType() | Out-Null
-        }
-
-        Write-Host ('[PASS] Screen: {0} methods compiled from expression trees; 6 hand-written opcodes in the OnCreate shim.' -f
-            $screen.MethodCount) -ForegroundColor Green
-
-        $stream = [IO.MemoryStream]::new()
-        try {
-            $builder.Save($stream)
-            return ,(Set-DeterministicMvid -Assembly $stream.ToArray())
-        }
-        finally { $stream.Dispose() }
+        $builder.Save($stream)
+        return ,(Set-DeterministicMvid -Assembly $stream.ToArray())
     }
-    finally {
-        $context.remove_Resolving($resolver)
-        $context.Unload()
-    }
+    finally { $stream.Dispose() }
 }
 
 function Add-GeneratedAssemblyCandidates {
     $generated = [ordered]@{
-        '_Microsoft.Android.Resource.Designer.dll' = New-EmptyManagedAssemblyBytes `
-            -AssemblyName '_Microsoft.Android.Resource.Designer' `
-            -TypeName '_Microsoft.Android.Resource.Designer.Resource'
-        'Probe.dll' = New-EmptyManagedAssemblyBytes -AssemblyName 'Probe' -TypeName 'Pwsh.Probe'
-        "$(Get-ManagedAssemblyName).dll" = New-PwshActivityAssemblyBytes -Candidates $script:BuildContext.PayloadCandidates
+        "$($script:ManagedNamespace).dll" = New-ManagedHostAssemblyBytes
     }
     foreach ($item in $generated.GetEnumerator()) {
         $script:BuildContext.PayloadCandidates.Add([pscustomobject]@{
@@ -4353,9 +2685,8 @@ function Invoke-StoreStep {
     # .NET for Android host makes (lib/assembly-store.cc), so this layout owns
     # their alignment: every image starts on a 16-byte boundary. CoreCLR needs
     # a fat method header 4-byte aligned on 64-bit hosts (corhlpr.cpp
-    # DecoderInit); 16 is the store's own invariant, above that. The Xamarin
-    # store keeps the upstream layout, byte for byte.
-    $alignment = if ($Admission -eq 'NativeActivity') { 16 } else { 1 }
+    # DecoderInit); 16 is the store's own invariant, above that.
+    $alignment = 16
     $storeBytes = New-AssemblyStoreBytes -SelectedAssemblies $selected -Contract $contract -DataAlignment $alignment
     $report = Test-AssemblyStoreBytes -StoreBytes $storeBytes -SelectedAssemblies $selected -Contract $contract -DataAlignment $alignment
 
@@ -5034,114 +3365,6 @@ function New-ElfCodeLibrary {
     }
 }
 
-function New-ElfDataLibrary {
-    # A shared object that exports data. Two loadable segments: a read and
-    # execute region holding the metadata and the one code stub, and a read and
-    # write region holding the data the host mutates, extended past the end of
-    # the file by a .bss tail. Pointers inside the data are supplied by the
-    # target's RELATIVE relocations, because a position independent object
-    # cannot know its own load address.
-    param(
-        [Parameter(Mandatory)][string] $Soname,
-        [Parameter(Mandatory)][byte[]] $Payload,
-        [Parameter(Mandatory)][System.Collections.Generic.List[object]] $Symbols,
-        [Parameter(Mandatory)][System.Collections.Generic.List[object]] $Relocations,
-        [Parameter(Mandatory)][string] $BssSymbolName,
-        [int] $BssSize = 8,
-        [int] $PageSize = 16384
-    )
-
-    $elf = Get-ElfConstants
-    $L = Get-ElfLayout -Class $script:Target.ElfClass
-    $w = $L.Word
-    $form = $script:Target.RelocationForm
-    $relocationEntry = Get-ElfRelocationEntrySize -Layout $L -Form $form
-    $relocationTags = Get-ElfRelocationTags -Form $form
-    $programHeaderCount = 3
-
-    $exported = [System.Collections.Generic.List[object]]::new()
-    foreach ($symbol in $Symbols) { $exported.Add($symbol) }
-    $exported.Add([pscustomobject]@{ Name = $BssSymbolName; Offset = $Payload.Length; Size = $BssSize; Kind = 'OBJECT' })
-
-    $strings = New-ElfStringTable -Strings (@($Soname) + @($exported | ForEach-Object { [string]$_.Name }))
-    $hashBytes = Get-ElfHashTableBytes -Symbols @($exported | ForEach-Object { [string]$_.Name })
-
-    # DT_RELACOUNT has been emitted with RELA since the first device run; the
-    # REL images have never carried DT_RELCOUNT.
-    $dynamic = [System.Collections.Generic.List[object]]::new()
-    $dynstrOffset = $L.Header + $L.ProgramHeader * $programHeaderCount
-    $dynsymOffset = Get-AlignedOffset ($dynstrOffset + $strings.Bytes.Length) $w
-    $hashOffset = $dynsymOffset + $L.Symbol * ($exported.Count + 1)
-    $relocationOffset = Get-AlignedOffset ($hashOffset + $hashBytes.Length) $w
-    $relocationSize = $relocationEntry * $Relocations.Count
-    $dynamicOffset = Get-AlignedOffset ($relocationOffset + $relocationSize) $w
-    foreach ($e in @(
-            @($elf['DT_SONAME'], $strings.Offset[$Soname]),
-            @($elf['DT_HASH'], $hashOffset),
-            @($elf['DT_STRTAB'], $dynstrOffset),
-            @($elf['DT_SYMTAB'], $dynsymOffset),
-            @($elf['DT_STRSZ'], $strings.Bytes.Length),
-            @($elf['DT_SYMENT'], $L.Symbol),
-            @($relocationTags.Table, $relocationOffset),
-            @($relocationTags.Size, $relocationSize),
-            @($relocationTags.Entry, $relocationEntry))) { $dynamic.Add($e) }
-    if ($form -eq 'RELA') { $dynamic.Add(@($elf['DT_RELACOUNT'], $Relocations.Count)) }
-    $dynamic.Add(@($elf['DT_NULL'], 0))
-    $dynamic.Add(@($elf['DT_NULL'], 0))
-    $dynamicSize = $L.Dynamic * $dynamic.Count
-
-    $codeOffset = Get-AlignedOffset ($dynamicOffset + $dynamicSize) 4
-    $readExecuteEnd = $codeOffset + 4
-    $payloadOffset = [long]([Math]::Ceiling(($readExecuteEnd + 1) / $PageSize)) * $PageSize
-    $imageSize = $payloadOffset + $Payload.Length
-
-    $symbolAddress = {
-        param([object] $Symbol)
-        if ([string]$Symbol.Kind -ceq 'FUNC') { return $codeOffset }
-        return $payloadOffset + [int]$Symbol.Offset
-    }
-
-    $image = New-Object byte[] $imageSize
-    Write-ElfHeader $image $L $programHeaderCount
-    $readExecute = [uint32]($elf['PF_R'] -bor $elf['PF_X'])
-    $readWrite = [uint32]($elf['PF_R'] -bor $elf['PF_W'])
-    Write-ElfProgramHeader $image $L $L.Header $elf['PT_LOAD'] $readExecute 0 $readExecuteEnd $readExecuteEnd $PageSize
-    Write-ElfProgramHeader $image $L ($L.Header + $L.ProgramHeader) $elf['PT_LOAD'] $readWrite $payloadOffset $Payload.Length ($Payload.Length + $BssSize) $PageSize
-    Write-ElfProgramHeader $image $L ($L.Header + 2 * $L.ProgramHeader) $elf['PT_DYNAMIC'] $readWrite $dynamicOffset $dynamicSize $dynamicSize $w
-
-    [System.Array]::Copy($strings.Bytes, 0, $image, $dynstrOffset, $strings.Bytes.Length)
-    $at = $dynsymOffset + $L.Symbol
-    foreach ($symbol in $exported) {
-        $type = if ([string]$symbol.Kind -ceq 'FUNC') { [uint32]$elf['STT_FUNC'] } else { [uint32]$elf['STT_OBJECT'] }
-        Write-ElfSymbol $image $L $at $strings.Offset[[string]$symbol.Name] (& $symbolAddress $symbol) ([int]$symbol.Size) `
-            ([byte](([uint32]$elf['STB_GLOBAL'] -shl 4) -bor $type)) 1
-        $at += $L.Symbol
-    }
-    [System.Array]::Copy($hashBytes, 0, $image, $hashOffset, $hashBytes.Length)
-    Write-ElfDynamicTable $image $L $dynamicOffset $dynamic.ToArray()
-
-    $stub = [byte[]](Get-ReturnStubBytes)
-    [System.Array]::Copy($stub, 0, $image, $codeOffset, $stub.Length)
-    [System.Array]::Copy($Payload, 0, $image, $payloadOffset, $Payload.Length)
-
-    # After the payload copy, because REL writes each addend into the payload.
-    $at = $relocationOffset
-    foreach ($relocation in $Relocations) {
-        Write-ElfRelocation $image $L $at $form ($payloadOffset + [int]$relocation.Offset) 0 $elf[$script:Target.RelativeRelocation] ($payloadOffset + [int]$relocation.Target)
-        $at += $relocationEntry
-    }
-
-    $image = Add-ElfSectionTable -Image $image -Layout $L -DynstrOffset $dynstrOffset -DynstrSize $strings.Bytes.Length -DynamicOffset $dynamicOffset -DynamicSize $dynamicSize
-
-    [pscustomobject]@{
-        Bytes           = $image
-        PayloadOffset   = $payloadOffset
-        SymbolCount     = $exported.Count
-        RelocationCount = $Relocations.Count
-        BssSize         = $BssSize
-    }
-}
-
 function Read-ElfImage {
     <#
         An ELF reader that takes nothing from the writers but the bytes. The
@@ -5423,59 +3646,6 @@ function Test-ElfCodeLibrary {
         Imports   = $Library.Imports.Count
         Needed    = $image.Needed.Count
         Steps     = $steps
-    }
-}
-
-function Test-XamarinAppLibrary {
-    param(
-        [Parameter(Mandatory)][pscustomobject] $Library,
-        [Parameter(Mandatory)][string[]] $RequiredSymbols,
-        [Parameter(Mandatory)][string] $PackageName,
-        [Parameter(Mandatory)][int] $AssemblyCount
-    )
-
-    $elf = Get-ElfConstants
-    $bytes = [byte[]]$Library.Bytes
-    $image = Read-ElfImage -Image $bytes
-    Assert-ElfTargetHeader -Parsed $image -Name 'libxamarin-app.so'
-    $w = $image.Layout.Word
-
-    if (-not @($image.Segments | Where-Object { $_.Type -eq $elf['PT_LOAD'] -and $_.MemorySize -gt $_.FileSize })) {
-        throw 'No segment reserves memory past the end of the file for the assemblies buffer.'
-    }
-    if (-not @($image.Segments | Where-Object { $_.Type -eq $elf['PT_DYNAMIC'] })) { throw 'The emitted library declares no PT_DYNAMIC segment.' }
-    foreach ($required in 'DT_HASH', 'DT_STRTAB', 'DT_SYMTAB') {
-        if (-not $image.Tags.ContainsKey([uint64]$elf[$required])) { throw "The dynamic table is missing $required." }
-    }
-    if ($image.RelocationForm -ne $script:Target.RelocationForm) { throw "libxamarin-app.so uses $($image.RelocationForm); the target uses $($script:Target.RelocationForm)." }
-    $tags = Get-ElfRelocationTags -Form $image.RelocationForm
-    if ($image.Tags[[uint64]$tags.Entry] -ne (Get-ElfRelocationEntrySize -Layout $image.Layout -Form $image.RelocationForm)) { throw 'The relocation entry size is wrong.' }
-
-    $addendAt = @{}
-    foreach ($relocation in $image.Relocations) {
-        if ($relocation.Type -ne $elf[$script:Target.RelativeRelocation]) { throw "Relocation at $($relocation.Offset) is not $($script:Target.RelativeRelocation)." }
-        if ($relocation.Offset + $w -gt $bytes.Length) { throw "Relocation at $($relocation.Offset) writes outside the image." }
-        if ($relocation.Addend -lt 0 -or $relocation.Addend -ge $bytes.Length) { throw "Relocation at $($relocation.Offset) points outside the image." }
-        $addendAt[[long]$relocation.Offset] = [long]$relocation.Addend
-    }
-
-    $missing = @($RequiredSymbols | Where-Object { -not $image.Resolved.ContainsKey($_) })
-    if ($missing.Count -ne 0) { throw "The emitted library does not export: $($missing -join ', ')" }
-
-    # ApplicationConfig: four bools, thirteen uint32_t, the package-name pointer
-    # at 56, then have_assembly_store (lib/xamarin-app.hh).
-    $config = [long]$image.Resolved['application_config'].Value
-    if ([BitConverter]::ToUInt32($bytes, $config + 20) -ne $AssemblyCount) { throw "application_config does not declare $AssemblyCount assemblies." }
-    if ($bytes[$config + 56 + $w] -ne 1) { throw 'application_config does not set have_assembly_store.' }
-    if (-not $addendAt.ContainsKey($config + 56) -or (Read-ElfString -Image $bytes -Offset $addendAt[$config + 56]) -cne $PackageName) {
-        throw 'application_config.android_package_name does not address the package name.'
-    }
-
-    [pscustomobject]@{
-        Size            = $bytes.Length
-        SymbolCount     = $Library.SymbolCount
-        RelocationCount = $Library.RelocationCount
-        Verified        = $RequiredSymbols.Count
     }
 }
 
@@ -6787,15 +4957,6 @@ function New-PslNativeLibraryArm32 {
     [pscustomobject]@{ Library = $library; Report = $report }
 }
 
-function Skip-ForNativeAdmission {
-    # True when the NativeActivity admission build does not use this step's
-    # output. The step still runs in its place in the graph and says so.
-    param([Parameter(Mandatory)][int] $Step, [Parameter(Mandatory)][string] $Output)
-    if ($Admission -ne 'NativeActivity') { return $false }
-    Write-Host ('[PASS] Step {0} skipped: {1} is not part of NativeActivity admission.' -f $Step, $Output) -ForegroundColor Green
-    $true
-}
-
 function Get-AndroidLogPriority {
     # A value of the android_LogPriority enum in lib/log.h. The enumerators are
     # implicit, so apply C's rule: each is the previous value plus one, unless
@@ -7554,22 +5715,19 @@ function Invoke-NativeStep {
         Sha256 = $libraryHash
     }
 
-    if ($Admission -eq 'NativeActivity') {
-        $aligned = Test-StoreImageAlignment -LibraryBytes ([byte[]]$library.Bytes) -SymbolName $symbol -Entries $script:BuildContext.AssemblyStore.Entries
-        Write-Host ('[PASS] Store alignment: {0} images start 16-byte aligned in the mapped library; {1} fat method headers fall 4-byte aligned, {2} tiny.' -f
-            $aligned.Images, $aligned.FatMethods, $aligned.TinyMethods) -ForegroundColor Green
-        $nativeHost = New-NativeHostLibrary -StoreEntries $script:BuildContext.AssemblyStore.Entries -StoreLibrary $soname -StoreSymbol $symbol -PageSize $pageSize
-        $hostPath = Join-Path $outputDirectory 'libpwsh-host.so'
-        if ($PSCmdlet.ShouldProcess($hostPath, 'Write libpwsh-host')) {
-            Write-BuildFile -Intermediate -Path $hostPath -Bytes $nativeHost.Library.Bytes
-        }
-        $script:BuildContext.NativeHost = [pscustomobject]@{ Path = $hostPath; Bytes = $nativeHost.Library.Bytes }
-        Write-Host ('[PASS] libpwsh-host.so emitted: {0} bytes, exports {1}, {2} imports through a BIND_NOW GOT, a {3}-entry assembly probe table, {4} instructions decoded back and checked.' -f
-            $nativeHost.Report.ImageSize, ($nativeHost.Library.Exports.PSBase.Keys -join ' and '), $nativeHost.Report.Imports, $script:BuildContext.AssemblyStore.Entries.Count, $nativeHost.Report.Steps) -ForegroundColor Green
+    $aligned = Test-StoreImageAlignment -LibraryBytes ([byte[]]$library.Bytes) -SymbolName $symbol -Entries $script:BuildContext.AssemblyStore.Entries
+    Write-Host ('[PASS] Store alignment: {0} images start 16-byte aligned in the mapped library; {1} fat method headers fall 4-byte aligned, {2} tiny.' -f
+        $aligned.Images, $aligned.FatMethods, $aligned.TinyMethods) -ForegroundColor Green
+    $nativeHost = New-NativeHostLibrary -StoreEntries $script:BuildContext.AssemblyStore.Entries -StoreLibrary $soname -StoreSymbol $symbol -PageSize $pageSize
+    $hostPath = Join-Path $outputDirectory 'libpwsh-host.so'
+    if ($PSCmdlet.ShouldProcess($hostPath, 'Write libpwsh-host')) {
+        Write-BuildFile -Intermediate -Path $hostPath -Bytes $nativeHost.Library.Bytes
     }
-    # libpsl-native: SMA resolves it by name during startup logging. Both
-    # admissions package it; with the NativeActivity host, CoreCLR's default
-    # probing finds it in the APK's library directory.
+    $script:BuildContext.NativeHost = [pscustomobject]@{ Path = $hostPath; Bytes = $nativeHost.Library.Bytes }
+    Write-Host ('[PASS] libpwsh-host.so emitted: {0} bytes, exports {1}, {2} imports through a BIND_NOW GOT, a {3}-entry assembly probe table, {4} instructions decoded back and checked.' -f
+        $nativeHost.Report.ImageSize, ($nativeHost.Library.Exports.PSBase.Keys -join ' and '), $nativeHost.Report.Imports, $script:BuildContext.AssemblyStore.Entries.Count, $nativeHost.Report.Steps) -ForegroundColor Green
+    # libpsl-native: SMA resolves it by name during startup logging; CoreCLR's
+    # default probing finds it in the APK's library directory.
     $psl = switch ($Architecture) {
         'arm64' { New-PslNativeLibrary -PageSize $pageSize }
         'x64'   { New-PslNativeLibraryX64 -PageSize $pageSize }
@@ -7594,49 +5752,6 @@ function Invoke-NativeStep {
 }
 
 $script:Crc64JonesTable = $null
-
-function Get-Crc64JonesTable {
-    if ($null -ne $script:Crc64JonesTable) { return $script:Crc64JonesTable }
-
-    # CRC-64/Jones, reflected. The polynomial is the reversed form of
-    # 0xad93d23594c935a9, which is the constant dotnet/java-interop documents.
-    $polynomial = [Convert]::ToUInt64('95AC9329AC4BC9B5', 16)
-    $table = New-Object uint64[] 256
-    for ($i = 0; $i -lt 256; $i++) {
-        [uint64] $value = $i
-        for ($bit = 0; $bit -lt 8; $bit++) {
-            if (($value -band 1UL) -ne 0UL) { $value = ($value -shr 1) -bxor $polynomial }
-            else { $value = $value -shr 1 }
-        }
-        $table[$i] = $value
-    }
-    $script:Crc64JonesTable = $table
-    return $script:Crc64JonesTable
-}
-
-function Get-JavaPeerPackage {
-    # .NET Android names a generated Java peer's package
-    # "crc64" + hex(Crc64.Compute(namespace + ":" + assemblyName)), where
-    # Crc64 starts at ulong.MaxValue and exclusive-ors the byte count into the
-    # final value before taking its little-endian bytes. Reproduced from
-    # Crc64.cs and JavaNativeTypeManager.cs, and checked against a known
-    # mapping emitted by a real build:
-    #
-    #   Terminal.ReferenceBuild:Terminal.Reference -> crc649e75029c1a6609a5
-    param(
-        [Parameter(Mandatory)][AllowEmptyString()][string] $Namespace,
-        [Parameter(Mandatory)][string] $AssemblyName
-    )
-
-    $table = Get-Crc64JonesTable
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes("${Namespace}:${AssemblyName}")
-    [uint64] $crc = [uint64]::MaxValue
-    foreach ($byte in $bytes) {
-        $crc = $table[[int](($crc -bxor $byte) -band 0xFF)] -bxor ($crc -shr 8)
-    }
-    $crc = $crc -bxor ([uint64]$bytes.Length)
-    return 'crc64' + ([Convert]::ToHexString([BitConverter]::GetBytes($crc))).ToLowerInvariant()
-}
 
 function Test-AndroidAttributeIds {
     # The binary XML emitter carries a table of android: attribute names and the
@@ -7669,15 +5784,6 @@ function Test-AndroidAttributeIds {
     }
     return $expected.Count
 }
-function Test-JavaPeerNaming {
-    # The derivation above is only trustworthy because this agrees with the
-    # acw-map.txt a real .NET Android build produced.
-    $known = Get-JavaPeerPackage -Namespace 'Terminal.ReferenceBuild' -AssemblyName 'Terminal.Reference'
-    if ($known -cne 'crc649e75029c1a6609a5') {
-        throw "Java peer naming is wrong: 'Terminal.ReferenceBuild:Terminal.Reference' produced '$known'."
-    }
-}
-
 function Write-Uleb128 {
     param(
         [Parameter(Mandatory)][System.IO.MemoryStream] $Stream,
@@ -7703,218 +5809,6 @@ function Get-Adler32 {
         $b = ($b + $a) % 65521
     }
     return [uint32](($b -shl 16) -bor $a)
-}
-
-function New-JavaPeerDex {
-    # Emits a DEX containing exactly one class: the Java peer Android
-    # instantiates for the managed activity. Everything it calls into —
-    # mono.android.Runtime, TypeManager, IGCUserPeer — lives in the acquired
-    # classes.dex, so this file only has to carry the binding.
-    #
-    # The class shape and instruction sequences are taken from the peer in a
-    # shipping .NET Android APK, read out of its dex rather than assumed.
-    param(
-        [Parameter(Mandatory)][string] $PeerPackage,
-        [Parameter(Mandatory)][string] $ClassName,
-        [Parameter(Mandatory)][string] $ManagedTypeName,
-        [Parameter(Mandatory)][string] $MethodDeclarations
-    )
-
-    $selfDescriptor = "L$PeerPackage/$ClassName;"
-
-    # --- interned pools -------------------------------------------------
-    $strings = [System.Collections.Generic.List[string]]::new()
-    $addString = {
-        param([string] $Value)
-        if (-not $strings.Contains($Value)) { [void]$strings.Add($Value) }
-    }
-
-    $typeDescriptors = @(
-        $selfDescriptor,
-        'I',
-        'Landroid/app/Activity;',
-        'Landroid/content/Intent;',
-        'Landroid/os/Bundle;',
-        'Ljava/lang/Class;',
-        'Ljava/lang/Object;',
-        'Ljava/lang/String;',
-        'Ljava/util/ArrayList;',
-        'Lmono/android/IGCUserPeer;',
-        'Lmono/android/Runtime;',
-        'Lmono/android/TypeManager;',
-        '[Ljava/lang/Object;',
-        'V',
-        'Z'
-    )
-    foreach ($descriptor in $typeDescriptors) { & $addString $descriptor }
-
-    $literals = @(
-        '', '<clinit>', '<init>', 'Activate', 'add', 'clear', 'monodroidAddReference',
-        'monodroidClearReferences', 'n_onActivityResult', 'n_onCreate', 'onActivityResult',
-        'onCreate', 'refList', 'register',
-        $ManagedTypeName, $MethodDeclarations,
-        'V', 'VIIL', 'VL', 'VLLL', 'VLLLL', 'ZL'
-    )
-    foreach ($literal in $literals) { & $addString $literal }
-
-    # DEX requires string_ids sorted by string content and type_ids sorted by
-    # the index of their descriptor, so sort once and index afterwards.
-    $sortedStrings = [string[]]@($strings)
-    [System.Array]::Sort($sortedStrings, [System.StringComparer]::Ordinal)
-    $stringIndex = @{}
-    for ($i = 0; $i -lt $sortedStrings.Length; $i++) { $stringIndex[$sortedStrings[$i]] = $i }
-
-    $sortedTypes = [string[]]@($typeDescriptors | Sort-Object { $stringIndex[$_] })
-    $typeIndex = @{}
-    for ($i = 0; $i -lt $sortedTypes.Length; $i++) { $typeIndex[$sortedTypes[$i]] = $i }
-
-    # --- prototypes -----------------------------------------------------
-    $protos = @(
-        @{ Shorty = 'V';     Return = 'V'; Parameters = @() },
-        @{ Shorty = 'VIIL';  Return = 'V'; Parameters = @('I', 'I', 'Landroid/content/Intent;') },
-        @{ Shorty = 'VL';    Return = 'V'; Parameters = @('Landroid/os/Bundle;') },
-        @{ Shorty = 'VL';    Return = 'V'; Parameters = @('Ljava/lang/Object;') },
-        @{ Shorty = 'VLLL';  Return = 'V'; Parameters = @('Ljava/lang/String;', 'Ljava/lang/Class;', 'Ljava/lang/String;') },
-        @{ Shorty = 'VLLLL'; Return = 'V'; Parameters = @('Ljava/lang/String;', 'Ljava/lang/String;', 'Ljava/lang/Object;', '[Ljava/lang/Object;') },
-        @{ Shorty = 'ZL';    Return = 'Z'; Parameters = @('Ljava/lang/Object;') }
-    )
-    $sortedProtos = @($protos | Sort-Object `
-        @{ Expression = { $typeIndex[$_.Return] } },
-        @{ Expression = { ($_.Parameters | ForEach-Object { '{0:D6}' -f $typeIndex[$_] }) -join '' } })
-    $protoIndex = @{}
-    for ($i = 0; $i -lt $sortedProtos.Count; $i++) {
-        $key = $sortedProtos[$i].Return + '(' + (($sortedProtos[$i].Parameters) -join ',') + ')'
-        $protoIndex[$key] = $i
-    }
-    $protoKey = {
-        param([string] $Return, [string[]] $Parameters)
-        return $Return + '(' + ($Parameters -join ',') + ')'
-    }
-
-    # --- fields and methods ---------------------------------------------
-    $fields = @(
-        @{ Class = $selfDescriptor; Name = 'refList'; Type = 'Ljava/util/ArrayList;' }
-    )
-    $sortedFields = @($fields | Sort-Object `
-        @{ Expression = { $typeIndex[$_.Class] } },
-        @{ Expression = { $stringIndex[$_.Name] } },
-        @{ Expression = { $typeIndex[$_.Type] } })
-    $fieldIndex = @{}
-    for ($i = 0; $i -lt $sortedFields.Count; $i++) {
-        $fieldIndex[$sortedFields[$i].Class + '->' + $sortedFields[$i].Name] = $i
-    }
-
-    $methods = @(
-        @{ Class = 'Landroid/app/Activity;';   Name = '<init>';                   Return = 'V'; Parameters = @() },
-        @{ Class = $selfDescriptor;            Name = '<clinit>';                  Return = 'V'; Parameters = @() },
-        @{ Class = $selfDescriptor;            Name = '<init>';                    Return = 'V'; Parameters = @() },
-        @{ Class = $selfDescriptor;            Name = 'monodroidAddReference';     Return = 'V'; Parameters = @('Ljava/lang/Object;') },
-        @{ Class = $selfDescriptor;            Name = 'monodroidClearReferences';  Return = 'V'; Parameters = @() },
-        @{ Class = $selfDescriptor;            Name = 'n_onActivityResult';        Return = 'V'; Parameters = @('I', 'I', 'Landroid/content/Intent;') },
-        @{ Class = $selfDescriptor;            Name = 'n_onCreate';                Return = 'V'; Parameters = @('Landroid/os/Bundle;') },
-        @{ Class = $selfDescriptor;            Name = 'onActivityResult';          Return = 'V'; Parameters = @('I', 'I', 'Landroid/content/Intent;') },
-        @{ Class = $selfDescriptor;            Name = 'onCreate';                  Return = 'V'; Parameters = @('Landroid/os/Bundle;') },
-        @{ Class = 'Ljava/util/ArrayList;';    Name = '<init>';                    Return = 'V'; Parameters = @() },
-        @{ Class = 'Ljava/util/ArrayList;';    Name = 'add';                       Return = 'Z'; Parameters = @('Ljava/lang/Object;') },
-        @{ Class = 'Ljava/util/ArrayList;';    Name = 'clear';                     Return = 'V'; Parameters = @() },
-        @{ Class = 'Lmono/android/Runtime;';   Name = 'register';                  Return = 'V'; Parameters = @('Ljava/lang/String;', 'Ljava/lang/Class;', 'Ljava/lang/String;') },
-        @{ Class = 'Lmono/android/TypeManager;'; Name = 'Activate';                Return = 'V'; Parameters = @('Ljava/lang/String;', 'Ljava/lang/String;', 'Ljava/lang/Object;', '[Ljava/lang/Object;') }
-    )
-    $sortedMethods = @($methods | Sort-Object `
-        @{ Expression = { $typeIndex[$_.Class] } },
-        @{ Expression = { $stringIndex[$_.Name] } },
-        @{ Expression = { $protoIndex[(& $protoKey $_.Return $_.Parameters)] } })
-    $methodIndex = @{}
-    for ($i = 0; $i -lt $sortedMethods.Count; $i++) {
-        $m = $sortedMethods[$i]
-        $methodIndex[$m.Class + '->' + $m.Name + (& $protoKey $m.Return $m.Parameters)] = $i
-    }
-    $methodRef = {
-        param([string] $Class, [string] $Name, [string] $Return, [string[]] $Parameters)
-        $key = $Class + '->' + $Name + (& $protoKey $Return $Parameters)
-        if (-not $methodIndex.ContainsKey($key)) { throw "Unknown method reference '$key'." }
-        return [uint16]$methodIndex[$key]
-    }
-
-    # --- bytecode --------------------------------------------------------
-    $u16 = { param([int] $Value) [byte[]]@([byte]($Value -band 0xFF), [byte](($Value -shr 8) -band 0xFF)) }
-
-    $selfType = [uint16]$typeIndex[$selfDescriptor]
-    $objectArrayType = [uint16]$typeIndex['[Ljava/lang/Object;']
-    $arrayListType = [uint16]$typeIndex['Ljava/util/ArrayList;']
-    $refListField = [uint16]$fieldIndex[$selfDescriptor + '->refList']
-
-    # <clinit>: Runtime.register(managedType, class, methodDeclarations)
-    $clinit = [System.Collections.Generic.List[byte]]::new()
-    $clinit.AddRange([byte[]]@(0x1A, 0x00)); $clinit.AddRange([byte[]](& $u16 $stringIndex[$ManagedTypeName]))
-    $clinit.AddRange([byte[]]@(0x1C, 0x01)); $clinit.AddRange([byte[]](& $u16 $selfType))
-    $clinit.AddRange([byte[]]@(0x1A, 0x02)); $clinit.AddRange([byte[]](& $u16 $stringIndex[$MethodDeclarations]))
-    $clinit.AddRange([byte[]]@(0x71, 0x30)); $clinit.AddRange([byte[]](& $u16 (& $methodRef 'Lmono/android/Runtime;' 'register' 'V' @('Ljava/lang/String;','Ljava/lang/Class;','Ljava/lang/String;'))))
-    $clinit.AddRange([byte[]]@(0x10, 0x02))
-    $clinit.AddRange([byte[]]@(0x0E, 0x00))
-
-    # <init>: super(), refList = new ArrayList(), TypeManager.Activate(...)
-    $init = [System.Collections.Generic.List[byte]]::new()
-    $init.AddRange([byte[]]@(0x70, 0x10)); $init.AddRange([byte[]](& $u16 (& $methodRef 'Landroid/app/Activity;' '<init>' 'V' @()))); $init.AddRange([byte[]]@(0x04, 0x00))
-    $init.AddRange([byte[]]@(0x22, 0x00)); $init.AddRange([byte[]](& $u16 $arrayListType))
-    $init.AddRange([byte[]]@(0x70, 0x10)); $init.AddRange([byte[]](& $u16 (& $methodRef 'Ljava/util/ArrayList;' '<init>' 'V' @()))); $init.AddRange([byte[]]@(0x00, 0x00))
-    $init.AddRange([byte[]]@(0x5B, 0x40)); $init.AddRange([byte[]](& $u16 $refListField))
-    $init.AddRange([byte[]]@(0x12, 0x01))
-    $init.AddRange([byte[]]@(0x23, 0x11)); $init.AddRange([byte[]](& $u16 $objectArrayType))
-    $init.AddRange([byte[]]@(0x1A, 0x02)); $init.AddRange([byte[]](& $u16 $stringIndex[$ManagedTypeName]))
-    $init.AddRange([byte[]]@(0x1A, 0x03)); $init.AddRange([byte[]](& $u16 $stringIndex['']))
-    $init.AddRange([byte[]]@(0x71, 0x40)); $init.AddRange([byte[]](& $u16 (& $methodRef 'Lmono/android/TypeManager;' 'Activate' 'V' @('Ljava/lang/String;','Ljava/lang/String;','Ljava/lang/Object;','[Ljava/lang/Object;')))); $init.AddRange([byte[]]@(0x32, 0x14))
-    $init.AddRange([byte[]]@(0x0E, 0x00))
-
-    # onCreate(Bundle): n_onCreate(bundle)
-    $onCreate = [System.Collections.Generic.List[byte]]::new()
-    $onCreate.AddRange([byte[]]@(0x70, 0x20)); $onCreate.AddRange([byte[]](& $u16 (& $methodRef $selfDescriptor 'n_onCreate' 'V' @('Landroid/os/Bundle;')))); $onCreate.AddRange([byte[]]@(0x10, 0x00))
-    $onCreate.AddRange([byte[]]@(0x0E, 0x00))
-
-    # onActivityResult(int, int, Intent): n_onActivityResult(requestCode, resultCode, data)
-    # Without this override Android delivers picker results to the stock
-    # Activity implementation and the managed OnActivityResult never runs.
-    # invoke-direct/range-free form: four arguments v0 (this), v1, v2, v3.
-    $onActivityResult = [System.Collections.Generic.List[byte]]::new()
-    $onActivityResult.AddRange([byte[]]@(0x70, 0x40)); $onActivityResult.AddRange([byte[]](& $u16 (& $methodRef $selfDescriptor 'n_onActivityResult' 'V' @('I', 'I', 'Landroid/content/Intent;')))); $onActivityResult.AddRange([byte[]]@(0x10, 0x32))
-    $onActivityResult.AddRange([byte[]]@(0x0E, 0x00))
-
-    # monodroidAddReference(Object): refList.add(obj)
-    $addReference = [System.Collections.Generic.List[byte]]::new()
-    $addReference.AddRange([byte[]]@(0x54, 0x10)); $addReference.AddRange([byte[]](& $u16 $refListField))
-    $addReference.AddRange([byte[]]@(0x6E, 0x20)); $addReference.AddRange([byte[]](& $u16 (& $methodRef 'Ljava/util/ArrayList;' 'add' 'Z' @('Ljava/lang/Object;')))); $addReference.AddRange([byte[]]@(0x20, 0x00))
-    $addReference.AddRange([byte[]]@(0x0E, 0x00))
-
-    # monodroidClearReferences(): refList.clear()
-    $clearReferences = [System.Collections.Generic.List[byte]]::new()
-    $clearReferences.AddRange([byte[]]@(0x54, 0x10)); $clearReferences.AddRange([byte[]](& $u16 $refListField))
-    $clearReferences.AddRange([byte[]]@(0x6E, 0x10)); $clearReferences.AddRange([byte[]](& $u16 (& $methodRef 'Ljava/util/ArrayList;' 'clear' 'V' @()))); $clearReferences.AddRange([byte[]]@(0x00, 0x00))
-    $clearReferences.AddRange([byte[]]@(0x0E, 0x00))
-
-    $codeBodies = [ordered]@{
-        '<clinit>'                 = @{ Registers = 3; Ins = 0; Outs = 3; Insns = $clinit.ToArray() }
-        '<init>'                   = @{ Registers = 5; Ins = 1; Outs = 4; Insns = $init.ToArray() }
-        'monodroidAddReference'    = @{ Registers = 3; Ins = 2; Outs = 2; Insns = $addReference.ToArray() }
-        'monodroidClearReferences' = @{ Registers = 2; Ins = 1; Outs = 1; Insns = $clearReferences.ToArray() }
-        'onCreate'                 = @{ Registers = 2; Ins = 2; Outs = 2; Insns = $onCreate.ToArray() }
-        'onActivityResult'         = @{ Registers = 4; Ins = 4; Outs = 4; Insns = $onActivityResult.ToArray() }
-    }
-
-    return [pscustomobject]@{
-        SelfDescriptor = $selfDescriptor
-        SortedStrings  = $sortedStrings
-        StringIndex    = $stringIndex
-        SortedTypes    = $sortedTypes
-        TypeIndex      = $typeIndex
-        SortedProtos   = $sortedProtos
-        ProtoIndex     = $protoIndex
-        ProtoKey       = $protoKey
-        SortedFields   = $sortedFields
-        FieldIndex     = $fieldIndex
-        SortedMethods  = $sortedMethods
-        MethodIndex    = $methodIndex
-        CodeBodies     = $codeBodies
-    }
 }
 
 function ConvertTo-DexImage {
@@ -8136,143 +6030,6 @@ function ConvertTo-DexImage {
     return $image
 }
 
-function Test-JavaPeerDex {
-    param(
-        [Parameter(Mandatory)][byte[]] $Dex,
-        [Parameter(Mandatory)][string] $ExpectedDescriptor
-    )
-
-    if ([System.Text.Encoding]::ASCII.GetString($Dex, 0, 4) -cne "dex`n") {
-        throw 'The emitted dex does not begin with the dex magic.'
-    }
-
-    # Both integrity fields are recomputed and compared, so a malformed image
-    # fails here rather than on the device.
-    $sha1 = [System.Security.Cryptography.SHA1]::Create()
-    try { $signature = $sha1.ComputeHash($Dex, 32, $Dex.Length - 32) }
-    finally { $sha1.Dispose() }
-    for ($i = 0; $i -lt 20; $i++) {
-        if ($Dex[12 + $i] -ne $signature[$i]) { throw 'The emitted dex signature does not cover its own contents.' }
-    }
-    $checksum = Get-Adler32 -Bytes $Dex -Offset 12 -Count ($Dex.Length - 12)
-    if ([BitConverter]::ToUInt32($Dex, 8) -ne $checksum) { throw 'The emitted dex checksum is wrong.' }
-    if ([int][BitConverter]::ToUInt32($Dex, 32) -ne $Dex.Length) { throw 'The emitted dex declares the wrong file size.' }
-    if ([BitConverter]::ToUInt32($Dex, 40) -ne 0x12345678) { throw 'The emitted dex declares the wrong endian tag.' }
-
-    $stringIdsOff = [int][BitConverter]::ToUInt32($Dex, 60)
-    $typeIdsOff   = [int][BitConverter]::ToUInt32($Dex, 68)
-    $methodIdsOff = [int][BitConverter]::ToUInt32($Dex, 92)
-    $protoIdsOff  = [int][BitConverter]::ToUInt32($Dex, 76)
-    $classDefsOff = [int][BitConverter]::ToUInt32($Dex, 100)
-    $stringCount  = [int][BitConverter]::ToUInt32($Dex, 56)
-
-    $readUleb = {
-        param([int] $Offset)
-        $shift = 0; $result = 0; $cursor = $Offset
-        while ($true) {
-            $b = $Dex[$cursor]; $cursor++
-            $result = $result -bor (($b -band 0x7F) -shl $shift)
-            if (($b -band 0x80) -eq 0) { break }
-            $shift += 7
-        }
-        return @($result, $cursor)
-    }
-    $getString = {
-        param([int] $Index)
-        $offset = [int][BitConverter]::ToUInt32($Dex, $stringIdsOff + ($Index * 4))
-        $decoded = & $readUleb $offset
-        $start = $decoded[1]; $end = $start
-        while ($Dex[$end] -ne 0) { $end++ }
-        return [System.Text.Encoding]::UTF8.GetString($Dex, $start, $end - $start)
-    }
-    $getType = { param([int] $Index) & $getString ([int][BitConverter]::ToUInt32($Dex, $typeIdsOff + ($Index * 4))) }
-
-    # string_ids must be sorted, or the platform's binary search misses.
-    for ($i = 1; $i -lt $stringCount; $i++) {
-        $previous = & $getString ($i - 1)
-        $current = & $getString $i
-        if ([string]::CompareOrdinal($previous, $current) -ge 0) {
-            throw "The emitted dex string table is not in ordinal order at index $i ('$previous' then '$current')."
-        }
-    }
-
-    $descriptor = & $getType ([int][BitConverter]::ToUInt32($Dex, $classDefsOff))
-    if ($descriptor -cne $ExpectedDescriptor) {
-        throw "The emitted dex defines '$descriptor'; the manifest names '$ExpectedDescriptor'."
-    }
-    $superclass = & $getType ([int][BitConverter]::ToUInt32($Dex, $classDefsOff + 8))
-    if ($superclass -cne 'Landroid/app/Activity;') {
-        throw "The emitted peer extends '$superclass'."
-    }
-    $interfacesOff = [int][BitConverter]::ToUInt32($Dex, $classDefsOff + 12)
-    if ($interfacesOff -eq 0) { throw 'The emitted peer implements no interfaces.' }
-    $interface = & $getType ([int][BitConverter]::ToUInt16($Dex, $interfacesOff + 4))
-    if ($interface -cne 'Lmono/android/IGCUserPeer;') {
-        throw "The emitted peer implements '$interface' instead of mono.android.IGCUserPeer."
-    }
-
-    $classDataOff = [int][BitConverter]::ToUInt32($Dex, $classDefsOff + 24)
-    $cursor = $classDataOff
-    $counts = @()
-    for ($i = 0; $i -lt 4; $i++) {
-        $decoded = & $readUleb $cursor
-        $counts += $decoded[0]
-        $cursor = $decoded[1]
-    }
-    if ($counts[2] -ne 4 -or $counts[3] -ne 4) {
-        throw "The emitted peer declares $($counts[2]) direct and $($counts[3]) virtual methods; 4 and 4 are required."
-    }
-
-    return [pscustomobject]@{
-        FileSize     = $Dex.Length
-        StringCount  = $stringCount
-        Descriptor   = $descriptor
-        MethodCounts = "$($counts[2]) direct, $($counts[3]) virtual"
-    }
-}
-
-function Invoke-DexStep {
-    if (Skip-ForNativeAdmission -Step 8 -Output 'the Java peer DEX') { return }
-
-    $peerPackage = ($script:JavaPeerName -replace '\.[^.]+$', '') -replace '\.', '/'
-    $managedType = "$($script:ManagedNamespace).$($script:ActivityClassName), $($script:AssemblyName)"
-    $declarations = "n_onCreate:(Landroid/os/Bundle;)V:GetOnCreate_Landroid_os_Bundle_Handler`n" +
-        "n_onActivityResult:(IILandroid/content/Intent;)V:GetOnActivityResult_IILandroid_content_Intent_Handler`n"
-
-    $plan = New-JavaPeerDex `
-        -PeerPackage $peerPackage `
-        -ClassName $script:ActivityClassName `
-        -ManagedTypeName $managedType `
-        -MethodDeclarations $declarations
-    $dexBytes = ConvertTo-DexImage -Plan $plan
-    $report = Test-JavaPeerDex -Dex $dexBytes -ExpectedDescriptor $plan.SelfDescriptor
-
-    $outputDirectory = Join-Path $OutputDirectory $script:Target.Abi
-    $dexPath = Join-Path $outputDirectory 'classes2.dex'
-    if ($PSCmdlet.ShouldProcess($dexPath, 'Write Java peer dex')) {
-        Write-BuildFile -Intermediate -Path $dexPath -Bytes $dexBytes
-    }
-
-    $dexStream = [System.IO.MemoryStream]::new([byte[]]$dexBytes, $false)
-    try { $dexHash = Get-Sha256Hex -Stream $dexStream }
-    finally { $dexStream.Dispose() }
-
-    $script:BuildContext.PeerDex = [pscustomobject]@{
-        Path        = $dexPath
-        Bytes       = $dexBytes
-        Sha256      = $dexHash
-        Descriptor  = $plan.SelfDescriptor
-        ManagedType = $managedType
-    }
-
-    Write-Host ('[PASS] Step 8 complete: {0} emitted as {1} bytes of Dalvik bytecode defining {2} ({3}), binding {4}. Checksum, SHA-1, and string ordering verified. SHA-256 {5}' -f
-        'classes2.dex',
-        $report.FileSize,
-        $report.Descriptor,
-        $report.MethodCounts,
-        $managedType,
-        $dexHash) -ForegroundColor Green
-}
 function Get-NativePayload {
     param(
         [Parameter(Mandatory)][string] $PackageId,
@@ -8469,7 +6226,6 @@ function Invoke-AssembleStep {
 
     $abi = $script:Target.Abi
     $runtimePack = "Microsoft.NETCore.App.Runtime.$($script:Target.Rid)"
-    $hostPack = "Microsoft.Android.Runtime.CoreCLR.37.$($script:Target.Rid)"
 
     $entries = [System.Collections.Generic.List[object]]::new()
     $add = {
@@ -8477,50 +6233,20 @@ function Invoke-AssembleStep {
         $entries.Add([pscustomobject]@{ Name = $Name; Bytes = $Bytes; Stored = $Stored; Alignment = $Alignment })
     }
 
-    if ($Admission -eq 'NativeActivity') {
-        & $add 'AndroidManifest.xml' ([byte[]]$script:BuildContext.AndroidManifest.Bytes) $false 0
-        & $add 'resources.arsc' (New-ResourceTable -PackageName $script:PackageName -IconPath 'res/mipmap/ic_launcher.png') $true 4
-        & $add 'res/mipmap/ic_launcher.png' (Import-LibSourceBytes -Path 'ic_launcher.png') $true 4
-        & $add "lib/$abi/libpwsh-host.so" ([byte[]]$script:BuildContext.NativeHost.Bytes) $false 0
-        & $add "lib/$abi/libassembly-store.so" ([byte[]]$script:BuildContext.StoreLibrary.Bytes) $false 0
-        & $add "lib/$abi/libpsl-native.so" ([byte[]]$script:BuildContext.PslNative.Bytes) $false 0
-        # The .NET runtime's native components, from the verified runtime pack.
-        foreach ($name in 'libcoreclr.so', 'libclrjit.so', 'libSystem.Native.so', 'libSystem.Globalization.Native.so', 'libSystem.IO.Compression.Native.so', 'libSystem.Security.Cryptography.Native.Android.so') {
-            & $add "lib/$abi/$name" (Get-NativePayload -PackageId $runtimePack -EntryPath "runtimes/$($script:Target.Rid)/native/$name") $false 0
-        }
-    }
-    else {
-        & $add 'AndroidManifest.xml' ([byte[]]$script:BuildContext.AndroidManifest.Bytes) $false 0
-        & $add 'classes.dex' (Import-LibSourceBytes -Path 'classes.dex') $false 0
-        & $add 'classes2.dex' ([byte[]]$script:BuildContext.PeerDex.Bytes) $false 0
-        # The launcher icon. Android requires resources.arsc stored and 4-byte
-        # aligned; the PNG is already compressed, so it is stored too.
-        & $add 'resources.arsc' (New-ResourceTable -PackageName $script:PackageName -IconPath 'res/mipmap/ic_launcher.png') $true 4
-        & $add 'res/mipmap/ic_launcher.png' (Import-LibSourceBytes -Path 'ic_launcher.png') $true 4
-        & $add "lib/$abi/libassembly-store.so" ([byte[]]$script:BuildContext.StoreLibrary.Bytes) $false 0
-        & $add "lib/$abi/libxamarin-app.so" ([byte[]]$script:BuildContext.XamarinApp.Bytes) $false 0
-        & $add "lib/$abi/libpsl-native.so" ([byte[]]$script:BuildContext.PslNative.Bytes) $false 0
-
-        # The .NET runtime's native components, taken from the verified packages.
-        $natives = [ordered]@{
-            'libcoreclr.so'                                = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libcoreclr.so" }
-            'libclrjit.so'                                 = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libclrjit.so" }
-            'libSystem.Native.so'                          = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libSystem.Native.so" }
-            'libSystem.Globalization.Native.so'            = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libSystem.Globalization.Native.so" }
-            'libSystem.IO.Compression.Native.so'           = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libSystem.IO.Compression.Native.so" }
-            'libSystem.Security.Cryptography.Native.Android.so' = @{ Package = $runtimePack; Path = "runtimes/$($script:Target.Rid)/native/libSystem.Security.Cryptography.Native.Android.so" }
-            # The Android host itself. Packaged under the name the runtime loads.
-            'libmonodroid.so'                              = @{ Package = $hostPack; Path = "runtimes/$($script:Target.Rid)/native/libnet-android.release.so" }
-        }
-        foreach ($name in $natives.Keys) {
-            $source = $natives[$name]
-            & $add "lib/$abi/$name" (Get-NativePayload -PackageId $source.Package -EntryPath $source.Path) $false 0
-        }
+    & $add 'AndroidManifest.xml' ([byte[]]$script:BuildContext.AndroidManifest.Bytes) $false 0
+    & $add 'resources.arsc' (New-ResourceTable -PackageName $script:PackageName -IconPath 'res/mipmap/ic_launcher.png') $true 4
+    & $add 'res/mipmap/ic_launcher.png' (Import-LibSourceBytes -Path 'ic_launcher.png') $true 4
+    & $add "lib/$abi/libpwsh-host.so" ([byte[]]$script:BuildContext.NativeHost.Bytes) $false 0
+    & $add "lib/$abi/libassembly-store.so" ([byte[]]$script:BuildContext.StoreLibrary.Bytes) $false 0
+    & $add "lib/$abi/libpsl-native.so" ([byte[]]$script:BuildContext.PslNative.Bytes) $false 0
+    # The .NET runtime's native components, from the verified runtime pack.
+    foreach ($name in 'libcoreclr.so', 'libclrjit.so', 'libSystem.Native.so', 'libSystem.Globalization.Native.so', 'libSystem.IO.Compression.Native.so', 'libSystem.Security.Cryptography.Native.Android.so') {
+        & $add "lib/$abi/$name" (Get-NativePayload -PackageId $runtimePack -EntryPath "runtimes/$($script:Target.Rid)/native/$name") $false 0
     }
 
     $apkBytes = New-ApkArchive -Entries $entries
     $report = Test-ApkArchive -Apk $apkBytes -Entries $entries
-    if ($Admission -eq 'NativeActivity') { Assert-NativeAdmissionApk -EntryNames $report.Names }
+    Assert-NativeAdmissionApk -EntryNames $report.Names
 
     $outputDirectory = Join-Path $OutputDirectory $script:Target.Abi
     $apkPath = Join-Path $outputDirectory 'Pwsh-unsigned.apk'
@@ -8538,7 +6264,7 @@ function Invoke-AssembleStep {
         Sha256 = $apkHash
     }
 
-    Write-Host ('[PASS] Step 10 complete: Pwsh-unsigned.apk assembled from {0} entries into {1} bytes, every entry read back byte-identical by an independent reader. SHA-256 {2}' -f
+    Write-Host ('[PASS] Step 8 complete: Pwsh-unsigned.apk assembled from {0} entries into {1} bytes, every entry read back byte-identical by an independent reader. SHA-256 {2}' -f
         $report.EntryCount,
         $report.Size,
         $apkHash) -ForegroundColor Green
@@ -8827,7 +6553,7 @@ function Invoke-SignStep {
         Certificate = $certificate.Thumbprint
     }
 
-    Write-Host ('[PASS] Step 11 complete: {5} signed with APK Signature Scheme v2. {0} bytes, {1}-byte signing block, {2}-byte RSA signature, certificate {3}. Signature re-verified against the recomputed content digest. SHA-256 {4}' -f
+    Write-Host ('[PASS] Step 9 complete: {5} signed with APK Signature Scheme v2. {0} bytes, {1}-byte signing block, {2}-byte RSA signature, certificate {3}. Signature re-verified against the recomputed content digest. SHA-256 {4}' -f
         $signed.Bytes.Length,
         $report.BlockSize,
         $report.SignatureSize,
@@ -8835,641 +6561,6 @@ function Invoke-SignStep {
         $apkHash,
         $apkPath) -ForegroundColor Green
     Write-Host ('       Install with: adb install -r "{0}"' -f $apkPath) -ForegroundColor DarkCyan
-}
-
-function Get-RegisteredJavaTypes {
-    # Every managed type that has a Java peer says so itself, through a Register
-    # attribute carrying the JNI name. That is the whole type map: read the
-    # attribute, pair the managed name with the Java name, keep the token.
-    param([Parameter(Mandatory)][byte[]] $AssemblyBytes)
-
-    $stream = [System.IO.MemoryStream]::new($AssemblyBytes, $false)
-    $peReader = [System.Reflection.PortableExecutable.PEReader]::new($stream)
-    try {
-        $reader = [System.Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($peReader)
-        $mvid = $reader.GetGuid($reader.GetModuleDefinition().Mvid).ToByteArray()
-        $types = [System.Collections.Generic.List[object]]::new()
-
-        foreach ($handle in $reader.TypeDefinitions) {
-            $type = $reader.GetTypeDefinition($handle)
-            foreach ($attributeHandle in $type.GetCustomAttributes()) {
-                $attribute = $reader.GetCustomAttribute($attributeHandle)
-
-                # The attribute's constructor is a MemberReference when the
-                # attribute lives in another assembly and a MethodDefinition
-                # when it is declared in this one, which is the case for
-                # Mono.Android itself.
-                $attributeName = $null
-                if ($attribute.Constructor.Kind -eq [System.Reflection.Metadata.HandleKind]::MemberReference) {
-                    $member = $reader.GetMemberReference([System.Reflection.Metadata.MemberReferenceHandle]$attribute.Constructor)
-                    if ($member.Parent.Kind -eq [System.Reflection.Metadata.HandleKind]::TypeReference) {
-                        $attributeName = $reader.GetString($reader.GetTypeReference([System.Reflection.Metadata.TypeReferenceHandle]$member.Parent).Name)
-                    }
-                }
-                elseif ($attribute.Constructor.Kind -eq [System.Reflection.Metadata.HandleKind]::MethodDefinition) {
-                    $method = $reader.GetMethodDefinition([System.Reflection.Metadata.MethodDefinitionHandle]$attribute.Constructor)
-                    $attributeName = $reader.GetString($reader.GetTypeDefinition($method.GetDeclaringType()).Name)
-                }
-                if ($attributeName -cne 'RegisterAttribute') { continue }
-
-                $blob = $reader.GetBlobReader($attribute.Value)
-                [void]$blob.ReadUInt16()
-                $javaName = $null
-                try { $javaName = $blob.ReadSerializedString() } catch { }
-                # A JNI type name is slash separated. Anything containing a dot
-                # came from an attribute shaped differently than expected, and
-                # the runtime rejects it outright, so drop it here instead.
-                if ([string]::IsNullOrEmpty($javaName) -or $javaName.Contains('.')) { break }
-
-                # Upstream records the type's FullName. A nested type carries no
-                # namespace of its own and is written Outer+Inner, so walk the
-                # declaring chain rather than reading Namespace directly.
-                $managedName = $reader.GetString($type.Name)
-                $outermost = $type
-                $declaringHandle = $type.GetDeclaringType()
-                while (-not $declaringHandle.IsNil) {
-                    $outermost = $reader.GetTypeDefinition($declaringHandle)
-                    $managedName = "$($reader.GetString($outermost.Name))+$managedName"
-                    $declaringHandle = $outermost.GetDeclaringType()
-                }
-                $namespace = $reader.GetString($outermost.Namespace)
-                if (-not [string]::IsNullOrEmpty($namespace)) { $managedName = "$namespace.$managedName" }
-
-                $types.Add([pscustomobject]@{
-                    ManagedName = $managedName
-                    JavaName    = $javaName
-                    Token       = [uint32][System.Reflection.Metadata.Ecma335.MetadataTokens]::GetToken(
-                        [System.Reflection.Metadata.EntityHandle]$handle)
-                })
-                break
-            }
-        }
-
-        return [pscustomobject]@{ Mvid = $mvid; Types = $types }
-    }
-    finally {
-        $peReader.Dispose()
-        $stream.Dispose()
-    }
-}
-
-function Get-TypeMapModules {
-    # Assemblies that declare Java peers. The emitted assembly comes last so its
-    # own activity is registered alongside the framework bindings.
-    # Any assembly in the payload may declare Java peers, and a module the
-    # runtime cannot find by MVID is a hard failure, so scan all of them rather
-    # than guessing which three matter.
-    $modules = [System.Collections.Generic.List[object]]::new()
-    foreach ($name in @($script:BuildContext.SelectedAssemblies.Keys)) {
-        $candidate = $script:BuildContext.SelectedAssemblies[$name]
-        if ($null -eq $candidate) { continue }
-        $scanned = Get-RegisteredJavaTypes -AssemblyBytes ([byte[]]$candidate.Bytes)
-        # An assembly with no Java peers still needs a module entry: the runtime
-        # looks modules up by MVID before it looks for a type, and a missing
-        # module is reported as a failure rather than an empty result.
-        # The emitted assembly's activity declares its Java peer through an
-        # Activity attribute with an explicit Name, not through Register, so the
-        # scan above does not see it. Add it from the identity we already
-        # derived, or the runtime finds the module and no type inside it.
-        if ($name -ceq "$($script:AssemblyName).dll") {
-            $identity = Get-EmittedActivityIdentity
-            $scanned.Types.Add([pscustomobject]@{
-                ManagedName = $identity.ManagedTypeName
-                JavaName    = ($script:JavaPeerName -replace '\.', '/')
-                Token       = $identity.Token
-            })
-        }
-
-        $modules.Add([pscustomobject]@{
-            AssemblyName = [System.IO.Path]::GetFileNameWithoutExtension($name)
-            Mvid         = $scanned.Mvid
-            Types        = $scanned.Types
-        })
-    }
-    if ($modules.Count -eq 0) { throw 'No assembly in the payload declares a Java peer type.' }
-    return $modules
-}
-
-function Get-ReturnStubBytes {
-    # Four bytes holding one return instruction for the target, from that
-    # target's encoder. x86-64's ret is one byte; int3 (0xCC) pads the rest.
-    switch ($Architecture) {
-        'arm64' { return [BitConverter]::GetBytes([uint32](New-A64BranchRegister -Op 'ret')) }
-        'x64'   { return [byte[]](@(New-X64Instruction -Step @{ Op = 'ret' }) + @(0xCC, 0xCC, 0xCC)) }
-        'arm32' { return [BitConverter]::GetBytes([uint32](New-A32Instruction -Step @{ Op = 'bx'; Rm = 14 })[0]) }
-        default { throw "No return stub for $Architecture." }
-    }
-}
-
-function New-XamarinAppLibrary {
-    # libxamarin-app.so carries the data the Android host reads at startup. The
-    # symbol list is the one ApplicationConfigNativeAssemblyGeneratorCLR.cs
-    # emits, and the ApplicationConfig layout is ApplicationConfigCLR.cs, both
-    # pinned in lib/. Nothing here is copied from a device artifact.
-    param(
-        [Parameter(Mandatory)][string] $PackageName,
-        [Parameter(Mandatory)][int] $AssemblyCount,
-        [Parameter(Mandatory)][uint32] $JniEnvInitClassToken,
-        [Parameter(Mandatory)][uint32] $JniEnvInitializeMethodToken,
-        [Parameter(Mandatory)][uint32] $JniEnvRegisterJniNativesMethodToken,
-        [Parameter(Mandatory)][System.Collections.Generic.List[object]] $TypeMapModules,
-        [int] $PageSize = 16384
-    )
-
-    $elf = Get-ElfConstants
-
-    # Properties handed to coreclr_initialize. The host fills in the value for
-    # HOST_RUNTIME_CONTRACT, which is why it must come first and why its value
-    # is left null here; every other value has to be supplied by us, because a
-    # null value is dereferenced during initialization.
-    #
-    # The RuntimeFeature switches are not decoration. Mono.Android reads them to
-    # decide which runtime it is hosted on: without them it takes the MonoVM
-    # path and calls an internal method CoreCLR refuses to bind, failing with
-    # "ECall methods must be packaged into a system module".
-    $runtimeProperties = [ordered]@{
-        'HOST_RUNTIME_CONTRACT'                                        = $null
-        'Microsoft.Android.Runtime.RuntimeFeature.IsCoreClrRuntime'    = 'true'
-        'Microsoft.Android.Runtime.RuntimeFeature.IsMonoRuntime'       = 'false'
-        'Microsoft.Android.Runtime.RuntimeFeature.IsNativeAotRuntime'  = 'false'
-        'Java.Interop.RuntimeFeature.ManagedPeerNativeRegistration'    = 'false'
-        'Microsoft.Android.Runtime.RuntimeFeature.ManagedToJavaUsesAssemblyFullName' = 'false'
-        'Microsoft.Android.Runtime.RuntimeFeature.TrimmableTypeMap'    = 'false'
-    }
-
-    # The pinned host (37.0.0-rc.1 and later) also fills RUNTIME_IDENTIFIER and
-    # APP_CONTEXT_BASE_DIRECTORY, by position, right after the contract
-    # (dotnet/android host.cc, ApplicationConfigNativeAssemblyGeneratorCLR.cs).
-    $hostFilled = [ordered]@{
-        'HOST_RUNTIME_CONTRACT'      = $null
-        'RUNTIME_IDENTIFIER'         = $null
-        'APP_CONTEXT_BASE_DIRECTORY' = $null
-    }
-    foreach ($key in $runtimeProperties.Keys) {
-        if (-not $hostFilled.Contains($key)) { $hostFilled[$key] = $runtimeProperties[$key] }
-    }
-    $runtimeProperties = $hostFilled
-
-    # Pointer width from the target's ELF class. Only pointer-typed fields
-    # change size; the fixed-width fields (uint32_t, uint64_t) do not.
-    $pointerSize = $script:Target.ElfClass / 8
-    $writePointer = { if ($pointerSize -eq 4) { $writer.Write([uint32]0) } else { $writer.Write([uint64]0) } }
-
-    $data = [System.IO.MemoryStream]::new()
-    $writer = [System.IO.BinaryWriter]::new($data, [System.Text.Encoding]::UTF8, $true)
-    $symbols = [System.Collections.Generic.List[object]]::new()
-    $relocations = [System.Collections.Generic.List[object]]::new()
-
-    $align = {
-        param([int] $Boundary)
-        while (($data.Position % $Boundary) -ne 0) { $data.WriteByte(0) }
-    }
-    $define = {
-        param([string] $Name, [int] $Size, [string] $Kind = 'OBJECT')
-        $symbols.Add([pscustomobject]@{ Name = $Name; Offset = [int]$data.Position; Size = $Size; Kind = $Kind })
-    }
-    $zeros = {
-        param([string] $Name, [int] $Size, [int] $Alignment = 8)
-        & $align $Alignment
-        & $define $Name $Size
-        if ($Size -gt 0) { Write-ByteSpan -Writer $writer -Bytes (New-Object byte[] $Size) }
-    }
-
-    # Strings first, so their offsets are known when pointers are written.
-    & $align 8
-    $packageNameOffset = [int]$data.Position
-    Write-ByteSpan -Writer $writer -Bytes ([System.Text.Encoding]::UTF8.GetBytes($PackageName))
-    $writer.Write([byte]0)
-
-    $propertyNameOffsets = @()
-    $propertyValueOffsets = @()
-    foreach ($property in $runtimeProperties.Keys) {
-        $propertyNameOffsets += [int]$data.Position
-        Write-ByteSpan -Writer $writer -Bytes ([System.Text.Encoding]::UTF8.GetBytes([string]$property))
-        $writer.Write([byte]0)
-
-        $value = $runtimeProperties[$property]
-        if ($null -eq $value) {
-            $propertyValueOffsets += -1
-        }
-        else {
-            $propertyValueOffsets += [int]$data.Position
-            Write-ByteSpan -Writer $writer -Bytes ([System.Text.Encoding]::UTF8.GetBytes([string]$value))
-            $writer.Write([byte]0)
-        }
-    }
-
-    # format_tag, the value xamarin-app.hh declares.
-    & $align 8
-    & $define 'format_tag' 8
-    $writer.Write([uint64]0x00045E6972616D58)
-
-    # application_config. Field order is ApplicationConfigCLR.cs exactly. The
-    # pointer after the 13 uint32_t fields lands at 56 on both widths; the two
-    # trailing bools follow it, and the struct pads to its pointer alignment.
-    $applicationConfigSize = 56 + $pointerSize + 2
-    $applicationConfigSize += ($pointerSize - ($applicationConfigSize % $pointerSize)) % $pointerSize
-    & $align 8
-    $applicationConfigOffset = [int]$data.Position
-    & $define 'application_config' $applicationConfigSize
-    $writer.Write([byte]0)      # uses_assembly_preload
-    $writer.Write([byte]0)      # jni_add_native_method_registration_attribute_present
-    $writer.Write([byte]0)      # marshal_methods_enabled
-    $writer.Write([byte]0)      # ignore_split_configs
-    $writer.Write([uint32]$runtimeProperties.Count)
-    $writer.Write([uint32]3)    # package_naming_policy: LowercaseCrc64
-    $writer.Write([uint32]0)    # environment_variable_count
-    $writer.Write([uint32]0)    # system_property_count
-    $writer.Write([uint32]$AssemblyCount)
-    $writer.Write([uint32]0)    # bundled_assembly_name_width
-    $writer.Write([uint32]0)    # number_of_dso_cache_entries
-    $writer.Write([uint32]0)    # number_of_shared_libraries
-    $writer.Write([uint32]$JniEnvInitClassToken)
-    $writer.Write([uint32]$JniEnvInitializeMethodToken)
-    $writer.Write([uint32]$JniEnvRegisterJniNativesMethodToken)
-    $writer.Write([uint32]0)    # jni_remapping_replacement_type_count
-    $writer.Write([uint32]0)    # jni_remapping_replacement_method_index_entry_count
-    $packageNamePointerOffset = [int]$data.Position
-    & $writePointer             # android_package_name, supplied by relocation
-    $writer.Write([byte]1)      # have_assembly_store
-    $writer.Write([byte]0)      # assembly_store_decompression_cache_enabled
-    Write-ByteSpan -Writer $writer -Bytes (New-Object byte[] ($applicationConfigSize - 56 - $pointerSize - 2))
-
-    $relocations.Add([pscustomobject]@{ Offset = $packageNamePointerOffset; Target = $packageNameOffset })
-
-    # Property name and value tables. The values are filled in by the host.
-    & $align 8
-    & $define 'init_runtime_property_names' ($runtimeProperties.Count * $pointerSize)
-    foreach ($offset in $propertyNameOffsets) {
-        $relocations.Add([pscustomobject]@{ Offset = [int]$data.Position; Target = $offset })
-        & $writePointer
-    }
-
-    & $align 8
-    & $define 'init_runtime_property_values' ($runtimeProperties.Count * $pointerSize)
-    foreach ($offset in $propertyValueOffsets) {
-        if ($offset -ge 0) {
-            $relocations.Add([pscustomobject]@{ Offset = [int]$data.Position; Target = $offset })
-        }
-        & $writePointer
-    }
-
-    # Assembly store runtime state. The host populates both.
-    # AssemblyStoreRuntimeData: pointer, uint32_t, uint32_t, pointer.
-    # AssemblyStoreSingleAssemblyRuntimeData: four pointers.
-    & $zeros 'assembly_store' (8 + 2 * $pointerSize)
-    & $zeros 'assembly_store_bundled_assemblies' ($AssemblyCount * 4 * $pointerSize)
-
-    # Everything else is declared and empty: the counts beside them are zero,
-    # so the runtime never walks into these.
-    & $zeros 'app_environment_variables' 0
-    & $zeros 'app_environment_variable_contents' 1 1
-    & $zeros 'app_system_properties' 0
-    & $zeros 'app_system_property_contents' 1 1
-    & $zeros 'bundled_assemblies' 0
-    & $zeros 'dso_cache' 0
-    & $zeros 'dso_names_data' 1 1
-    & $zeros 'dso_jni_preloads_idx' 0
-    & $align 4
-    & $define 'dso_jni_preloads_idx_stride' 4
-    $writer.Write([uint32]0)
-    & $align 4
-    & $define 'dso_jni_preloads_idx_count' 4
-    $writer.Write([uint32]0)
-    & $align 4
-    & $define 'compressed_assembly_count' 4
-    $writer.Write([uint32]0)
-    & $zeros 'compressed_assembly_descriptors' 0
-    & $align 4
-    & $define 'uncompressed_assemblies_data_size' 4
-    $writer.Write([uint32]0)
-    # Type map. Every managed type with a Java peer, from every assembly that
-    # declares one. The runtime matches a module by MVID, hashes the managed
-    # type name with CRC-32, binary searches that module's slice of
-    # modules_map_data, and follows java_map_index into java_to_managed_map.
-    # Structures are TypeMapModule, TypeMapModuleEntry and TypeMapJava from the
-    # pinned xamarin-app.hh.
-    $javaNameBlob = [System.IO.MemoryStream]::new()
-    $managedNameBlob = [System.IO.MemoryStream]::new()
-    $assemblyNameBlob = [System.IO.MemoryStream]::new()
-    $javaEntries = [System.Collections.Generic.List[object]]::new()
-    $moduleRecords = [System.Collections.Generic.List[object]]::new()
-    $moduleEntries = [System.Collections.Generic.List[object]]::new()
-
-    $appendUtf8 = {
-        param([System.IO.MemoryStream] $Target, [string] $Value)
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value)
-        $offset = [int]$Target.Position
-        $Target.Write($bytes, 0, $bytes.Length)
-        $Target.WriteByte(0)
-        return @($offset, $bytes.Length)
-    }
-
-    foreach ($module in $TypeMapModules) {
-        $assemblyPlacement = & $appendUtf8 $assemblyNameBlob $module.AssemblyName
-        $mapIndex = $moduleEntries.Count
-
-        # Entries are binary searched by hash, so they are sorted by it. A type
-        # whose hash collides with another in the same module would need the
-        # duplicate table; none do here, and the build fails loudly if that
-        # changes rather than silently mapping the wrong type.
-        $entries = [System.Collections.Generic.List[object]]::new()
-        foreach ($type in $module.Types) {
-            $managedPlacement = & $appendUtf8 $managedNameBlob $type.ManagedName
-            $javaPlacement = & $appendUtf8 $javaNameBlob $type.JavaName
-            $javaIndex = $javaEntries.Count
-
-            $javaEntries.Add([pscustomobject]@{
-                ModuleIndex       = $moduleRecords.Count
-                ManagedNameIndex  = $managedPlacement[0]
-                ManagedNameLength = $managedPlacement[1]
-                Token             = $type.Token
-                JavaNameIndex     = $javaPlacement[0]
-                JavaNameLength    = $javaPlacement[1]
-                JavaHash          = Get-Crc32 -Data ([System.Text.Encoding]::UTF8.GetBytes($type.JavaName))
-            })
-
-            $entries.Add([pscustomobject]@{
-                Hash              = Get-Crc32 -Data ([System.Text.Encoding]::UTF8.GetBytes($type.ManagedName))
-                ManagedNameIndex  = $managedPlacement[0]
-                ManagedNameLength = $managedPlacement[1]
-                JavaMapIndex      = $javaIndex
-            })
-        }
-
-        foreach ($entry in ($entries | Sort-Object Hash)) { $moduleEntries.Add($entry) }
-
-        $moduleRecords.Add([pscustomobject]@{
-            Mvid               = $module.Mvid
-            EntryCount         = $entries.Count
-            AssemblyNameIndex  = $assemblyPlacement[0]
-            AssemblyNameLength = $assemblyPlacement[1]
-            MapIndex           = $mapIndex
-        })
-    }
-
-    $javaNameBytes = $javaNameBlob.ToArray(); $javaNameBlob.Dispose()
-    $managedNameBytes = $managedNameBlob.ToArray(); $managedNameBlob.Dispose()
-    $assemblyNameBytes = $assemblyNameBlob.ToArray(); $assemblyNameBlob.Dispose()
-    # find_module_entry binary searches managed_to_java_map by MVID, so the
-    # module array must be sorted by MVID bytes. Emitting it in payload order
-    # makes the search miss modules that are present. TypeMapJava.module_index
-    # refers to positions in this array, so those are remapped after sorting.
-    $moduleOrder = @(0..($moduleRecords.Count - 1))
-    $sortedModules = @($moduleOrder | Sort-Object -Property @{ Expression = {
-        $bytes = $moduleRecords[$_].Mvid
-        ($bytes | ForEach-Object { $_.ToString('X2') }) -join ''
-    } })
-    $modulePosition = New-Object int[] $moduleRecords.Count
-    for ($i = 0; $i -lt $sortedModules.Count; $i++) { $modulePosition[$sortedModules[$i]] = $i }
-    foreach ($entry in $javaEntries) { $entry.ModuleIndex = $modulePosition[$entry.ModuleIndex] }
-    $moduleRecords = [System.Collections.Generic.List[object]](@($sortedModules | ForEach-Object { $moduleRecords[$_] }))
-
-    # java_to_managed_hashes is binary searched, so the java side must be sorted
-    # by hash. The module entries recorded their java_map_index against the
-    # unsorted order, so those indices are remapped here. Without this every
-    # lookup succeeds and returns an unrelated Java type.
-    for ($i = 0; $i -lt $javaEntries.Count; $i++) {
-        $javaEntries[$i] | Add-Member -NotePropertyName OriginalIndex -NotePropertyValue $i -Force
-    }
-    $sortedJava = @($javaEntries | Sort-Object JavaHash)
-    $remap = New-Object int[] $javaEntries.Count
-    for ($i = 0; $i -lt $sortedJava.Count; $i++) { $remap[$sortedJava[$i].OriginalIndex] = $i }
-    foreach ($entry in $moduleEntries) { $entry.JavaMapIndex = $remap[$entry.JavaMapIndex] }
-
-    & $align 4
-    & $define 'managed_to_java_map_module_count' 4
-    $writer.Write([uint32]$moduleRecords.Count)
-    & $align 4
-    & $define 'java_type_count' 4
-    $writer.Write([uint32]$sortedJava.Count)
-    & $align 8
-    & $define 'java_type_names_size' 8
-    $writer.Write([uint64]$javaNameBytes.Length)
-
-    & $align 1
-    & $define 'java_type_names' $javaNameBytes.Length
-    Write-ByteSpan -Writer $writer -Bytes $javaNameBytes
-
-    & $align 1
-    & $define 'managed_type_names' $managedNameBytes.Length
-    Write-ByteSpan -Writer $writer -Bytes $managedNameBytes
-
-    & $align 1
-    & $define 'managed_assembly_names' $assemblyNameBytes.Length
-    Write-ByteSpan -Writer $writer -Bytes $assemblyNameBytes
-
-    & $align 8
-    & $define 'managed_to_java_map' ($moduleRecords.Count * 40)
-    foreach ($record in $moduleRecords) {
-        Write-ByteSpan -Writer $writer -Bytes ([byte[]]$record.Mvid)
-        $writer.Write([uint32]$record.EntryCount)
-        $writer.Write([uint32]0)
-        $writer.Write([uint32]$record.AssemblyNameIndex)
-        $writer.Write([uint32]$record.AssemblyNameLength)
-        $writer.Write([uint32]$record.MapIndex)
-        $writer.Write([uint32]([uint32]::MaxValue))
-    }
-
-    & $align 4
-    & $define 'modules_map_data' ($moduleEntries.Count * 16)
-    foreach ($entry in $moduleEntries) {
-        $writer.Write([uint32]$entry.Hash)
-        $writer.Write([uint32]$entry.ManagedNameIndex)
-        $writer.Write([uint32]$entry.ManagedNameLength)
-        $writer.Write([uint32]$entry.JavaMapIndex)
-    }
-
-    & $zeros 'modules_duplicates_data' 0
-
-    & $align 4
-    & $define 'java_to_managed_map' ($sortedJava.Count * 24)
-    foreach ($entry in $sortedJava) {
-        $writer.Write([uint32]$entry.ModuleIndex)
-        $writer.Write([uint32]$entry.ManagedNameIndex)
-        $writer.Write([uint32]$entry.ManagedNameLength)
-        $writer.Write([uint32]$entry.Token)
-        $writer.Write([uint32]$entry.JavaNameIndex)
-        $writer.Write([uint32]$entry.JavaNameLength)
-    }
-
-    & $align 4
-    & $define 'java_to_managed_hashes' ($sortedJava.Count * 4)
-    foreach ($entry in $sortedJava) { $writer.Write([uint32]$entry.JavaHash) }
-
-    $script:LastTypeMapCounts = [pscustomobject]@{
-        Modules = $moduleRecords.Count
-        Types   = $sortedJava.Count
-    }
-    & $zeros 'jni_remapping_method_replacement_index' 0
-    & $zeros 'jni_remapping_type_replacements' 0
-
-    # xamarin_app_init: the host calls it to hand over a function pointer
-    # resolver. With marshal methods disabled there is nothing to record. The
-    # symbol points at the return stub the ELF writer places in the executable
-    # segment; nothing is written into the data here.
-    & $define 'xamarin_app_init' 4 'FUNC'
-
-    $writer.Flush()
-    $payload = $data.ToArray()
-    $writer.Dispose()
-    $data.Dispose()
-
-    # uncompressed_assemblies_data_buffer lives past the end of the file image.
-    $bssSize = 8
-
-    return New-ElfDataLibrary `
-        -Soname 'libxamarin-app.so' `
-        -Payload $payload `
-        -Symbols $symbols `
-        -Relocations $relocations `
-        -BssSymbolName 'uncompressed_assemblies_data_buffer' `
-        -BssSize $bssSize `
-        -PageSize $PageSize
-}
-
-function Get-JniEnvInitTokens {
-    # application_config carries metadata tokens into Mono.Android.dll, so they
-    # are read out of the very image this APK ships rather than hard coded.
-    # Despite the field name, the class is Android.Runtime.JNIEnvInit.
-    $candidate = $script:BuildContext.SelectedAssemblies['Mono.Android.dll']
-    if ($null -eq $candidate) { throw 'Mono.Android.dll is not among the selected assemblies.' }
-
-    $stream = [System.IO.MemoryStream]::new([byte[]]$candidate.Bytes, $false)
-    $peReader = [System.Reflection.PortableExecutable.PEReader]::new($stream)
-    try {
-        $reader = [System.Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($peReader)
-        foreach ($handle in $reader.TypeDefinitions) {
-            $type = $reader.GetTypeDefinition($handle)
-            if ($reader.GetString($type.Namespace) -cne 'Android.Runtime') { continue }
-            if ($reader.GetString($type.Name) -cne 'JNIEnvInit') { continue }
-
-            $classToken = [System.Reflection.Metadata.Ecma335.MetadataTokens]::GetToken(
-                [System.Reflection.Metadata.EntityHandle]$handle)
-            $initialize = 0
-            $register = 0
-            foreach ($methodHandle in $type.GetMethods()) {
-                $method = $reader.GetMethodDefinition($methodHandle)
-                $name = $reader.GetString($method.Name)
-                $token = [System.Reflection.Metadata.Ecma335.MetadataTokens]::GetToken(
-                    [System.Reflection.Metadata.EntityHandle]$methodHandle)
-                if ($name -ceq 'Initialize') { $initialize = $token }
-                elseif ($name -ceq 'RegisterJniNatives') { $register = $token }
-            }
-            if ($initialize -eq 0 -or $register -eq 0) {
-                throw 'Android.Runtime.JNIEnvInit does not declare both Initialize and RegisterJniNatives.'
-            }
-            return [pscustomobject]@{
-                ClassToken         = [uint32]$classToken
-                InitializeToken    = [uint32]$initialize
-                RegisterJniToken   = [uint32]$register
-            }
-        }
-        throw 'Android.Runtime.JNIEnvInit was not found in Mono.Android.dll.'
-    }
-    finally {
-        $peReader.Dispose()
-        $stream.Dispose()
-    }
-}
-
-function Get-EmittedActivityIdentity {
-    # The typemap is keyed by the module's MVID, and the Java to managed
-    # direction carries the type's metadata token. Both are read back out of the
-    # assembly setup.ps1 just emitted.
-    $candidate = $script:BuildContext.SelectedAssemblies["$($script:AssemblyName).dll"]
-    if ($null -eq $candidate) { throw "$($script:AssemblyName).dll is not among the selected assemblies." }
-
-    $stream = [System.IO.MemoryStream]::new([byte[]]$candidate.Bytes, $false)
-    $peReader = [System.Reflection.PortableExecutable.PEReader]::new($stream)
-    try {
-        $reader = [System.Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($peReader)
-        $moduleDefinition = $reader.GetModuleDefinition()
-        $mvid = $reader.GetGuid($moduleDefinition.Mvid)
-
-        $fullName = "$($script:ManagedNamespace).$($script:ActivityClassName)"
-        foreach ($handle in $reader.TypeDefinitions) {
-            $type = $reader.GetTypeDefinition($handle)
-            $name = $reader.GetString($type.Name)
-            $namespace = $reader.GetString($type.Namespace)
-            if ("$namespace.$name" -cne $fullName) { continue }
-            $token = [System.Reflection.Metadata.Ecma335.MetadataTokens]::GetToken(
-                [System.Reflection.Metadata.EntityHandle]$handle)
-            return [pscustomobject]@{
-                Mvid            = $mvid.ToByteArray()
-                Token           = [uint32]$token
-                ManagedTypeName = $fullName
-            }
-        }
-        throw "'$fullName' was not found in the emitted assembly."
-    }
-    finally {
-        $peReader.Dispose()
-        $stream.Dispose()
-    }
-}
-function Invoke-AppDataStep {
-    if (Skip-ForNativeAdmission -Step 9 -Output 'libxamarin-app.so') { return }
-
-    $tokens = Get-JniEnvInitTokens
-    $typeMapModules = Get-TypeMapModules
-    $contract = Get-AndroidNativeContract
-    $assemblyCount = $script:BuildContext.SelectedAssemblies.Count
-
-    $library = New-XamarinAppLibrary `
-        -PackageName $script:PackageName `
-        -AssemblyCount $assemblyCount `
-        -JniEnvInitClassToken $tokens.ClassToken `
-        -JniEnvInitializeMethodToken $tokens.InitializeToken `
-        -JniEnvRegisterJniNativesMethodToken $tokens.RegisterJniToken `
-        -TypeMapModules $typeMapModules `
-        -PageSize ([int]$contract.elf.maxPageSize)
-
-    # The symbols the shipped runtime leaves undefined. If any is missing the
-    # loader rejects the library, so they are checked here instead.
-    $required = @(
-        'format_tag', 'application_config', 'assembly_store', 'assembly_store_bundled_assemblies',
-        'app_environment_variables', 'app_environment_variable_contents',
-        'app_system_properties', 'app_system_property_contents',
-        'bundled_assemblies', 'dso_cache', 'dso_names_data', 'dso_jni_preloads_idx',
-        'dso_jni_preloads_idx_count', 'dso_jni_preloads_idx_stride',
-        'init_runtime_property_names', 'init_runtime_property_values',
-        'compressed_assembly_count', 'compressed_assembly_descriptors',
-        'uncompressed_assemblies_data_size', 'uncompressed_assemblies_data_buffer',
-        'managed_to_java_map_module_count', 'java_type_count', 'java_type_names',
-        'java_type_names_size', 'managed_type_names', 'managed_assembly_names',
-        'managed_to_java_map', 'modules_map_data', 'modules_duplicates_data',
-        'java_to_managed_map', 'java_to_managed_hashes',
-        'jni_remapping_method_replacement_index', 'jni_remapping_type_replacements',
-        'xamarin_app_init'
-    )
-    $report = Test-XamarinAppLibrary -Library $library -RequiredSymbols $required -PackageName $script:PackageName -AssemblyCount $assemblyCount
-
-    $outputDirectory = Join-Path $OutputDirectory $script:Target.Abi
-    $libraryPath = Join-Path $outputDirectory 'libxamarin-app.so'
-    if ($PSCmdlet.ShouldProcess($libraryPath, 'Write application data library')) {
-        Write-BuildFile -Intermediate -Path $libraryPath -Bytes $library.Bytes
-    }
-
-    $libraryStream = [System.IO.MemoryStream]::new([byte[]]$library.Bytes, $false)
-    try { $libraryHash = Get-Sha256Hex -Stream $libraryStream }
-    finally { $libraryStream.Dispose() }
-
-    $script:BuildContext.XamarinApp = [pscustomobject]@{
-        Path   = $libraryPath
-        Bytes  = $library.Bytes
-        Sha256 = $libraryHash
-    }
-
-    Write-Host ('[PASS] Step 9 complete: libxamarin-app.so emitted as {0} bytes exporting {1} symbols with {2} relative relocations. application_config declares {3} assemblies, package {4}, JNIEnvInit token 0x{5:X8}. All {6} symbols the runtime leaves undefined resolve. SHA-256 {7}' -f
-        $report.Size,
-        $report.SymbolCount,
-        $report.RelocationCount,
-        $assemblyCount,
-        $script:PackageName,
-        $tokens.ClassToken,
-        $report.Verified,
-        $libraryHash) -ForegroundColor Green
 }
 
 function New-ResStringPool {
@@ -9594,7 +6685,6 @@ function New-BinaryAxmlManifest {
         [int] $TargetSdkVersion = 37,
         [int] $CompileSdkVersion = 37,
         [string] $CompileSdkVersionCodename = "17",
-        [ValidateSet('Xamarin', 'NativeActivity')][string] $Admission = 'Xamarin',
         [string] $NativeLibraryName = 'pwsh-host'
     )
 
@@ -9672,21 +6762,17 @@ function New-BinaryAxmlManifest {
         'uses-sdk'
     )
 
-    # NativeActivity admission adds only its own strings, so the Xamarin
-    # manifest stays byte-identical to the proven one.
-    $native = $Admission -eq 'NativeActivity'
-    if ($Debuggable -and -not $native) { throw '-Debuggable applies to -Admission NativeActivity only.' }
-    if ($native) {
-        $attrNames += 'hasCode'                        # ResID: 0x0101000C
-        $resIds += 0x0101000C
-        if ($Debuggable) {
-            $attrNames += 'debuggable'                 # ResID: 0x0101000F
-            $resIds += 0x0101000F
-        }
-        $otherStrings = @($otherStrings | Where-Object { $_ -notin 'mono.MonoRuntimeProvider', $providerAuthority, 'provider' })
-        $otherStrings += @('android.app.NativeActivity', 'android.app.lib_name', $NativeLibraryName)
-        $activityFullName = 'android.app.NativeActivity'
+    # The pool is built in the order that produced the device-proven manifest:
+    # the base strings, less the .NET for Android provider, then NativeActivity's.
+    $attrNames += 'hasCode'                        # ResID: 0x0101000C
+    $resIds += 0x0101000C
+    if ($Debuggable) {
+        $attrNames += 'debuggable'                 # ResID: 0x0101000F
+        $resIds += 0x0101000F
     }
+    $otherStrings = @($otherStrings | Where-Object { $_ -notin 'mono.MonoRuntimeProvider', $providerAuthority, 'provider' })
+    $otherStrings += @('android.app.NativeActivity', 'android.app.lib_name', $NativeLibraryName)
+    $activityFullName = 'android.app.NativeActivity'
 
     $allStrings = $attrNames + $otherStrings
     $strMap = @{}
@@ -9892,10 +6978,8 @@ function New-BinaryAxmlManifest {
     # Attributes are written in resource-id order; hasCode (0x0101000C)
     # follows name (0x01010003).
     # debuggable (0x0101000F) follows hasCode.
-    if ($native) {
-        $flags = @((Attr-Bool 'hasCode' $false)) + @(if ($Debuggable) { (Attr-Bool 'debuggable' $true) })
-        $appAttrs = @($appAttrs[0..2]) + $flags + @($appAttrs[3..4])
-    }
+    $flags = @((Attr-Bool 'hasCode' $false)) + @(if ($Debuggable) { (Attr-Bool 'debuggable' $true) })
+    $appAttrs = @($appAttrs[0..2]) + $flags + @($appAttrs[3..4])
     Write-StartElem 'application' $appAttrs 12
 
     $activityAttrs = @(
@@ -9915,24 +6999,11 @@ function New-BinaryAxmlManifest {
     Write-StartElem 'category' @((Attr-String 'name' 'android.intent.category.LEANBACK_LAUNCHER')) 17
     Write-EndElem 'category' 17
     Write-EndElem 'intent-filter' 14
-    if ($native) {
-        # NativeActivity loads lib<value>.so and calls ANativeActivity_onCreate
-        # (lib/native_activity.h).
-        Write-StartElem 'meta-data' @((Attr-String 'name' 'android.app.lib_name'), (Attr-String 'value' $NativeLibraryName)) 18
-        Write-EndElem 'meta-data' 18
-    }
+    # NativeActivity loads lib<value>.so and calls ANativeActivity_onCreate
+    # (lib/native_activity.h).
+    Write-StartElem 'meta-data' @((Attr-String 'name' 'android.app.lib_name'), (Attr-String 'value' $NativeLibraryName)) 18
+    Write-EndElem 'meta-data' 18
     Write-EndElem 'activity' 13
-
-    if (-not $native) {
-        $providerAttrs = @(
-            (Attr-String 'name' 'mono.MonoRuntimeProvider'),
-            (Attr-Bool 'exported' $false),
-            (Attr-String 'authorities' $providerAuthority),
-            (Attr-IntDec 'initOrder' 1999999999)
-        )
-        Write-StartElem 'provider' $providerAttrs 20
-        Write-EndElem 'provider' 20
-    }
 
     $meta1Attrs = @(
         (Attr-String 'name' 'com.android.dynamic.apk.fused.modules'),
@@ -10231,22 +7302,12 @@ function Invoke-ManifestValidation {
     # checks, without the rest of the build. Returns the exit code.
     try {
         [void](Test-AndroidAttributeIds)
-        $xamarin = New-BinaryAxmlManifest -PackageName $script:PackageName -ActivityClassName $script:ActivityClassName -ActivityLabel $script:ApplicationLabel -Admission Xamarin
-        $fixture = Import-LibSourceBytes -Path 'AndroidManifest.xamarin.xml'
-        if ([Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($xamarin)) -cne [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($fixture))) {
-            throw 'The Xamarin manifest differs from its pinned fixture, lib/AndroidManifest.xamarin.xml.'
-        }
-        $native = New-BinaryAxmlManifest -PackageName $script:PackageName -ActivityClassName $script:ActivityClassName -ActivityLabel $script:ApplicationLabel -Admission NativeActivity
-        $counts = foreach ($pair in @(@('Xamarin', $xamarin), @('NativeActivity', $native))) {
-            Assert-ManifestAttributeIds -Report (Test-BinaryAxml -Document $pair[1])
-        }
+        $native = New-BinaryAxmlManifest -PackageName $script:PackageName -ActivityClassName $script:ActivityClassName -ActivityLabel $script:ApplicationLabel
+        $count = Assert-ManifestAttributeIds -Report (Test-BinaryAxml -Document $native)
         $controls = Test-ManifestNegativeControls -Document $native
-        if ($Aapt2Path) {
-            Invoke-Aapt2ManifestCheck -Document $xamarin -Label 'Xamarin'
-            Invoke-Aapt2ManifestCheck -Document $native -Label 'NativeActivity'
-        }
-        Write-Host ('[PASS] Manifest validation: Xamarin manifest matches its pinned fixture; both manifests pass the reader with {0} and {1} android: attributes matched to public-final.xml ids; {2} malformed-document controls rejected for the expected reason{3}.' -f
-            $counts[0], $counts[1], $controls, $(if ($Aapt2Path) { '; aapt2 parses both' } else { '' })) -ForegroundColor Green
+        if ($Aapt2Path) { Invoke-Aapt2ManifestCheck -Document $native -Label 'NativeActivity' }
+        Write-Host ('[PASS] Manifest validation: the manifest passes the reader with {0} android: attributes matched to public-final.xml ids; {1} malformed-document controls rejected for the expected reason{2}.' -f
+            $count, $controls, $(if ($Aapt2Path) { '; aapt2 parses it' } else { '' })) -ForegroundColor Green
         return 0
     }
     catch {
@@ -10260,8 +7321,7 @@ function Invoke-ManifestStep {
     $manifestBytes = New-BinaryAxmlManifest `
         -PackageName $script:PackageName `
         -ActivityClassName $script:ActivityClassName `
-        -ActivityLabel $script:ApplicationLabel `
-        -Admission $Admission
+        -ActivityLabel $script:ApplicationLabel
     $report = Test-BinaryAxml -Document $manifestBytes
     $checkedIds = Assert-ManifestAttributeIds -Report $report
 
@@ -10285,7 +7345,7 @@ function Invoke-ManifestStep {
         $report.FileSize,
         $report.ElementCount,
         $script:PackageName,
-        $(if ($Admission -eq 'NativeActivity') { 'android.app.NativeActivity' } else { $script:ActivityClassName }),
+        'android.app.NativeActivity',
         $manifestHash,
         $checkedIds) -ForegroundColor Green
 }
@@ -10389,7 +7449,7 @@ function Get-NavigationItems {
                'arm32' { 'armeabi-v7a (32-bit devices)' }
            } }
         @{ Id = 'Debug'; Kind = 'Option'; Label = 'Debug'; Value = $(if ($Debug) { 'On' } else { 'Off' })
-           Caption = if ($Debug) { 'Intermediates + reference check' } else { 'APK only' } }
+           Caption = if ($Debug) { 'Intermediates written' } else { 'APK only' } }
         @{ Id = 'Payload'; Kind = 'Option'; Label = 'Payload'; Value = $Payload
            Caption = switch ($Payload) {
                'Minimal'  { 'IL only, no R2R' }
@@ -10642,7 +7702,7 @@ function Get-CanvasCells {
             '  -DeletePackages             Delete packages on exit'
             '  -WhatIf                     Preview only'
             ''
-            '  pwsh -File setup.ps1 -c -Step 11'
+            '  pwsh -File setup.ps1 -c -Step 9'
             ''
         )
         $boxWidth = 72
@@ -10703,16 +7763,7 @@ function Render-Canvas {
 }
 
 function Request-Build {
-    # Debug asks first; a normal build starts straight away.
-    if ($Debug) {
-        Show-Popup -Title 'Debug build' -Confirm -Lines @(
-            'This writes the intermediates and runs the'
-            '.NET SDK reference build in a temp folder.'
-            ''
-            'Are you sure?'
-        ) -OnYes { Start-PipelineWorker }
-    }
-    else { Start-PipelineWorker }
+    Start-PipelineWorker
 }
 
 function Start-PipelineWorker {
@@ -11075,7 +8126,6 @@ $script:RunningStep = 0
 $repositoryBefore = Get-RepositorySnapshot
 try {
     foreach ($id in $script:StepSelection) { Invoke-StepNode -Target $id }
-    if ($Debug -and -not $WhatIfPreference) { Invoke-ReferenceCrossCheck }
 }
 catch {
     # One line, the step, and the reason. The full record stays available in

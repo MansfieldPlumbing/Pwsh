@@ -99,9 +99,15 @@ Ship versions are locked: PowerShell 7.7.0-preview.5 and .NET
 - [ ] Gate 2f: the frozen `scripts/CellCanvas.ps1` bytes run with Mono.Android,
   Mono.Android.Runtime, Java.Interop, libmonodroid, libxamarin-app, Xamarin DEX
   and type maps absent.
-- [ ] Remove the `-Admission Xamarin` path, steps 8 and 9, the type maps, the
-  Xamarin assemblies, the `-Debug` reference build, the Android channel
-  packages and the empty `Probe.dll`.
+- [x] .NET for Android removed: the `-Admission Xamarin` path, the DEX and
+  `libxamarin-app` steps (the build is 9 steps), type maps, the `-Debug`
+  reference build, `classes.dex` and the Xamarin fixture, the three
+  `Microsoft.Android.Runtime.CoreCLR` pins, and `Mono.Android`,
+  `Mono.Android.Runtime`, `Java.Interop`, the resource designer and `Probe.dll`
+  from the payload (96 to 91). `Microsoft.Android.Runtime.37.android` stays
+  pinned as build-time metadata for the gate 2e compatibility surface; it is
+  never packaged. Same manifest bytes; gates 2a-2d pass on all three devices;
+  arm64 APK 16,547,569 bytes.
 
 ## Emitted native code: racing RyuJIT
 
@@ -138,7 +144,7 @@ The win came from specialization to known shapes and layout.
 
 ## Build hygiene
 
-- [ ] Rename `Pwsh.dll` to `Dev.MansfieldPlumbing.Pwsh.dll`; derive the native
+- [x] Rename the managed host assembly to `Dev.MansfieldPlumbing.Pwsh.dll`; derive the native
   host's assembly-name literal from `$script:ManagedNamespace`.
 - [ ] Step 6's title says ELF64 but the step also emits ELF32.
 - [ ] Skipped steps print SKIP, not PASS.

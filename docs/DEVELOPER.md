@@ -257,7 +257,7 @@ The debug menu should offer them separately.
 
 ```powershell
 # build (writes only the APK)
-pwsh -NoProfile -File .\setup.ps1 -c -Step 11 -AcceptWritePlan
+pwsh -NoProfile -File .\setup.ps1 -c -Step 9 -AcceptWritePlan
 
 # emulator
 C:\bin\android-sdk\emulator\emulator.exe -avd pwsh-api36

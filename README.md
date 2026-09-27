@@ -5,7 +5,7 @@ MSBuild, no Roslyn, no `aapt2`, no `javac`, no `d8`, no `apksigner`, no
 `zipalign`. You run `setup.ps1` and you get a signed APK.
 
 ```powershell
-pwsh -NoProfile -File .\setup.ps1 -c -Step 11 -AcceptWritePlan
+pwsh -NoProfile -File .\setup.ps1 -c -Step 9 -AcceptWritePlan
 ```
 
 Before writing anything, the script prints its write plan: every location it
@@ -18,34 +18,34 @@ addresses.
 
 ## Status
 
-Steps 1 through 11 pass. `-Step 11` produces a signed `dev.mansfieldplumbing.pwsh.apk` that installs
-on a Samsung Galaxy S23, launches, initializes CoreCLR, loads its assemblies out of the
-emitted assembly store, resolves its activity through the emitted type map, and
-runs emitted IL to draw its first screen. Verified on hardware.
-
-Every artifact the script emits has been exercised by the device:
+Steps 1 through 9 pass. `-Step 9` produces a signed
+`dev.mansfieldplumbing.pwsh.apk` (about 16.5 MB for arm64) with no DEX and no
+.NET for Android: the framework's `android.app.NativeActivity` loads the emitted
+`libpwsh-host.so`, which starts CoreCLR, serves 91 IL-only assemblies in place
+from the emitted store, opens a PowerShell runspace on the main thread and runs
+`Profile.ps1`. Proven on the x86_64 emulator, a Samsung Galaxy S23 (arm64) and
+an onn 4K Plus (arm32).
 
 | Emitted | Proven by |
 | --- | --- |
-| XABA assembly store | CoreCLR loaded CoreLib, System.Runtime and Mono.Android from it |
-| `libassembly-store.so` | `dlopen` plus `dlsym` of `_assembly_store` succeeded |
-| `libxamarin-app.so` | 34 symbols resolved; the type map lookup succeeded |
+| IL-only assembly store | CoreCLR loaded CoreLib, SMA and the startup set in place from the mapped store |
+| `libassembly-store.so` | the host resolved the store symbol and served every image from it |
+| `libpwsh-host.so` | `ANativeActivity_onCreate` started CoreCLR; `Admit` returned 0x50575348 |
+| `libpsl-native.so` | SMA's native calls during `Open` resolved |
+| `Dev.MansfieldPlumbing.Pwsh.dll` | `RunPowerShell` opened the runspace and ran `Profile.ps1` |
 | `AndroidManifest.xml` | Android installed and launched the package |
-| `classes2.dex` | the Java peer instantiated the activity |
-| `Pwsh.dll` IL | `OnCreate` ran and drew the first screen |
 | APK zip and v2 signature | Android accepted the install |
 
 Not yet done, stated plainly:
 
-- **The host is minimal.** The activity opens a runspace and runs
-  `Profile.ps1` in-process; on the x86_64 emulator that runs CellCanvas. The
-  payload carries no cmdlet modules, so commands such as `Get-ChildItem` and
-  `Get-Process` (`Microsoft.PowerShell.Commands.Management`) are not present.
-- **The type map covers only the emitted assembly.** `Mono.Android` needs its
-  own module entry, so type registration still logs failures. It is derivable
-  from the `Register` attributes those types already carry.
-- **`classes.dex` is acquired, not emitted.** See Training wheels below.
-
+- **No cmdlet modules.** Commands such as `Get-ChildItem` and `Get-Process`
+  (`Microsoft.PowerShell.Commands.Management`) are not present.
+- **CellCanvas does not run yet.** It ran under .NET for Android; it returns
+  when gate 2e supplies its Android compatibility surface (`ROADMAP.md`).
+- **Startup.** Without ReadyToRun the JIT compiles the startup path: about
+  1.0 s on the S23 and 7 s on the onn. A leaner initial session is next.
+- **Hashing and TLS** need the planned emitted `NativeActivity` subclass,
+  which loads the runtime's Android crypto library from Java.
 ## Design
 
 **The build script is inside the thing it builds.** The assemblies `setup.ps1`
@@ -113,21 +113,19 @@ property values the shipped one does not.
 
 ## Steps
 
-Each step runs its dependencies first, so `-Step 11` is a full build.
+Each step runs its dependencies first, so `-Step 9` is a full build.
 
 | Step | What it does |
 | --- | --- |
-| 1 | Verify pinned specifications against their upstream addresses |
+| 1 | Verify pinned specifications against their digests and upstream addresses |
 | 2 | Acquire and hash the pinned NuGet packages |
 | 3 | Inspect and classify every payload in those packages |
-| 4 | Select the 96-assembly minimal payload |
-| 5 | Emit and verify the XABA assembly store |
-| 6 | Wrap the store in an ELF shared library for the target; emit `libpsl-native.so` |
+| 4 | Select the 91-assembly payload; re-emit ReadyToRun images as IL-only |
+| 5 | Emit and verify the assembly store |
+| 6 | Wrap the store in an ELF library; emit `libpwsh-host.so` and `libpsl-native.so` |
 | 7 | Emit the binary `AndroidManifest.xml` |
-| 8 | Emit the Java peer class as Dalvik bytecode |
-| 9 | Emit `libxamarin-app.so`, the application data library |
-| 10 | Assemble the unsigned APK archive |
-| 11 | Sign with APK Signature Scheme v2 |
+| 8 | Assemble the unsigned APK archive |
+| 9 | Sign with APK Signature Scheme v2 |
 
 `-h` explains every switch. `-Architecture`, `-Debug`, `-CacheDirectory`,
 `-OutputDirectory`, `-SigningKeyPath`, `-AcceptWritePlan` and `-DeletePackages`
@@ -137,48 +135,22 @@ unattended session runs headlessly through the same functions.
 
 ## Notable mechanics
 
-**Assemblies are emitted, not compiled.** `Pwsh.dll` contains a real Android
-activity deriving from `Android.App.Activity`, with `OnCreate` emitted as IL
-through `PersistedAssemblyBuilder`. The target `Mono.Android` contract is loaded
-into an isolated `AssemblyLoadContext` so generated code binds against the
-target runtime rather than the host's. No compiler runs in the build. The only
-C# in the repository is the upstream reference files in `lib/` and the small
-reference activity that `-Debug` hands to the .NET SDK for its cross-check;
-the normal build compiles none of it.
+**The managed host is emitted, not compiled.** `Dev.MansfieldPlumbing.Pwsh.dll`
+holds the entries the native host calls. They are LINQ expression trees compiled
+into a `PersistedAssemblyBuilder` assembly; the build rejects any tree that still
+holds a dynamic call site or a constant IL cannot encode. No compiler runs in
+the build, and the only C# in the repository is upstream reference files in
+`lib/`, which are never compiled.
 
-**Dalvik bytecode is written directly.** Step 8 emits a DEX file containing the
-Java peer: class definition, string table in ordinal order, Adler-32 checksum
-and SHA-1 signature, and hand-assembled instructions. This is what lets the
-build skip `javac` and `d8` entirely. Adding an intent, provider or service role
-is another emitted peer plus another manifest element, not another toolchain.
+**Machine code comes from named encoders.** The native host, the store library
+and `libpsl-native.so` are written instruction by instruction for x86-64, A64 and
+Thumb-2/A32, decoded back by an independent decoder and checked against each
+ABI's control-flow rules.
 
-**Names are derived, not chosen.** .NET Android names a generated Java peer
-`crc64` plus a CRC-64/Jones hash of `namespace:assembly`. The polynomial upstream
-documents is the normal form; a reflected implementation needs its reverse, and
-getting that backwards yields a plausible-looking wrong answer. The derivation is
-checked at build time against a known mapping, and `-Debug` re-checks it
-against a fresh .NET for Android reference build.
-
-**The type map is computed from our own output.** The module is keyed by the
-MVID of the assembly the script just emitted, entries are hashed with the same
-CRC-32 the store index uses, and the metadata token is read back out of the
-emitted image.
-
-**R2R is excluded deliberately.** ReadyToRun images are classified and rejected;
-the payload is IL and RyuJIT handles it on device.
-
-## Training wheels
-
-`lib/classes.dex` is acquired, not emitted, and is the one input whose
-provenance does not chain to a published package. It comes from a .NET for
-Android reference build against the same pinned packs; `setup.ps1 -Debug`
-rebuilds that reference in a temporary folder and compares its `classes.dex`
-with the pinned copy.
-
-It goes away with the planned move off .NET for Android: the main activity
-becomes `android.app.NativeActivity`, which needs no DEX at all, and any Java
-classes still required are emitted by `setup.ps1`. See `ROADMAP.md`.
-
+**ReadyToRun is removed.** Every runtime image that carries precompiled code is
+re-emitted IL-only: its IL, field data, metadata and resources are kept, its
+native code is dropped, and its method and field addresses are rewritten. The
+store serves the images in place and the JIT compiles what runs.
 ## Layout
 
 ```
