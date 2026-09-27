@@ -87,9 +87,25 @@ DarkGray 8, Blue 12, Green 10, Cyan 14, Red 9, Magenta 13, Yellow 11, White 15.
 
 ### Frame ring
 
-One `ArrayBuffer` (a `SharedArrayBuffer` when available) holding three slots.
+One `ArrayBuffer` (a `SharedArrayBuffer` when available): a 64-byte control
+block, then three slots. The writer and each reader are separate `FrameRing`
+instances, possibly in different threads or processes, over the same bytes;
+all coordination is in the buffer, never in instance fields.
+
+Control block, little-endian, accessed only through `Atomics` on an
+`Int32Array` or `BigInt64Array` view:
+
+| Offset | Type | Field |
+| --- | --- | --- |
+| 0 | u32 | magic `0x43525750` (ASCII `PWRC`) |
+| 4 | u32 | version, 1 |
+| 8 | i32 | newest committed slot, -1 before the first commit (written by the writer) |
+| 12 | i32 | slot a reader is copying, -1 when none (written by the reader) |
+| 16-63 | | zero |
+
 Each slot is a 64-byte header followed by `cols * rows * 12` bytes of cells in
-row-major order. Header, little-endian:
+row-major order. Slot `k` starts at byte `64 + k * (64 + cols * rows * 12)`.
+Header, little-endian:
 
 | Offset | Type | Field |
 | --- | --- | --- |
@@ -105,10 +121,21 @@ row-major order. Header, little-endian:
 | 36 | u32 | cell format, 1 |
 | 40-63 | | zero |
 
-The writer writes the slot that is neither the newest committed slot nor the
-slot most recently acquired by a reader, then sets its sequence to the
-previous maximum plus one; the sequence is written last. `acquireLatest()`
-returns the slot with the highest sequence. The writer never waits.
+The sequence is read and written only with `Atomics.load` and `Atomics.store`
+on a `BigInt64Array` view (every slot header is 8-byte aligned).
+
+Writer, `beginWrite` then `commit`: choose the lowest-numbered slot that is
+neither the control block's newest slot nor its reader slot; write cells and
+header fields; store the sequence (previous maximum plus one); then store the
+slot index as newest. The writer never waits.
+
+Reader, `acquireLatest`: load the newest slot `n` (return `null` if -1);
+store `n` as the reader slot; load `n`'s sequence `s1`; if the newest slot is
+no longer `n`, start again; copy the header fields and cells into memory the
+reader owns; load the sequence again as `s2`; if `s2 != s1`, start again;
+store -1 as the reader slot; return the copy. It returns a copy, never a view
+into the ring. With one reader this never retries; the checks make a second
+reader or a torn read detectable instead of silent.
 
 ## Modules and exports
 
@@ -160,7 +187,7 @@ export class ConsoleModel {
 // src/core/ring.ts
 export class FrameRing {
   constructor(buffer: ArrayBuffer | SharedArrayBuffer, cols: number, rows: number);
-  static byteLength(cols: number, rows: number): number;
+  static byteLength(cols: number, rows: number): number; // 64 + 3 * (64 + cols * rows * 12)
   beginWrite(): { cells: Uint32Array; slot: number };
   commit(slot: number, cursorCol: number, cursorRow: number, cursorVisible: boolean): bigint; // returns the sequence
   acquireLatest(): { sequence: bigint; cols: number; rows: number; cells: Uint32Array; cursorCol: number; cursorRow: number; cursorVisible: boolean } | null;
@@ -217,7 +244,7 @@ export function diffFrames(previous: Uint32Array | null, next: Uint32Array, cols
   in the last column moves to the next row, leaving the last column empty.
   Wrapped rows are cached per entry, keyed by entry version and `cols`; a
   resize re-wraps from the logical lines.
-- Editor: the prompt, a space, the editor text, then the composition text
+- Editor: the prompt (default `PS>`, changed by `setPrompt`), a space, the editor text, then the composition text
   (inverse attribute) at the caret. It wraps like output. Caret moves by
   scalar. History: up and down walk submitted commands, and the text being
   edited is kept and restored after the newest entry.
@@ -229,7 +256,10 @@ export function diffFrames(previous: Uint32Array | null, next: Uint32Array, cols
 ### Diff
 
 `diffFrames(null, ...)` returns a full frame. Otherwise it compares cells and,
-on each row with changes, covers every changed cell. In each covered stretch,
+on each row with changes, covers every changed cell. A covered stretch is
+extended so that it never starts on a continuation cell (it moves left to the
+wide character's first cell) and never ends on a wide character's first cell
+(it moves right to include the continuation). In each covered stretch,
 consecutive cells with equal style merge: one `fill` for their background,
 then one `text` for their characters (empty cells become spaces; continuation
 cells add no text but count in `cells`). Inverse swaps resolved foreground and
@@ -264,19 +294,37 @@ Each file:
 ```
 
 `steps` use the `ConsoleModel` method names as `op`, with their arguments as
-named fields. `expect.cells` lists the cells to check as `[row, col, scalar,
-width, attrs, fgMode, fg, bgMode, bg]`, and `expect.cursor` is `[col, row,
-visible]`. Provide at least these vectors, one file each: plain text; LF;
-CRLF; lone CR overwrite; TAB; BS; every SGR attribute on and off; SGR 30-37,
-90-97, 40-47 and 100-107; 38;5 and 48;5 at 0, 15, 16, 231, 232 and 255;
-38;2 and 48;2; malformed 38;2; reset; an ignored CSI (cursor movement); an
-ignored OSC title; wrapping at `cols`; a wide character at the last column; a
-zero-width scalar; an emoji above U+FFFF; resize re-wrap; each stream's
-colors; explicit `fg`/`bg`; progress show, update and complete; editor insert,
-caret move and backspace across an emoji; composition; history up, down and
-restore; scroll up and re-pin; and `diffFrames` on one changed cell and on a
-style run.
+named fields, plus one extra op, `snapshot`, which composes the current frame
+and keeps it as the "previous" frame. `expect.cells` lists the cells to check
+as `[row, col, scalar, width, attrs, fgMode, fg, bgMode, bg]`, and
+`expect.cursor` is `[col, row, visible]`. A vector with a `snapshot` step also
+has `expect.ops`: the exact `DrawOp` list that `diffFrames(snapshot,
+current)` must return. Expected values are written by hand from this
+document, never generated by running the implementation.
 
+Provide exactly these files, each asserting what its name says. A vector may
+not be empty, and no two files may share steps:
+
+`plain-text`, `lf`, `crlf`, `lone-cr-overwrite`, `tab`, `bs`, `bs-at-column-0`,
+`sgr-bold`, `sgr-dim`, `sgr-italic`, `sgr-underline`, `sgr-inverse`,
+`sgr-strike`, `sgr-22-clears-bold-and-dim`, `sgr-23`, `sgr-24`, `sgr-27`,
+`sgr-29`, `sgr-fg-30-37`, `sgr-fg-90-97`, `sgr-bg-40-47`, `sgr-bg-100-107`,
+`sgr-39-49-defaults`, `sgr-256`, `sgr-truecolor`, `sgr-malformed`,
+`sgr-reset`, `sgr-empty-is-reset`, `csi-ignored`, `osc-ignored`, `dcs-ignored`,
+`wrap-cols`, `wide-last-column`, `zero-width`, `emoji`, `resize-rewrap`,
+`stream-output`, `stream-error`, `stream-warning`, `stream-verbose`,
+`stream-debug`, `stream-information`, `explicit-colors`,
+`sgr-overrides-stream`, `progress-show`, `progress-update`,
+`progress-complete`, `default-prompt`, `set-prompt`, `editor-insert`,
+`editor-caret`, `editor-backspace-emoji`, `editor-delete`,
+`editor-composition`, `history-up-down`, `history-restore-scratch`,
+`scroll-up`, `scroll-repin`, `diff-one-cell`, `diff-style-run`,
+`diff-inverse`, `diff-wide-stretch`, `diff-unchanged-is-empty`.
+
+Ring behavior is covered by unit tests, not vectors: two `FrameRing`
+instances over one buffer (writer and reader); a reader holding slot `k`
+while the writer commits twice, showing the writer never writes `k`; and a
+sequence change during a read forcing a retry.
 ## Deliverable
 
 ```
@@ -292,10 +340,12 @@ vectors/*.json
 Acceptance, all of which must pass and be shown in `REPORT.md`:
 
 1. `npx tsc --noEmit` with no errors.
-2. `npx tsx --test test/*.test.ts`: every vector and unit test passes.
+2. `npx tsx --test test/*.test.ts`: every vector and unit test passes, and a
+   test fails if any file named in the vector list is missing or empty.
 3. `grep -rE "setTimeout|setInterval|requestAnimationFrame|Date\.now|performance\.now|document|window" src/core` finds nothing.
 4. `scripts/generate-unicode.ts` verifies both Unicode files against the
    SHA-256 values above before generating.
 5. `REPORT.md` lists each source file studied with its revision, each
    requirement of this document with the file and test that meets it, and
-   anything not done.
+   under "Not done" every requirement that is not met or not tested. Leaving
+   out a requirement that is not met is a failure.
