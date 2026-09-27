@@ -162,7 +162,7 @@ lib/manifest.json the root provenance manifest; setup.ps1 holds only its digest
 ROADMAP.md        where the project is going, gate by gate
 docs/DEVELOPER.md decisions, proofs, architecture targets, testing
 scripts/          the frozen CellCanvas workload, its reference inventory, the screen probe
-tools/            payload closure probe; pre-push scan for secrets and personal data
+tools/            device script runner (run-as, no rebuild); payload closure probe; pre-push scan
 .githooks/        pre-push hook (git config core.hooksPath .githooks)
 ```
 

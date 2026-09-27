@@ -171,7 +171,7 @@ OPTIONS
                               3  Inspect and classify every package payload
                               4  Select the assembly set for the target
                               5  Emit and verify the XABA assembly store
-                              6  Wrap the store in an ELF64 library for the target
+                              6  Wrap the store in an ELF library for the target
                               7  Emit the binary AndroidManifest.xml
                               8  Assemble the unsigned APK archive
                               9  Sign the APK with Signature Scheme v2
@@ -303,7 +303,7 @@ $script:StepGraph = @{
     }
     6  = @{
         Key = 'Native'; DependsOn = @(5)
-        Title = 'Wrap the store in an ELF64 library for the target'
+        Title = 'Wrap the store in an ELF library for the target'
         Caption = 'Resolved through the emitted hash table exactly as dlsym would.'
         Action = { Invoke-NativeStep }
     }

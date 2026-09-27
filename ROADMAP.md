@@ -151,8 +151,16 @@ The win came from specialization to known shapes and layout.
 
 - [x] Rename the managed host assembly to `Dev.MansfieldPlumbing.Pwsh.dll`; derive the native
   host's assembly-name literal from `$script:ManagedNamespace`.
-- [ ] Step 6's title says ELF64 but the step also emits ELF32.
+- [x] Step 6's title names ELF, not ELF64; the step emits ELF64 and ELF32.
 - [ ] Skipped steps print SKIP, not PASS.
+- [x] Live device loop without a rebuild: `tools/Invoke-DeviceScript.ps1`
+  places a script (or a directory holding `Profile.ps1`) through `run-as` in
+  a `-Debuggable` build on every attached device, launches, and reports the
+  app's log lines, launch time, liveness and crash lines. Ran
+  `ScreenProbe.ps1` on all three devices.
+- [ ] Setup deploy step: the same placement as an optional step after signing
+  (for example `-Deploy -Profile <path>`), so one command builds, installs
+  and runs.
 
 ## UI and platform
 
@@ -188,6 +196,13 @@ The win came from specialization to known shapes and layout.
 - [ ] Service slots: one emitted DEX forwarder per Android base class that
   needs one (accessibility, input method, tile, voice interaction) and a
   dispatcher that answers within Android's deadlines.
+
+- [ ] Paired-PC transport candidate: USB accessory mode (AOA). Kokoro-Hexagon
+  proved only the `GET_PROTOCOL` handshake (version 2) with an S23
+  (`docs/receipts/aoa-protocol-20260924.md`); no re-enumeration or round
+  trip yet. Receiving accessories needs a `USB_ACCESSORY_ATTACHED` filter
+  and an XML resource, and `New-ResourceTable` emits only the launcher icon.
+  Decide at the manifest freeze whether to declare it.
 
 Design constraints: one event queue, blocking in `ALooper_pollOnce(-1)`, with
 lifecycle, input, timers and completions as file descriptors on the looper; no
