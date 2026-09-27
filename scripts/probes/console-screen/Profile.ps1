@@ -31,6 +31,7 @@ Register-WindowDrawHandler {
     }
     $m = $global:ConsoleProbeModel
     if ($m.GetCols() -ne $cols -or $m.GetRows() -ne $rows) { $m.Resize($cols, $rows) }   # reflow
+    $m.SetEditorColors((Get-ConsoleHighlight $m.GetEditorText()))   # the prompt line, highlighted by SMA's tokens
     $frame = New-ConsoleFrame $m
     [void]$m.Compose($frame)
     $cw = [float]$cell.Width; $ch = [float]$cell.Height
@@ -92,7 +93,7 @@ function global:Get-ConsoleCell([float] $X, [float] $Y) {
 function global:Invoke-ConsoleCommand {
     $m = $global:ConsoleProbeModel
     $cmd = $m.Submit()
-    $m.Write('Output', "PS> $cmd`n")
+    $m.Write('Output', "PS> $(Format-ConsoleHighlight $cmd)`n")
     if ($cmd.Trim().Length -gt 0) {
         try {
             foreach ($o in @(& ([scriptblock]::Create($cmd)) 2>&1)) {
@@ -139,6 +140,7 @@ Register-InputHandler -Handle {
         if ($Event.Action -ne 0) { return $true }                          # consume the up of keys we handle
         switch ($Event.KeyCode) {
             { $_ -in 66, 160 } { Invoke-ConsoleCommand }                   # ENTER, NUMPAD_ENTER
+            61 { [void](Invoke-ConsoleCompletion $m -Reverse:(($Event.MetaState -band 1) -ne 0)) }   # TAB; META_SHIFT_ON 1 steps back
             67 { $m.EditorBackspace() }                                      # DEL
             112 { $m.EditorDelete() }                                        # FORWARD_DEL
             21 { $m.EditorMove(-1) }                                         # DPAD_LEFT

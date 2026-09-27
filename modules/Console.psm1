@@ -396,6 +396,7 @@ class ConsoleModel {
     hidden [System.Collections.Generic.List[int]] $Editor = [System.Collections.Generic.List[int]]::new()
     hidden [int] $Caret = 0
     hidden [string] $Composition = ''
+    hidden [int[]] $EditorColors = $null   # palette index per editor scalar, -1 for the default
     hidden [System.Collections.Generic.List[string]] $History = [System.Collections.Generic.List[string]]::new()
     hidden [int] $HistoryIndex = -1
     hidden [string] $Saved = ''
@@ -597,10 +598,10 @@ class ConsoleModel {
         $el = [System.Collections.Generic.List[ConsoleCell]]::new()
         $d = [ConsoleModel]::Default
         $this.AddCells($el, [ConsoleModel]::Scalars($this.Prompt + ' '), $d)
-        $this.AddCells($el, $this.Editor.GetRange(0, $this.Caret).ToArray(), $d)
+        $this.AddEditorCells($el, 0, $this.Caret)
         $caretCell = $el.Count
         if ($this.Composition.Length -gt 0) { $this.AddCells($el, [ConsoleModel]::Scalars($this.Composition), [ConsoleStyle]::new(0, 0, 0, 0, 8)) }
-        $this.AddCells($el, $this.Editor.GetRange($this.Caret, $this.Editor.Count - $this.Caret).ToArray(), $d)
+        $this.AddEditorCells($el, $this.Caret, $this.Editor.Count)
         $editorStart = $all.Count
         $editorRows = $this.Wrap($el, $nc); $all.AddRange($editorRows)
         foreach ($er2 in $editorRows) { $meta.Add(@(2, -1, -1, 0)) }
@@ -683,6 +684,23 @@ class ConsoleModel {
             }
         }
         return [string]::Join("`n", $out)
+    }
+
+    # Editor scalars [$from, $to) with their highlight colors.
+    hidden [void] AddEditorCells([System.Collections.Generic.List[ConsoleCell]] $line, [int] $from, [int] $to) {
+        for ($i = $from; $i -lt $to; $i++) {
+            $st = [ConsoleModel]::Default
+            if ($null -ne $this.EditorColors -and $i -lt $this.EditorColors.Length -and $this.EditorColors[$i] -ge 0) { $st = [ConsoleStyle]::new($this.EditorColors[$i], 1, 0, 0, 0) }
+            $this.AddCells($line, [int[]]@($this.Editor[$i]), $st)
+        }
+    }
+    [void] SetEditorColors([int[]] $colors) { $this.EditorColors = $colors }
+    [string] GetEditorText() { return [ConsoleModel]::Text($this.Editor) }
+    [int] GetCaret() { return $this.Caret }
+    # Replaces the editor text and puts the caret at scalar index $caret.
+    [void] SetEditorText([string] $text, [int] $caret) {
+        $this.Editor.Clear(); $this.Editor.AddRange([ConsoleModel]::Scalars($text))
+        $this.Caret = [Math]::Max(0, [Math]::Min($caret, $this.Editor.Count)); $this.ScrollOffset = 0
     }
 
     [int] GetCols() { return $this.Cols }
@@ -818,6 +836,91 @@ class ConsoleFrameRing {
     }
 }
 
+# --- Editing: highlighting and completion (SMA's parser and completion engine) ---
+
+# PSReadLine's default token colors, as palette indexes (System.ConsoleColor
+# Yellow 11, DarkGray 8, DarkCyan 6, Green 10, White 15, DarkGreen 2, Gray 7).
+$script:HighlightPalette = @{ Command = 11; Parameter = 8; String = 6; Variable = 10; Operator = 8; Number = 15; Keyword = 10; Comment = 2; Type = 7; Member = 15 }
+
+function Get-ConsoleTokenClass([System.Management.Automation.Language.Token] $Token) {
+    $k = [System.Management.Automation.Language.TokenKind]; $f = [System.Management.Automation.Language.TokenFlags]
+    if ($Token.TokenFlags -band $f::CommandName) { return 'Command' }
+    switch ($Token.Kind) {
+        { $_ -in $k::Variable, $k::SplattedVariable } { return 'Variable' }
+        { $_ -in $k::StringLiteral, $k::StringExpandable, $k::HereStringLiteral, $k::HereStringExpandable } { return 'String' }
+        $k::Number { return 'Number' }
+        $k::Parameter { return 'Parameter' }
+        $k::Comment { return 'Comment' }
+    }
+    if ($Token.TokenFlags -band $f::Keyword) { return 'Keyword' }
+    if ($Token.TokenFlags -band $f::TypeName) { return 'Type' }
+    if ($Token.TokenFlags -band $f::MemberName) { return 'Member' }
+    if ($Token.TokenFlags -band ($f::BinaryOperator -bor $f::UnaryOperator -bor $f::AssignmentOperator)) { return 'Operator' }
+    return $null
+}
+
+function Get-ConsoleHighlight {
+    <# A palette index per Unicode scalar of $Text (-1 for the default color), from SMA's tokens. #>
+    param([AllowEmptyString()][string] $Text)
+    $tokens = $null; $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
+    $byChar = [int[]]::new($Text.Length); [Array]::Fill($byChar, -1)
+    foreach ($t in $tokens) {
+        $class = Get-ConsoleTokenClass $t
+        if ($null -eq $class) { continue }
+        $c = $script:HighlightPalette[$class]
+        for ($i = $t.Extent.StartOffset; $i -lt [Math]::Min($t.Extent.EndOffset, $Text.Length); $i++) { $byChar[$i] = $c }
+    }
+    # UTF-16 offsets to scalar indexes: a surrogate pair is one scalar.
+    $out = [System.Collections.Generic.List[int]]::new()
+    for ($i = 0; $i -lt $Text.Length; $i++) { $out.Add($byChar[$i]); if ([char]::IsHighSurrogate($Text[$i])) { $i++ } }
+    , $out.ToArray()
+}
+
+function Format-ConsoleHighlight {
+    <# $Text with SGR foreground colors for its tokens, for writing into the transcript. #>
+    param([AllowEmptyString()][string] $Text)
+    $colors = Get-ConsoleHighlight $Text
+    $sb = [System.Text.StringBuilder]::new(); $current = -1; $i = 0
+    foreach ($rune in $Text.EnumerateRunes()) {
+        $c = $colors[$i++]
+        if ($c -ne $current) { if ($c -lt 0) { [void]$sb.Append("`e[39m") } else { [void]$sb.Append("`e[38;5;${c}m") }; $current = $c }
+        [void]$sb.Append($rune.ToString())
+    }
+    if ($current -ge 0) { [void]$sb.Append("`e[39m") }
+    $sb.ToString()
+}
+
+$script:Completion = $null
+function Invoke-ConsoleCompletion {
+    <#
+        Tab completion on the model's editor through CommandCompletion.CompleteInput.
+        Repeated calls with no edit in between cycle through the matches
+        (-Reverse steps back). Returns the number of matches.
+    #>
+    param([Parameter(Mandatory)][object] $Model, [switch] $Reverse)
+    $text = $Model.GetEditorText()
+    $state = $script:Completion
+    if ($null -eq $state -or $state.Applied -cne $text) {
+        # Caret: scalar index to UTF-16 offset.
+        $caretScalar = $Model.GetCaret(); $utf16 = 0; $k = 0
+        foreach ($rune in $text.EnumerateRunes()) { if ($k -ge $caretScalar) { break }; $utf16 += $rune.Utf16SequenceLength; $k++ }
+        $result = [System.Management.Automation.CommandCompletion]::CompleteInput($text, $utf16, $null)
+        if ($null -eq $result -or $result.CompletionMatches.Count -eq 0) { $script:Completion = $null; return 0 }
+        $state = @{ Base = $text; Start = $result.ReplacementIndex; Length = $result.ReplacementLength; Matches = $result.CompletionMatches; Index = -1; Applied = $null }
+    }
+    $count = $state.Matches.Count
+    $state.Index = if ($Reverse) { ($state.Index - 1 + $count) % $count } else { ($state.Index + 1) % $count }
+    $insert = $state.Matches[$state.Index].CompletionText
+    $new = $state.Base.Substring(0, $state.Start) + $insert + $state.Base.Substring($state.Start + $state.Length)
+    $caretUtf16 = $state.Start + $insert.Length
+    $caret = 0; $pos = 0
+    foreach ($rune in $new.EnumerateRunes()) { if ($pos -ge $caretUtf16) { break }; $pos += $rune.Utf16SequenceLength; $caret++ }
+    $Model.SetEditorText($new, $caret)
+    $state.Applied = $new; $script:Completion = $state
+    $count
+}
+
 # --- Exported functions ------------------------------------------------------------
 
 function New-ConsoleModel { param([Parameter(Mandatory)][int] $Columns, [Parameter(Mandatory)][int] $Rows) [ConsoleModel]::new($Columns, $Rows) }
@@ -832,4 +935,4 @@ function Get-ConsoleCellWidth { param([Parameter(Mandatory)][int] $Scalar) [Cons
 function Resolve-ConsoleColor { param([int] $Value, [int] $Mode, [switch] $Foreground) [ConsoleCells]::Resolve($Value, $Mode, $Foreground.IsPresent) }
 
 Export-ModuleMember -Function New-ConsoleModel, New-ConsoleFrame, Compare-ConsoleFrame, New-ConsoleFrameRing,
-    Get-ConsoleFrameRingSize, Get-ConsoleCellWidth, Resolve-ConsoleColor
+    Get-ConsoleFrameRingSize, Get-ConsoleCellWidth, Resolve-ConsoleColor, Get-ConsoleHighlight, Format-ConsoleHighlight, Invoke-ConsoleCompletion
