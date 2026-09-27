@@ -818,14 +818,14 @@ function Register-InputHandler {
                     else { @{ Type = 'key'; Action = $in.KeyAction.Invoke($ev); KeyCode = $in.KeyCode.Invoke($ev) } }
                     $handled = [bool](& $script:HandleInput $info)
                 }
-                catch { try { Write-AndroidLog ('AndroidCanvas input: ' + $_.Exception.Message) 6 } catch { } }
+                catch { try { Write-AndroidLog ('AndroidCanvas input: ' + $_.Exception.Message + ' | at ' + (@(([string]$_.ScriptStackTrace) -split [char]10)[0..2] -join ' < ')) 6 } catch { } }
                 $in.Finish.Invoke($q, $ev, [int]$handled)
                 $drained = $true
             }
             # One call after the queue is empty: a burst of events coalesces into one redraw.
             if ($drained -and $null -ne $script:AfterInput) { & $script:AfterInput }
         }
-        catch { try { Write-AndroidLog ('AndroidCanvas input queue: ' + $_.Exception.Message) 6 } catch { } }
+        catch { try { Write-AndroidLog ('AndroidCanvas input queue: ' + $_.Exception.Message + ' | at ' + (@(([string]$_.ScriptStackTrace) -split [char]10)[0..2] -join ' < ')) 6 } catch { } }
         return 1   # keep receiving
     }
     $onCreated = { param([IntPtr] $Activity, [IntPtr] $Queue)

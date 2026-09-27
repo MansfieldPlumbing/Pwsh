@@ -63,16 +63,17 @@ Register-WindowDrawHandler {
 #   two fingers      -> pinch: text size and reflow
 # Touches that start inside Android's edge-gesture zones are left to Android.
 $global:G = @{ Mode = 'none' }
-# The wall: a gesture-threshold haptic (API 34; REJECT before it) and a thud,
-# synthesized once: 90 ms, a sine gliding 95 Hz to 45 Hz under a 22 ms decay,
-# with a 3 ms transient at the start.
+# The wall: a gesture-threshold haptic (API 34; REJECT before it) and a thud
+# pitched for a phone speaker, which reproduces little below about 200 Hz:
+# 140 ms, a tone falling 260 Hz to 110 Hz with its second harmonic, soft
+# clipped for body, a 2 ms attack and a 45 ms decay. The haptic carries the low end.
 $rate = Open-AudioOutput
-$n = [int]($rate * 0.09); $global:ConsoleThud = [float[]]::new($n); $phase = 0.0; $rng = [Random]::new(7)
+$n = [int]($rate * 0.14); $global:ConsoleThud = [float[]]::new($n); $phase = 0.0
 for ($i = 0; $i -lt $n; $i++) {
-    $sec = $i / $rate; $f = 45 + 50 * [Math]::Exp(-$sec / 0.03); $phase += 2 * [Math]::PI * $f / $rate
-    $v = [Math]::Sin($phase) * [Math]::Exp(-$sec / 0.022)
-    if ($sec -lt 0.003) { $v += ($rng.NextDouble() * 2 - 1) * 0.35 * (1 - $sec / 0.003) }
-    $global:ConsoleThud[$i] = [float](0.8 * $v)
+    $sec = $i / $rate; $f = 110 + 150 * [Math]::Exp(-$sec / 0.04); $phase += 2 * [Math]::PI * $f / $rate
+    $env = [Math]::Min(1.0, $sec / 0.002) * [Math]::Exp(-$sec / 0.045)
+    $v = [Math]::Tanh(1.8 * ([Math]::Sin($phase) + 0.4 * [Math]::Sin(2 * $phase))) * $env
+    $global:ConsoleThud[$i] = [float](0.85 * $v)
 }
 function global:Invoke-ConsoleWall {
     try { Invoke-HapticFeedback -Constant 'GESTURE_THRESHOLD_ACTIVATE' } catch { Invoke-HapticFeedback -Constant 'REJECT' }
@@ -95,7 +96,8 @@ Register-LooperTimer -OnElapsed {
 }
 Register-InputHandler -Handle {
     param($Event)
-    if ($Event.Type -ne 'motion' -or $null -eq $global:ConsoleProbeLayout) { return $true }
+    if ($Event.Type -ne 'motion') { return $false }   # keys (volume, back) stay with Android
+    if ($null -eq $global:ConsoleProbeLayout) { return $true }
     $g = $global:G; $l = $global:ConsoleProbeLayout; $m = $global:ConsoleProbeModel
     if ($Event.Pointers -ge 2) {
         if ($g.Mode -ne 'pinch') { Stop-LooperTimer; $g.Mode = 'pinch'; $global:ConsolePinch = $null }
@@ -108,9 +110,9 @@ Register-InputHandler -Handle {
             # Squared ratio: one confident pinch spans normal text to a single cell.
             $want = $global:ConsolePinch.Size * [Math]::Pow($d / $global:ConsolePinch.Distance, 2)
             $size = [float][Math]::Min($max, [Math]::Max(6, $want))
-            $atWall = $want -ge $max -or $want -le 6
-            if ($atWall -and -not $global:ConsoleAtWall) { Invoke-ConsoleWall }   # one bump per arrival at a limit
-            $global:ConsoleAtWall = $atWall
+            # One bump per arrival; the wall re-arms only after pulling back 10% from the limit.
+            if (-not $global:ConsoleAtWall -and ($want -ge $max -or $want -le 6)) { Invoke-ConsoleWall; $global:ConsoleAtWall = $true }
+            elseif ($global:ConsoleAtWall -and $want -lt 0.9 * $max -and $want -gt 6.6) { $global:ConsoleAtWall = $false }
             if ([Math]::Abs($size - $global:ConsoleTextSize) -ge 1) { $global:ConsoleTextSize = $size; $global:ConsoleDirty = $true }
         }
         return $true
