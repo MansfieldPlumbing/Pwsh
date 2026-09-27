@@ -204,6 +204,10 @@ The win came from specialization to known shapes and layout.
   and an XML resource, and `New-ResourceTable` emits only the launcher icon.
   Decide at the manifest freeze whether to declare it.
 
+- [ ] The emitted host (`docs/host.md`): first frame from emitted IL before
+  any SMA work, runspaces created behind it, a dispatcher that picks the
+  runspace per event, and recovery as a state of the same terminal.
+
 Design constraints: one event queue, blocking in `ALooper_pollOnce(-1)`, with
 lifecycle, input, timers and completions as file descriptors on the looper; no
 tick or polling loops.
