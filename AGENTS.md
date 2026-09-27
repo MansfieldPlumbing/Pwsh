@@ -305,6 +305,23 @@ only when that group's evidence exists. Name the source for every new fact.
   The build emits the same manifest bytes as before. Gates 2a-2d pass on the
   x86_64 emulator, the S23 and the onn 4K Plus with no crash for the process;
   the arm64 APK is 16,547,569 bytes. CellCanvas does not run until gate 2e.
+- Pixels from PowerShell, 2026-09-26: with no rebuild, `scripts/ScreenProbe.ps1`
+  placed as `Profile.ps1` in a `-Debuggable` build declares the
+  `libandroid` window calls and a callback delegate type with
+  `Reflection.Emit` at run time, writes the delegate's function pointer into
+  `onNativeWindowCreated` and `onNativeWindowRedrawNeeded` (slots 7 and 9 of
+  `ANativeActivityCallbacks`, `native_activity.h`; the table is zeroed by
+  `NativeCode`'s constructor, frameworks/base `299fe6f5`
+  `android_app_NativeActivity.cpp:121`), selects `WINDOW_FORMAT_RGBA_8888`
+  (1, frameworks/native `bfcf7507`), and fills four colored quadrants with
+  `ANativeWindow_lock` and `ANativeWindow_unlockAndPost`. `screencap`
+  read red, green, blue and white at the four quadrant centers on the x86_64
+  emulator (1080x2400), the S23 (2340x1080, stride 2368) and the onn 4K Plus
+  (1920x1080; black 2 s after the marker, correct on the next capture); the
+  process was alive 20 seconds later with no crash for it. The callbacks
+  reach script-block delegates on the main thread; the product's
+  `[UnmanagedCallersOnly]` callbacks in the compatibility assembly (Layering)
+  are not proven by this.
 - The current payload contains no cmdlet modules, so commands such as
   `Join-Path` and `Write-Error` are unavailable in this `CreateDefault2`
   runspace. Profile fixtures use the language and .NET only.

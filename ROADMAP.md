@@ -40,6 +40,11 @@ Ship versions are locked: PowerShell 7.7.0-preview.5 and .NET
   `android.googlesource.com` returned 503 for its web view while serving this
   protocol; `log.h` and `native_activity.h` verify byte for byte.
 
+- [x] Pixels on screen from PowerShell on all three backends, no rebuild:
+  `scripts/ScreenProbe.ps1` as `Profile.ps1` hooks the window callbacks and
+  fills the `NativeActivity` window; `screencap` confirmed the colors
+  (`AGENTS.md`, Pixels from PowerShell).
+
 ## Next: unblock the build
 
 - [x] Byte-identical APK proof of the 2026-09-26 refactor (package pins,
@@ -177,7 +182,9 @@ The win came from specialization to known shapes and layout.
   rollback, tamper and fallback cases on Windows in fresh `CreateDefault2`
   runspaces. On the device it needs the crypto library initialized first.
 - [ ] Select a 32-bit window buffer format before drawing; `NativeActivity`
-  defaults the window to RGB_565.
+  defaults the window to RGB_565. `ANativeWindow_setBuffersGeometry` with
+  format 1 gave RGBA_8888 buffers on all three backends (`ScreenProbe.ps1`);
+  the product renderer still has to make that choice.
 - [ ] Service slots: one emitted DEX forwarder per Android base class that
   needs one (accessibility, input method, tile, voice interaction) and a
   dispatcher that answers within Android's deadlines.
