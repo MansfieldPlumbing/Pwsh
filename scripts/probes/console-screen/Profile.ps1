@@ -6,6 +6,9 @@ $ErrorActionPreference = 'Stop'
 Import-Module ([IO.Path]::Combine($PSScriptRoot, 'AndroidCanvas.psm1'))
 Import-Module ([IO.Path]::Combine($PSScriptRoot, 'Console.psm1'))
 Initialize-AndroidCanvas -NativeActivity $NativeActivityHandle
+# Fluent UI System Icons (MIT, microsoft/fluentui-system-icons a563cf91), placed beside this profile.
+$global:IconFont = Get-AndroidTypeface ([IO.Path]::Combine($PSScriptRoot, 'FluentSystemIcons-Regular.ttf'))
+$global:IconGear = [char]::ConvertFromUtf32(0xF6AA)   # ic_fluent_settings_24_regular
 
 function global:ConvertTo-CanvasColor([int] $Rgb) {
     ConvertTo-ArgbColor (($Rgb -shr 16) -band 0xff) (($Rgb -shr 8) -band 0xff) ($Rgb -band 0xff)
@@ -45,6 +48,10 @@ Register-WindowDrawHandler {
             Add-CanvasText $Canvas $op.Text -X $x -Y ([float]($y + 0.8 * $ch)) -Size $textSize -Color (ConvertTo-CanvasColor $op.Fg)
         }
     }
+    # The settings gear, top right of the visible area.
+    $gear = [float]([Math]::Max(1.3 * $ch, 48))
+    $global:ConsoleGear = @{ Left = $inset.Left + $areaW - 1.4 * $gear; Top = $inset.Top; Size = $gear }
+    Add-CanvasText $Canvas $global:IconGear -X ([float]$global:ConsoleGear.Left) -Y ([float]($inset.Top + 1.05 * $gear)) -Size $gear -Color (ConvertTo-CanvasColor 0xcccccc) -Typeface $global:IconFont
     # The progress row: the first row whose first cell has palette background 11.
     $progressRow = -1
     for ($r = 0; $r -lt $m.GetRows(); $r++) { $w2 = $frame[($r * $m.GetCols()) * 3 + 2]; if ((($w2 -shr 24) -band 3) -eq 1 -and ($w2 -band 0xff) -eq 11) { $progressRow = $r; break } }
@@ -136,6 +143,7 @@ Register-InputHandler -Handle {
     $g = $global:G; $l = $global:ConsoleProbeLayout; $m = $global:ConsoleProbeModel
     # --- keys (hardware keyboard, or the soft keyboard's key events) ---
     if ($Event.Type -eq 'key') {
+        if ($global:ConsoleKeyLog) { Write-AndroidLog ("KEY action {0} code {1} unicode {2} meta {3}" -f $Event.Action, $Event.KeyCode, $Event.Unicode, $Event.MetaState) }
         if ($Event.KeyCode -in 3, 4, 24, 25, 26, 164) { return $false }   # home, back, volume, power, mute stay with Android
         if ($Event.Action -ne 0) { return $true }                          # consume the up of keys we handle
         switch ($Event.KeyCode) {

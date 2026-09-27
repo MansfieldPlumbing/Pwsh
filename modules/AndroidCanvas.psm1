@@ -478,7 +478,10 @@ function Initialize-AndroidCanvas {
     $flag = $script:Jni.GetStaticIntField.Invoke($script:JniEnv, $paint, (Get-JavaField $paint 'ANTI_ALIAS_FLAG' 'I' -Static))
     $local = Invoke-JavaCall $script:Jni.NewObjectA $paint (Get-JavaMethod $paint '<init>' '(I)V') @([int]$flag)
     $script:Paint = $script:Jni.NewGlobalRef.Invoke($script:JniEnv, $local); Remove-JavaLocalRef $local
-    [void](Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$mono))
+    $script:Monospace = $script:Jni.NewGlobalRef.Invoke($script:JniEnv, $mono)
+    $script:K.CreateFromFile = Get-JavaMethod $typeface 'createFromFile' '(Ljava/lang/String;)Landroid/graphics/Typeface;' -Static
+    $script:K.TypefaceClass = $typeface
+    [void](Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$script:Monospace))
 }
 
 function Get-CanvasSize {
@@ -515,13 +518,30 @@ function Add-CanvasRect {
 }
 
 function Add-CanvasText {
+    <# Draws $Text at a baseline point; -Typeface (from Get-AndroidTypeface) selects a font for this call, the monospace font otherwise. #>
     param([Parameter(Mandatory)][IntPtr] $Canvas, [Parameter(Mandatory)][string] $Text, [float] $X, [float] $Y,
-          [float] $Size = 32, [Parameter(Mandatory)][int] $Color)
+          [float] $Size = 32, [Parameter(Mandatory)][int] $Color, [IntPtr] $Typeface = [IntPtr]::Zero)
     Invoke-JavaCall $script:Jni.CallVoidMethodA $script:Paint $script:K.SetColor @($Color)
     Invoke-JavaCall $script:Jni.CallVoidMethodA $script:Paint $script:K.SetTextSize @($Size)
+    if ($Typeface -ne [IntPtr]::Zero) { [void](Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$Typeface)) }
     $s = New-JavaString $Text
     try { Invoke-JavaCall $script:Jni.CallVoidMethodA $Canvas $script:K.DrawText @([IntPtr]$s, $X, $Y, [IntPtr]$script:Paint) }
-    finally { Remove-JavaLocalRef $s }
+    finally {
+        Remove-JavaLocalRef $s
+        if ($Typeface -ne [IntPtr]::Zero) { [void](Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$script:Monospace)) }
+    }
+}
+
+function Get-AndroidTypeface {
+    <# Loads a font file (TTF or OTF) as an Android Typeface (Typeface.createFromFile) and returns a global reference for -Typeface. #>
+    param([Parameter(Mandatory)][string] $Path)
+    $name = New-JavaString $Path
+    try {
+        $local = Invoke-JavaCall $script:Jni.CallStaticObjectMethodA $script:K.TypefaceClass $script:K.CreateFromFile @([IntPtr]$name)
+        $ref = $script:Jni.NewGlobalRef.Invoke($script:JniEnv, $local); Remove-JavaLocalRef $local
+        [IntPtr]$ref
+    }
+    finally { Remove-JavaLocalRef $name }
 }
 
 function Invoke-CanvasFrame {
@@ -548,6 +568,7 @@ $script:ClipIds = $null
 $script:HapticIds = @{}
 $script:Audio = $null
 $script:KeyIds = $null
+$script:Monospace = [IntPtr]::Zero
 $script:Timer = $null
 $script:Draw = $null
 $script:Window = [IntPtr]::Zero
@@ -883,6 +904,6 @@ function Register-InputHandler {
 Export-ModuleMember -Function New-NativeFunction, Get-NativeExport, Write-AndroidLog, ConvertTo-ArgbColor,
     Get-SystemBarInsets, Register-InputHandler, Request-WindowDraw, Set-AndroidClipboard, Get-AndroidClipboard,
     Invoke-HapticFeedback, Register-LooperTimer, Start-LooperTimer, Stop-LooperTimer, Open-AudioOutput, Write-AudioOutput,
-    Show-SoftKeyboard, Hide-SoftKeyboard, Get-KeyUnicode,
+    Show-SoftKeyboard, Hide-SoftKeyboard, Get-KeyUnicode, Get-AndroidTypeface,
     Initialize-AndroidCanvas, Get-CanvasSize, Get-TextCell, Clear-Canvas, Add-CanvasRect, Add-CanvasText,
     Invoke-CanvasFrame, Register-WindowDrawHandler

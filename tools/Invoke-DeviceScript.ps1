@@ -95,7 +95,10 @@ $run = {
     foreach ($name in $existing) { Adb shell run-as $Package rm -f "files/$name" | Out-Null }
     if ($Clear) { $result.Result = "cleared $($existing.Count) script(s)"; return [pscustomobject]$result }
     foreach ($entry in $Files.GetEnumerator()) {
-        [IO.File]::ReadAllText($entry.Value) | & $Adb -s $s exec-in run-as $Package sh -c "cat > files/$($entry.Key)"
+        # Byte-exact: the file is the process's standard input, never re-encoded as text.
+        $target = "files/$($entry.Key)"
+        if ($IsWindows) { cmd /c "`"$Adb`" -s $s exec-in run-as $Package sh -c `"cat > $target`" < `"$($entry.Value)`"" }
+        else { sh -c "'$Adb' -s '$s' exec-in run-as '$Package' sh -c 'cat > $target' < '$($entry.Value)'" }
     }
 
     $component = "$(Adb shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER $Package | Select-Object -Last 1)".Trim()
