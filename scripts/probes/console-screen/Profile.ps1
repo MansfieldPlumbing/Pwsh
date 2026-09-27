@@ -63,6 +63,22 @@ Register-WindowDrawHandler {
 #   two fingers      -> pinch: text size and reflow
 # Touches that start inside Android's edge-gesture zones are left to Android.
 $global:G = @{ Mode = 'none' }
+# The wall: a gesture-threshold haptic (API 34; REJECT before it) and a thud,
+# synthesized once: 90 ms, a sine gliding 95 Hz to 45 Hz under a 22 ms decay,
+# with a 3 ms transient at the start.
+$rate = Open-AudioOutput
+$n = [int]($rate * 0.09); $global:ConsoleThud = [float[]]::new($n); $phase = 0.0; $rng = [Random]::new(7)
+for ($i = 0; $i -lt $n; $i++) {
+    $sec = $i / $rate; $f = 45 + 50 * [Math]::Exp(-$sec / 0.03); $phase += 2 * [Math]::PI * $f / $rate
+    $v = [Math]::Sin($phase) * [Math]::Exp(-$sec / 0.022)
+    if ($sec -lt 0.003) { $v += ($rng.NextDouble() * 2 - 1) * 0.35 * (1 - $sec / 0.003) }
+    $global:ConsoleThud[$i] = [float](0.8 * $v)
+}
+function global:Invoke-ConsoleWall {
+    try { Invoke-HapticFeedback -Constant 'GESTURE_THRESHOLD_ACTIVATE' } catch { Invoke-HapticFeedback -Constant 'REJECT' }
+    [void](Write-AudioOutput -Samples $global:ConsoleThud)
+}
+Write-AndroidLog ("CONSOLE audio {0} Hz, thud {1} frames" -f $rate, $n)
 $global:ConsoleDirty = $false; $global:ConsoleAtWall = $false
 function global:Get-ConsoleCell([float] $X, [float] $Y) {
     $l = $global:ConsoleProbeLayout
@@ -93,7 +109,7 @@ Register-InputHandler -Handle {
             $want = $global:ConsolePinch.Size * [Math]::Pow($d / $global:ConsolePinch.Distance, 2)
             $size = [float][Math]::Min($max, [Math]::Max(6, $want))
             $atWall = $want -ge $max -or $want -le 6
-            if ($atWall -and -not $global:ConsoleAtWall) { Invoke-HapticFeedback -Constant 'REJECT' }   # one bump per arrival at a limit
+            if ($atWall -and -not $global:ConsoleAtWall) { Invoke-ConsoleWall }   # one bump per arrival at a limit
             $global:ConsoleAtWall = $atWall
             if ([Math]::Abs($size - $global:ConsoleTextSize) -ge 1) { $global:ConsoleTextSize = $size; $global:ConsoleDirty = $true }
         }

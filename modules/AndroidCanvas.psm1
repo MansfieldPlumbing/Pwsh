@@ -538,6 +538,7 @@ $script:InputCallbacks = @()
 $script:AfterInput = $null
 $script:ClipIds = $null
 $script:HapticIds = @{}
+$script:Audio = $null
 $script:Timer = $null
 $script:Draw = $null
 $script:Window = [IntPtr]::Zero
@@ -729,7 +730,59 @@ function Set-TimerSpec([long] $Milliseconds) {
 function Start-LooperTimer { param([Parameter(Mandatory)][int] $Milliseconds) Set-TimerSpec $Milliseconds }
 function Stop-LooperTimer { if ($null -ne $script:Timer) { Set-TimerSpec 0 } }
 
-# --- 8. Input ---------------------------------------------------------------------------
+# --- 8. Audio output ---------------------------------------------------------------------
+
+function Open-AudioOutput {
+    <#
+        Opens and starts one mono float AAudio output stream for short sounds
+        (aaudio/AAudio.h, frameworks/av 402dbe88: AAUDIO_FORMAT_PCM_FLOAT 2,
+        AAUDIO_PERFORMANCE_MODE_NONE 10, AAUDIO_USAGE_ASSISTANCE_SONIFICATION 13).
+        The buffer capacity holds a whole sound, so Write-AudioOutput never
+        waits and never stalls the main thread. Output needs no permission.
+        Returns the stream's sample rate.
+    #>
+    param([int] $CapacityFrames = 16384)
+    $aa = @{}
+    foreach ($e in @(
+        @('CreateBuilder', 'AAudio_createStreamBuilder', [int], @($I)),
+        @('SetFormat', 'AAudioStreamBuilder_setFormat', [void], @($I, [int])),
+        @('SetChannels', 'AAudioStreamBuilder_setChannelCount', [void], @($I, [int])),
+        @('SetPerformance', 'AAudioStreamBuilder_setPerformanceMode', [void], @($I, [int])),
+        @('SetUsage', 'AAudioStreamBuilder_setUsage', [void], @($I, [int])),
+        @('SetCapacity', 'AAudioStreamBuilder_setBufferCapacityInFrames', [void], @($I, [int])),
+        @('Open', 'AAudioStreamBuilder_openStream', [int], @($I, $I)),
+        @('DeleteBuilder', 'AAudioStreamBuilder_delete', [int], @($I)),
+        @('Start', 'AAudioStream_requestStart', [int], @($I)),
+        @('Write', 'AAudioStream_write', [int], @($I, $I, [int], [long])),
+        @('Rate', 'AAudioStream_getSampleRate', [int], @($I)))) {
+        $aa[$e[0]] = Get-NativeExport 'libaaudio.so' $e[1] $e[2] ([type[]]$e[3])
+    }
+    $out = $Interop::AllocHGlobal([IntPtr]::Size)
+    try {
+        if ($aa.CreateBuilder.Invoke($out) -ne 0) { throw 'AAudio_createStreamBuilder failed.' }
+        $b = $Interop::ReadIntPtr($out, 0)
+        $aa.SetFormat.Invoke($b, 2); $aa.SetChannels.Invoke($b, 1); $aa.SetPerformance.Invoke($b, 10)
+        $aa.SetUsage.Invoke($b, 13); $aa.SetCapacity.Invoke($b, $CapacityFrames)
+        $rc = $aa.Open.Invoke($b, $out); [void]$aa.DeleteBuilder.Invoke($b)
+        if ($rc -ne 0) { throw "AAudioStreamBuilder_openStream rc=$rc" }
+        $stream = $Interop::ReadIntPtr($out, 0)
+        if ($aa.Start.Invoke($stream) -ne 0) { throw 'AAudioStream_requestStart failed.' }
+    }
+    finally { $Interop::FreeHGlobal($out) }
+    $script:Audio = @{ Fn = $aa; Stream = $stream; Rate = $aa.Rate.Invoke($stream) }
+    $script:Audio.Rate
+}
+
+function Write-AudioOutput {
+    <# Queues mono float samples without waiting; frames beyond the free buffer space are dropped. Returns the frames queued. #>
+    param([Parameter(Mandatory)][float[]] $Samples)
+    if ($null -eq $script:Audio) { return 0 }
+    $handle = [Runtime.InteropServices.GCHandle]::Alloc($Samples, [Runtime.InteropServices.GCHandleType]::Pinned)
+    try { $script:Audio.Fn.Write.Invoke($script:Audio.Stream, $handle.AddrOfPinnedObject(), $Samples.Length, [long]0) }
+    finally { $handle.Free() }
+}
+
+# --- 9. Input ---------------------------------------------------------------------------
 
 function Register-InputHandler {
     <#
@@ -792,6 +845,6 @@ function Register-InputHandler {
 
 Export-ModuleMember -Function New-NativeFunction, Get-NativeExport, Write-AndroidLog, ConvertTo-ArgbColor,
     Get-SystemBarInsets, Register-InputHandler, Request-WindowDraw, Set-AndroidClipboard, Get-AndroidClipboard,
-    Invoke-HapticFeedback, Register-LooperTimer, Start-LooperTimer, Stop-LooperTimer,
+    Invoke-HapticFeedback, Register-LooperTimer, Start-LooperTimer, Stop-LooperTimer, Open-AudioOutput, Write-AudioOutput,
     Initialize-AndroidCanvas, Get-CanvasSize, Get-TextCell, Clear-Canvas, Add-CanvasRect, Add-CanvasText,
     Invoke-CanvasFrame, Register-WindowDrawHandler
