@@ -209,6 +209,7 @@ The win came from specialization to known shapes and layout.
   and an XML resource, and `New-ResourceTable` emits only the launcher icon.
   Decide at the manifest freeze whether to declare it.
 
+- [x] Console core in PowerShell: `modules/Console.psm1`, ported from the TypeScript reference built to `docs/console-reference.md` (e5426ff), passes all 63 conformance vectors and the ring checks on Windows (`tools/Test-ConsoleVectors.ps1`); width tables regenerated from the pinned Unicode 16.0.0 files match the reference's 122 wide and 368 zero-width ranges. Not yet run on a device.
 - [ ] The shell surface (`docs/shell.md`): the looper-woken event bus, a three-slot frame ring consumed by the local display, a contract stream, RDP and video, a display list with cells as its first client, and small app modules.
 - [ ] The emitted host (`docs/host.md`): first frame from emitted IL before
   any SMA work, runspaces created behind it, a dispatcher that picks the
