@@ -70,11 +70,11 @@ if ($PSCmdlet.ParameterSetName -eq 'Run') {
 
 $targets = foreach ($line in (& $Adb devices | Select-Object -Skip 1 | Where-Object { $_ -match "`tdevice$" })) {
     $serial = ($line -split "`t")[0]
-    $model = (& $Adb -s $serial shell getprop ro.product.model).Trim()
-    $emulator = (& $Adb -s $serial shell getprop ro.kernel.qemu).Trim() -eq '1'
+    $model = "$(& $Adb -s $serial shell getprop ro.product.model)".Trim()
+    $emulator = "$(& $Adb -s $serial shell getprop ro.kernel.qemu)".Trim() -eq '1'
     $name = if ($emulator) { 'emulator' } else { $model }
     if ($Device -contains 'all' -or $Device -contains $name -or $Device -contains $model) {
-        [pscustomobject]@{ Serial = $serial; Name = $name; Abi = (& $Adb -s $serial shell getprop ro.product.cpu.abi).Trim() }
+        [pscustomobject]@{ Serial = $serial; Name = $name; Abi = "$(& $Adb -s $serial shell getprop ro.product.cpu.abi)".Trim() }
     }
 }
 if (-not $targets) { throw "No attached device matches: $($Device -join ', ')." }
@@ -98,18 +98,18 @@ $run = {
         [IO.File]::ReadAllText($entry.Value) | & $Adb -s $s exec-in run-as $Package sh -c "cat > files/$($entry.Key)"
     }
 
-    $component = (Adb shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER $Package | Select-Object -Last 1).Trim()
-    if ($component -notmatch '/') { $component = (Adb shell cmd package resolve-activity --brief -c android.intent.category.LEANBACK_LAUNCHER $Package | Select-Object -Last 1).Trim() }
+    $component = "$(Adb shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER $Package | Select-Object -Last 1)".Trim()
+    if ($component -notmatch '/') { $component = "$(Adb shell cmd package resolve-activity --brief -c android.intent.category.LEANBACK_LAUNCHER $Package | Select-Object -Last 1)".Trim() }
     if ($component -notmatch '/') { $result.Result = 'no launcher activity resolved'; return [pscustomobject]$result }
 
     Adb logcat -c
-    $started = (Adb shell date +%s).Trim()
+    $started = "$(Adb shell date +%s)".Trim()
     Adb shell input keyevent KEYCODE_WAKEUP | Out-Null
     $launch = @(Adb shell am start -W -n $component)
     $total = @($launch | Where-Object { $_ -match '^TotalTime:\s*\d+' } | Select-Object -First 1)
     $result.LaunchMs = if ($total) { [int]($total[0] -replace '\D', '') } else { $null }
     $result.LaunchState = (@($launch | Where-Object { $_ -match '^(Status|LaunchState):' }) -join ' ').Trim()
-    $procId = (Adb shell pidof $Package).Trim()
+    $procId = "$(Adb shell pidof $Package)".Trim()
     if (-not $procId) { $result.Result = 'process did not start'; return [pscustomobject]$result }
 
     # Block on the host's marker, bounded so a missing marker cannot hang the run.
@@ -129,7 +129,7 @@ $run = {
     $result.Returned = if ($returned -and $returned[0] -match 'RunPowerShell returned (0x[0-9a-fA-F]+)') { $Matches[1] } else { '' }
     Start-Sleep -Seconds $AliveSeconds
     $lines = @(Adb logcat -d -v time --pid=$procId -s Pwsh:V | Where-Object { $_ -match '\bPwsh\b' })
-    $result.Alive = (Adb shell pidof $Package).Trim() -eq $procId
+    $result.Alive = "$(Adb shell pidof $Package)".Trim() -eq $procId
     $result.CrashLines = @(Adb logcat -d -b crash -v threadtime -T $started 2>$null | Where-Object { $_ -match [regex]::Escape($Package) -or $_ -match "\s$procId\s" }).Count
     # Each line keeps its logcat time of day, so phases can be timed.
     $result.Log = @($lines | ForEach-Object { ($_ -replace '^\S+\s+(\S+)\s+\w/Pwsh\s*\(\s*\d+\):\s*', '$1 ') })
@@ -137,6 +137,14 @@ $run = {
 }
 
 $jobs = foreach ($t in $targets) {
-    Start-ThreadJob -ScriptBlock $run -ArgumentList $t, $Adb, $package, $files, $Apk, $Clear.IsPresent, $SettleSeconds, $AliveSeconds, $TimeoutSeconds, $CapturePath
+    Start-ThreadJob -Name $t.Name -ScriptBlock $run -ArgumentList $t, $Adb, $package, $files, $Apk, $Clear.IsPresent, $SettleSeconds, $AliveSeconds, $TimeoutSeconds, $CapturePath
 }
-$jobs | Receive-Job -Wait -AutoRemoveJob
+foreach ($job in $jobs) {
+    $out = @(Receive-Job $job -Wait -AutoRemoveJob -ErrorAction SilentlyContinue -ErrorVariable failed)
+    foreach ($o in $out) { $o }
+    foreach ($f in $failed) {
+        # A failure inside one device's run is reported, not rethrown, so the
+        # other devices' results still arrive.
+        [pscustomobject]@{ Device = $job.Name; Result = "tool error: $($f.Exception.Message) | $(([string]$f.ScriptStackTrace -split "`n")[0])" }
+    }
+}

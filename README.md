@@ -163,6 +163,7 @@ lib/manifest.json the root provenance manifest; setup.ps1 holds only its digest
 ROADMAP.md        where the project is going, gate by gate
 docs/DEVELOPER.md decisions, proofs, architecture targets, testing
 scripts/          the frozen CellCanvas workload, its reference inventory, device probes
+modules/          AndroidCanvas.psm1: draw with Android Canvas from PowerShell (JNI, NDK)
 tools/            device script runner (run-as, no rebuild); payload closure probe; pre-push scan
 .githooks/        pre-push hook (git config core.hooksPath .githooks)
 ```

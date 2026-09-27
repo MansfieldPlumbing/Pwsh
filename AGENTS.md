@@ -335,7 +335,12 @@ only when that group's evidence exists. Name the source for every new fact.
   `Typeface.MONOSPACE`, `drawText` and `drawRect`, and posted it; `screencap`
   read the eight Campbell ANSI colors exactly across the band and text pixels
   in the text area on every device. Each process was alive afterwards with no
-  crash for it.
+  crash for it. `modules/AndroidCanvas.psm1` packages the same mechanism as
+  one importable file (function pointers as delegates, NDK exports, the JNI
+  table, Canvas, window callbacks); `scripts/probes/module` drew through it
+  with the same color result on all three devices. An exception that escapes a
+  window callback aborts the process (seen once, x86_64 emulator), so every
+  callback catches everything, including failures of its own error logging.
 - QuickPS `src/Native.ps1` at `62747ebf` does not run unchanged in this
   payload: its first `Add-Member` fails, because that cmdlet is in
   `Microsoft.PowerShell.Commands.Utility` (`AddMember.cs`), which is not
