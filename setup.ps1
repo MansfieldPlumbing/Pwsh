@@ -602,7 +602,7 @@ $script:KeepPackageCache = -not $DeletePackages -and $Packages -eq 'Folder'
 # commit-pinned address. Every address, format constant, and ordered assembly
 # name is derived from files that chain back to this digest, so tampering with
 # any of them fails verification before a single byte is parsed.
-$script:RepositoryLibBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/27fbeff8b1add634ec76a62074d5fbd18a9a9591/lib/'
+$script:RepositoryLibBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/fea685e5769999ef969a988bb63686cd1fd73d81/lib/'
 $script:LibRootManifestPath = 'manifest.json'
 $script:LibRootManifestSha256 = 'DFF9A7F419A0CFA56A6CFF632687527879A8B1A7E907E8816D58FFE89A62A945'
 $script:LibSourceManifest = $null
