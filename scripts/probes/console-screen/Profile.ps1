@@ -63,7 +63,7 @@ Register-WindowDrawHandler {
 #   two fingers      -> pinch: text size and reflow
 # Touches that start inside Android's edge-gesture zones are left to Android.
 $global:G = @{ Mode = 'none' }
-$global:ConsoleDirty = $false
+$global:ConsoleDirty = $false; $global:ConsoleAtWall = $false
 function global:Get-ConsoleCell([float] $X, [float] $Y) {
     $l = $global:ConsoleProbeLayout
     @([int][Math]::Floor(($Y - $l.Top) / $l.CellH), [int][Math]::Floor(($X - $l.Left) / $l.CellW))
@@ -89,7 +89,12 @@ Register-InputHandler -Handle {
             # Zoom in until one cell fills the visible area; zoom out to 6 px text.
             $z = $global:ConsoleZoom
             $max = [Math]::Floor([Math]::Min($z.AreaW / $z.WidthPerPx, $z.AreaH / $z.HeightPerPx))
-            $size = [float][Math]::Min($max, [Math]::Max(6, $global:ConsolePinch.Size * $d / $global:ConsolePinch.Distance))
+            # Squared ratio: one confident pinch spans normal text to a single cell.
+            $want = $global:ConsolePinch.Size * [Math]::Pow($d / $global:ConsolePinch.Distance, 2)
+            $size = [float][Math]::Min($max, [Math]::Max(6, $want))
+            $atWall = $want -ge $max -or $want -le 6
+            if ($atWall -and -not $global:ConsoleAtWall) { Invoke-HapticFeedback -Constant 'REJECT' }   # one bump per arrival at a limit
+            $global:ConsoleAtWall = $atWall
             if ([Math]::Abs($size - $global:ConsoleTextSize) -ge 1) { $global:ConsoleTextSize = $size; $global:ConsoleDirty = $true }
         }
         return $true
@@ -151,6 +156,6 @@ Register-InputHandler -Handle {
     }
     $true
 } -AfterInput {
-    if ($global:ConsoleDirty) { $global:ConsoleDirty = $false; Request-WindowDraw }
+    if ($global:ConsoleDirty) { $global:ConsoleDirty = $false; $global:ConsoleAtWall = $false; Request-WindowDraw }
 }
 Write-AndroidLog 'CONSOLE handler registered'

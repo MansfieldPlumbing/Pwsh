@@ -537,6 +537,7 @@ $script:HandleInput = $null
 $script:InputCallbacks = @()
 $script:AfterInput = $null
 $script:ClipIds = $null
+$script:HapticIds = @{}
 $script:Timer = $null
 $script:Draw = $null
 $script:Window = [IntPtr]::Zero
@@ -677,11 +678,16 @@ function Get-AndroidClipboard {
 }
 
 function Invoke-HapticFeedback {
-    <# The system long-press haptic on the window's decor view. #>
+    <# A system haptic on the window's decor view: a HapticFeedbackConstants field name, LONG_PRESS by default (REJECT, API 30, for hitting a limit). #>
+    param([string] $Constant = 'LONG_PRESS')
     Initialize-ClipboardIds; $k = $script:ClipIds
+    if (-not $script:HapticIds.ContainsKey($Constant)) {
+        $h = Get-JavaClass 'android/view/HapticFeedbackConstants'
+        $script:HapticIds[$Constant] = $script:Jni.GetStaticIntField.Invoke($script:JniEnv, $h, (Get-JavaField $h $Constant 'I' -Static))
+    }
     $window = Invoke-JavaCall $script:Jni.CallObjectMethodA (Get-ActivityObject) $k.GetWindow
     $decor = Invoke-JavaCall $script:Jni.CallObjectMethodA $window $k.GetDecorView
-    [void](Invoke-JavaCall $script:Jni.CallBooleanMethodA $decor $k.PerformHaptic @([int]$k.LongPress))
+    [void](Invoke-JavaCall $script:Jni.CallBooleanMethodA $decor $k.PerformHaptic @([int]$script:HapticIds[$Constant]))
     Remove-JavaLocalRef $decor; Remove-JavaLocalRef $window
 }
 
