@@ -473,6 +473,8 @@ function Initialize-AndroidCanvas {
         SetTypeface = Get-JavaMethod $paint 'setTypeface' '(Landroid/graphics/Typeface;)Landroid/graphics/Typeface;'
         MeasureText = Get-JavaMethod $paint 'measureText' '(Ljava/lang/String;)F'
         GetFontSpacing = Get-JavaMethod $paint 'getFontSpacing' '()F'
+        DrawRoundRect = Get-JavaMethod $canvas 'drawRoundRect' '(FFFFFFLandroid/graphics/Paint;)V'
+        DrawCircle = Get-JavaMethod $canvas 'drawCircle' '(FFFLandroid/graphics/Paint;)V'
     }
     # One Paint for the module's lifetime: antialiased, monospace.
     $flag = $script:Jni.GetStaticIntField.Invoke($script:JniEnv, $paint, (Get-JavaField $paint 'ANTI_ALIAS_FLAG' 'I' -Static))
@@ -530,6 +532,40 @@ function Add-CanvasText {
         Remove-JavaLocalRef $s
         if ($Typeface -ne [IntPtr]::Zero) { [void](Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$script:Monospace)) }
     }
+}
+
+function Add-CanvasRoundRect {
+    param([Parameter(Mandatory)][IntPtr] $Canvas, [float] $Left, [float] $Top, [float] $Right, [float] $Bottom, [float] $Radius, [Parameter(Mandatory)][int] $Color)
+    Invoke-JavaCall $script:Jni.CallVoidMethodA $script:Paint $script:K.SetColor @($Color)
+    Invoke-JavaCall $script:Jni.CallVoidMethodA $Canvas $script:K.DrawRoundRect @($Left, $Top, $Right, $Bottom, $Radius, $Radius, [IntPtr]$script:Paint)
+}
+
+function Add-CanvasCircle {
+    param([Parameter(Mandatory)][IntPtr] $Canvas, [float] $X, [float] $Y, [float] $Radius, [Parameter(Mandatory)][int] $Color)
+    Invoke-JavaCall $script:Jni.CallVoidMethodA $script:Paint $script:K.SetColor @($Color)
+    Invoke-JavaCall $script:Jni.CallVoidMethodA $Canvas $script:K.DrawCircle @($X, $Y, $Radius, [IntPtr]$script:Paint)
+}
+
+function Measure-CanvasText {
+    <# The advance width of $Text in pixels at $Size, in -Typeface or the monospace font. #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string] $Text, [float] $Size = 32, [IntPtr] $Typeface = [IntPtr]::Zero)
+    Invoke-JavaCall $script:Jni.CallVoidMethodA $script:Paint $script:K.SetTextSize @($Size)
+    if ($Typeface -ne [IntPtr]::Zero) { [void](Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$Typeface)) }
+    $s = New-JavaString $Text
+    try { [float](Invoke-JavaCall $script:Jni.CallFloatMethodA $script:Paint $script:K.MeasureText @([IntPtr]$s)) }
+    finally {
+        Remove-JavaLocalRef $s
+        if ($Typeface -ne [IntPtr]::Zero) { [void](Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$script:Monospace)) }
+    }
+}
+
+function Get-AndroidSystemTypeface {
+    <# A system Typeface by its static field name on android.graphics.Typeface: DEFAULT, DEFAULT_BOLD, SANS_SERIF, SERIF, MONOSPACE. #>
+    param([Parameter(Mandatory)][ValidateSet('DEFAULT', 'DEFAULT_BOLD', 'SANS_SERIF', 'SERIF', 'MONOSPACE')][string] $Name)
+    $c = $script:K.TypefaceClass
+    $local = $script:Jni.GetStaticObjectField.Invoke($script:JniEnv, $c, (Get-JavaField $c $Name 'Landroid/graphics/Typeface;' -Static))
+    $ref = $script:Jni.NewGlobalRef.Invoke($script:JniEnv, $local)
+    [IntPtr]$ref
 }
 
 function Get-AndroidTypeface {
@@ -904,6 +940,7 @@ function Register-InputHandler {
 Export-ModuleMember -Function New-NativeFunction, Get-NativeExport, Write-AndroidLog, ConvertTo-ArgbColor,
     Get-SystemBarInsets, Register-InputHandler, Request-WindowDraw, Set-AndroidClipboard, Get-AndroidClipboard,
     Invoke-HapticFeedback, Register-LooperTimer, Start-LooperTimer, Stop-LooperTimer, Open-AudioOutput, Write-AudioOutput,
-    Show-SoftKeyboard, Hide-SoftKeyboard, Get-KeyUnicode, Get-AndroidTypeface,
+    Show-SoftKeyboard, Hide-SoftKeyboard, Get-KeyUnicode, Get-AndroidTypeface, Get-AndroidSystemTypeface,
+    Add-CanvasRoundRect, Add-CanvasCircle, Measure-CanvasText,
     Initialize-AndroidCanvas, Get-CanvasSize, Get-TextCell, Clear-Canvas, Add-CanvasRect, Add-CanvasText,
     Invoke-CanvasFrame, Register-WindowDrawHandler

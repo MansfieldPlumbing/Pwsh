@@ -39,6 +39,24 @@
       "sha512": "20595AD56150AF1AFE15974D7A3126DA114AECFCFF0EADB40E6BF456B11EC95EE96C4561D900DB812BE07D482FBF594D965B0BF1D0BAB562898E092718507F85"
     },
     {
+      "id": "Microsoft.PowerShell.Commands.Management",
+      "version": "7.7.0-preview.4",
+      "rid": null,
+      "sha512": "E7A4C5E81DA7EA739D69E850CF73131B11B6726535F54F83825BB1EBD19F500D736121F44360684396F8F5C58EEAF24F13019C606C5F16E26A94028DC28D3E23"
+    },
+    {
+      "id": "Microsoft.PowerShell.Commands.Utility",
+      "version": "7.7.0-preview.4",
+      "rid": null,
+      "sha512": "02D599038BCBE983F07F93D11FC1A4C29354FC52AE58A10CEAD5B053B4488D145439AF132176D44A5E7B0D4E695D9434C5BD0556314C121B49485DE3585C080A"
+    },
+    {
+      "id": "Microsoft.PowerShell.Security",
+      "version": "7.7.0-preview.4",
+      "rid": null,
+      "sha512": "6C6FB73EC30C28B6C49E7AB7561A08523B8081921C8B5B278DB97143FC2DE2C0B6DB754F8ADB80EA1F0BF2F0CC789E3383AB675AC8A7EF120AEDBFE841DCC656"
+    },
+    {
       "id": "Microsoft.ApplicationInsights",
       "version": "2.23.0",
       "rid": null,
@@ -96,15 +114,15 @@
   "sources": [
     {
       "path": "minimal-assembly-order.txt",
-      "sha256": "C91B3EE51FD7000EE910AA65F350A889CD47BD3A15CC8693DC8DEF95A8A1C03D",
+      "sha256": "3D689A44E17EE6EF235CBE79A901F43CA3E84FF20C0D73CA112A34E3BC2EFE63",
       "url": null,
-      "role": "Ordered 91-name minimal assembly payload. Architecture-neutral IL, used for every target."
+      "role": "Ordered 102-name minimal assembly payload with the Utility, Management and Security command assemblies. Architecture-neutral IL, used for every target."
     },
     {
       "path": "ic_launcher.png",
-      "sha256": "5AB2CB3CA7AE6BFD5C584BE3B670199D1D3595717764FDD331EE51C302748E1E",
+      "sha256": "10AEE66835F938E8E7548F186B49810F5F4C53D3EAB32AD87EF87C9A8C8722D3",
       "url": null,
-      "role": "Launcher icon, 1024x1024 PNG. Packaged as res/mipmap/ic_launcher.png behind the emitted resources.arsc."
+      "role": "Adaptive launcher foreground, 2048x2048 transparent PNG. Packaged at full source size behind the emitted adaptive-icon resource."
     },
     {
       "path": "android-native-producer.contract.json",

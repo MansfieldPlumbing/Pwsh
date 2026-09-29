@@ -1,9 +1,10 @@
 # Console reference implementation: build contract
 
-This is a build contract for an implementation made outside this repository
-(for example by AI Studio). Build exactly what it specifies. Where it is
-silent, do not invent: leave the feature out and list it under "Not done" in
-the deliverable's `REPORT.md`.
+This is the contract that produced the external TypeScript console reference.
+It is retained as the specification for its conformance vectors and as the
+independent oracle for the PowerShell implementation. A replacement reference
+must meet every requirement below and report anything not implemented or not
+tested.
 
 ## Role
 
@@ -325,6 +326,7 @@ Ring behavior is covered by unit tests, not vectors: two `FrameRing`
 instances over one buffer (writer and reader); a reader holding slot `k`
 while the writer commits twice, showing the writer never writes `k`; and a
 sequence change during a read forcing a retry.
+
 ## Deliverable
 
 ```

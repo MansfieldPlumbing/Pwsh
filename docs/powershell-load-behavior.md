@@ -1,6 +1,8 @@
 # PowerShell load behavior on Unix builds
 
-Evidence for choosing the device payload. Source is PowerShell/PowerShell at
+Evidence for evaluating the preview.5 payload candidate, not a statement of
+the current release payload. The 1.0-preview inputs pin PowerShell
+7.7.0-preview.4. Source for this study is PowerShell/PowerShell at
 tag `v7.7.0-preview.5`, commit `149ab5cd6cad34869177f86ef9a3da8414f85dc6`.
 The payload ships the `runtimes/unix` build of System.Management.Automation,
 so code under `#if !UNIX` is absent from it.

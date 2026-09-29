@@ -1,6 +1,9 @@
-# Console and UI (design, not proven)
+# Console and UI design
 
-Everything here is planned. Nothing in this document has passed a gate.
+The console model, device rendering probe, input consumption and resize reflow
+have passed their recorded gates. The integrated terminal, tab surface and
+general composited UI described here remain planned until `ROADMAP.md` names a
+gate and receipt for them.
 
 ## Shape
 

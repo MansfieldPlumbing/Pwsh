@@ -1,5 +1,9 @@
 # Work order: the console core on Android devices
 
+> Completed 2026-09-27 and retained as the reproducible device-test protocol.
+> The accepted results are recorded in `AGENTS.md` and the checked console item
+> in `ROADMAP.md`; this file is not an open assignment.
+
 For an agent working in this repository. Do exactly these two tasks, in
 order. Do not change any file outside the paths named here. Where this
 document is silent, stop and report instead of guessing.
@@ -30,9 +34,11 @@ document is silent, stop and report instead of guessing.
 
 ## Rules on the device (each has already cost a failed run)
 
-- The payload has no cmdlet modules. These do not exist on the device:
-  `Join-Path`, `Test-Path`, `Add-Member`, `ConvertFrom-Json`, `Write-Host`,
-  `Measure-Object`, `Get-Content`, `Get-ChildItem`. Use .NET instead:
+- The recorded console receipts used the earlier 91-image payload without
+  cmdlet modules. Until the 102-image command payload passes on all three
+  backends, keep probes portable and use .NET instead of assuming commands such
+  as `Join-Path`, `Test-Path`, `Add-Member`, `ConvertFrom-Json`, `Write-Host`,
+  `Measure-Object`, `Get-Content` or `Get-ChildItem`:
   `[IO.Path]::Combine`, `[IO.File]::Exists`, `[IO.File]::ReadAllText`,
   `[IO.Directory]::GetFiles`. `ForEach-Object`, `Where-Object` and
   `Import-Module` are in SMA and work.

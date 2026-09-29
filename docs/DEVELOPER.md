@@ -1,301 +1,212 @@
-# Developer notes
+# Developer guide
 
-What a returning developer (or agent) needs before touching `setup.ps1`.
-Rules live in `AGENTS.md`; what the project is lives in `README.md`; where it is
-going lives in `ROADMAP.md`. This file records decisions, proofs and
-mechanics that are not obvious from the code.
+This guide describes the current 1.0-preview repository. Project rules live in
+`AGENTS.md`, the public capability boundary lives in `README.md`, and all future
+work belongs in `ROADMAP.md`.
 
-## 1. The premise
+## 1. Build premise
 
-One PowerShell script produces a signed Android APK from pinned, hash-verified
-inputs. No MSBuild, no SDK, no NDK, no JDK, no compiler. Every artifact is
-emitted from a documented byte format. Scripts are the application layer.
+`setup.ps1` produces a signed Android APK from pinned, hash-verified inputs.
+PowerShell is the only required installed build tool. The script does not use
+MSBuild, the .NET SDK, the Android SDK, the NDK, a JDK, Roslyn, `aapt2`, `d8`,
+`zipalign` or `apksigner` to produce the artifact.
 
-Corollaries that decide arguments before they start:
+The implementation follows three rules:
 
-- No C# is compiled, ever, including "a small helper". Code is written in
-  PowerShell or emitted by it: IL through `PersistedAssemblyBuilder`, DEX
-  through the DEX writer, ELF through the ELF writers, machine code through
-  named instruction encoders that the build decodes back and checks.
-- Nothing is taken from the machine's installed state. A tool may be used only
-  to verify output, never to produce it, and only under `-Debug`.
-- Build output never lands in the repository. The one exception is the signed
-  APK beside `setup.ps1`, which git ignores.
+- authored application and build logic is PowerShell;
+- managed code is emitted as IL through persisted expression trees;
+- native code is emitted by named per-ISA encoders, decoded back and
+  ABI-checked before packaging.
+
+External tools may be diagnostic oracles under the gates in `AGENTS.md`; they
+never produce shipped bytes.
 
 ## 2. Step graph
 
-`$script:StepGraph` holds 11 nodes, each naming its `DependsOn`.
-`Resolve-StepOrder` topologically sorts the requested target and rejects cycles
-and unknown edges before anything runs. Every node currently depends on exactly
-the one before it, so the graph is a **path**: a DAG that is also a total order.
-Call it the step graph; say "path" when the distinction matters. Keep it a path.
+`$script:StepGraph` contains nine nodes. Each node names its dependencies, and
+`Resolve-StepOrder` rejects unknown nodes and cycles before execution. The
+current graph is a path:
 
-1 Verify · 2 Acquire · 3 Inspect · 4 Select · 5 Store · 6 Native · 7 Manifest ·
-8 Dex · 9 AppData · 10 Assemble · 11 Sign.
+| Step | Key | Result |
+| ---: | --- | --- |
+| 1 | Verify | verify every pinned specification and source |
+| 2 | Acquire | download and hash the pinned NuGet packages |
+| 3 | Inspect | classify package payloads |
+| 4 | Select | choose the 102 assemblies and re-emit R2R images as IL-only |
+| 5 | Store | emit and verify the aligned assembly store |
+| 6 | Native | emit the store library, native host and SMA native library |
+| 7 | Manifest | emit and read back binary Android XML |
+| 8 | Assemble | write and independently read back the unsigned APK |
+| 9 | Sign | apply and re-verify APK Signature Scheme v2 |
 
-Data passes between steps in memory through `$script:BuildContext`. No step
-reads another step's file from disk.
+Intermediate state remains in `$script:BuildContext`. A step does not consume
+another step's intermediate file from disk.
 
-## 3. Where the build writes
+## 3. Write boundary
 
-Nothing is written before the write plan is shown and confirmed
-(`Resolve-WritePlan` / `Show-WritePlan` / `Enable-WritePlan`).
+Nothing is written before the build displays and confirms its write plan.
+`-AcceptWritePlan` is required for unattended execution, and `-WhatIf` displays
+the plan without writing.
 
-| What | Default |
+| Output | Default location |
 | --- | --- |
-| Signed APK | `<repo>\build\dev.mansfieldplumbing.pwsh.apk` (named after the Android package; `build\` is git-ignored) |
-| Intermediates | nothing, unless `-KeepIntermediates`, then `<repo>\build\` |
-| Signing key | `%LOCALAPPDATA%\Pwsh\pwsh-signing.pfx`, reused so installed apps stay upgradable |
-| Package cache | only with `-Packages Folder` |
+| Signed APK | `build\dev.mansfieldplumbing.pwsh.apk` |
+| Intermediates | memory; `build\` only with `-KeepIntermediates` or `-Debug` |
+| Signing key | the platform's per-user application-data location |
+| Package cache | the platform's per-user cache; memory unless `-Packages Folder` |
 
-Every file goes through `Write-BuildFile`, which refuses paths outside the
-confirmed plan and inside the repository, and records a SHA-512. After a run the
-build lists what it wrote and fails if anything else in the repository changed.
+`Write-BuildFile` enforces the confirmed plan. After the run, the build lists
+every file it wrote with its SHA-512 and fails if an unplanned repository path
+changed. Generated repository files are confined to the git-ignored `build\`
+directory. Signing keys and package caches never belong in the repository.
 
-`-AcceptWritePlan` is required for unattended runs; `-WhatIf` prints the plan
-and writes nothing.
+## 4. Pinned inputs
 
-## 4. Architecture targets
+`lib/manifest.json` is the root input manifest. `setup.ps1` holds only its
+digest; every other source address, package identity, revision and digest is
+read from the verified manifest.
 
-One facade choice resolves into four separate naming domains. Do not use the
-facade name as a path.
+The current manifest contains 18 package entries. A target selects 16 of them,
+including its one RID-specific runtime pack. Current release inputs are:
 
-| Facade | .NET RID | Android ABI (APK `lib/<abi>`) | ELF class | `e_machine` | Store ABI flag |
-| --- | --- | --- | --- | --- | --- |
-| `arm64` | `android-arm64` | `arm64-v8a` | ELF64 | `EM_AARCH64` = 183 | `0x00010000`..`0x00040000` per `xamarin-app.hh` |
-| `x64` | `android-x64` | `x86_64` | ELF64 | `EM_X86_64` = 62 | same table |
-| `arm32` | `android-arm` | `armeabi-v7a` | ELF32 | `EM_ARM` = 40 | same table |
+- .NET runtime `11.0.0-rc.1.26425.128`;
+- Android build metadata `37.0.0-rc.1.2257`;
+- PowerShell and SMA `7.7.0-preview.4`.
 
-Runtime packs: `Microsoft.NETCore.App.Runtime.android-<rid>` plus
-`Microsoft.Android.Runtime.CoreCLR.37.android-<rid>`.
+`docs/assembly-audit.md` and `docs/powershell-load-behavior.md` study a possible
+PowerShell preview.5 payload. They are not the current release manifest.
 
-Packages are pinned in `lib/manifest.json` under `packages`: each entry is
-an exact id, version, RID (for RID-specific packages) and the SHA-512 of the
-`.nupkg`. Step 2 downloads exactly those from NuGet's flat container and
-stops on any hash or nuspec-identity mismatch; nothing is resolved at build
-time. `tools/Get-AssemblyClosure.ps1` resolves a new set and checks it against
-NuGet's catalog when the pins change. Currently .NET `11.0.0-rc.1.26425.128`,
-Android `37.0.0-rc.1.2257`, PowerShell `7.7.0-preview.4`.
+## 5. Targets
 
-Status: gates 2a to 2d pass on all three targets (see `AGENTS.md`).
+| CLI target | Runtime RID | APK ABI | ELF class | Machine |
+| --- | --- | --- | --- | --- |
+| `arm64` | `android-arm64` | `arm64-v8a` | ELF64 | `EM_AARCH64` |
+| `x64` | `android-x64` | `x86_64` | ELF64 | `EM_X86_64` |
+| `arm32` | `android-arm` | `armeabi-v7a` | ELF32 | `EM_ARM` |
 
-Test devices: an x86_64 emulator (API 36), an arm64 phone (API 36) and an
-arm32 streaming device (API 34).
+The managed payload is architecture-neutral. Native libraries, relocation
+types, pointer-sized store fields and emitted instructions differ per target.
+The build checks SysV AMD64, AAPCS64 and AAPCS32 control flow independently.
 
-Facts that decide the design:
+ARM32 has two deliberate distinctions: the host is Thumb-2 while
+`libpsl-native.so` remains A32, and its store version word carries no 64-bit
+flag. Do not normalize either difference away.
 
-- **The managed payload is architecture-neutral IL and identical for all three**
-  (96 assemblies today, see §5). Only native libraries, the emitted shim and the
-  assembly store differ.
-- **One APK can carry all three ABIs.** One `.so` cannot: Android selects by
-  `lib/<abi>/` folder.
-- **Page size is not an architecture property.** Android 15 requires 16 KB page
-  compatibility for `arm64-v8a` and `x86_64` alike. 64-bit targets use 16 KB
-  LOAD alignment regardless of ISA.
-- **x86-64 calling convention** (System V AMD64): integer and pointer arguments
-  in RDI, RSI, RDX, RCX, R8, R9; return in RAX; `AL` = number of vector
-  arguments for variadic calls, so `syslog` needs `AL = 0`.
-- **AArch64:** x18 is reserved by Android (ShadowCallStack). Never use it.
-- **ARM32 is ELF32**, not the 64-bit writer with a different machine value. It
-  needs its own writer. Proven previously on Android 14 / API 34 with
-  `android-arm` + `armeabi-v7a`; see the predecessor project's ARM32 notes.
+## 6. Current APK and startup
 
-## 5. Payload
+The preview APK contains no DEX and no .NET for Android components. Its
+application has `android:hasCode="false"` and uses the framework
+`android.app.NativeActivity` with `android.app.lib_name` set to `pwsh-host`.
 
-`lib/minimal-assembly-order.txt` is the ordered payload list: **96
-assemblies**, IL only, ReadyToRun images rejected by step 4. It shrinks to
-**93** when `Mono.Android.dll`, `Mono.Android.Runtime.dll` and
-`Java.Interop.dll` leave with the .NET for Android host. The list is
-architecture-neutral despite its file name.
+Startup is:
 
-A missing facade is not a build error; it is a runtime `FileNotFoundException`
-on the device. `System.Numerics.Vectors` was found missing this way on
-2026-09-17 while `System.Linq` sorted during script analysis.
+1. Android loads `libpwsh-host.so` and calls `ANativeActivity_onCreate`.
+2. The host starts the pinned CoreCLR and supplies the assembly probe.
+3. The probe serves the 102 IL-only assemblies from the read-only mapped store.
+4. `Dev.MansfieldPlumbing.Pwsh.NativeHost` opens a Full Language,
+   `UseCurrentThread` runspace on the Android main thread.
+5. The host loads the Utility, Management and Security command assemblies by
+   identity, imports them from their in-memory `Assembly` objects, and verifies
+   a cmdlet from each family.
+6. The host publishes the borrowed `ANativeActivity*` as
+   `NativeActivityHandle`, locates `Profile.ps1` case-insensitively and invokes
+   it as an external script.
 
-## 6. Prior art: the concept is already proven
+Full Language Mode is required because the application layer performs managed
+reflection, delegate construction and native interop. It is not a claim that
+untrusted scripts are safe to execute.
 
-The owner's predecessor appliance (private repository
-`MansfieldPlumbing/AndroidSMA`, still online) runs
-`System.Management.Automation` in-process in a real Android application on
-physical hardware. It is the proof of concept; this repository does not need
-to repeat it.
+The exact frozen `scripts/CellCanvas.ps1` workload does not run yet. Gate 2e
+still needs the owned compatibility assembly, and gate 2f must run the frozen
+bytes on all three backends.
 
-What it established, from its README and commit history:
+## 7. Payload and native outputs
 
-- **Admission host.** `MainActivity` opens or reuses **one process-static SMA
-  runspace**, publishes `$Activity` and `$PSScriptRoot` (the app's `FilesDir`),
-  and dot-sources `FilesDir/Start.ps1`. PowerShell owns everything after
-  admission. If the start script is missing or fails, a recovery screen shows
-  the source location and message and can import files into `FilesDir`.
-- **Host written in PowerShell.** The compiled host is authored as typed CLR
-  expression graphs and persisted as an assembly. No authored C#, no maintained
-  `.csproj`. This repository's recovery host descends from it.
-- **Runtime versus runspace decisions.** One runtime (CoreCLR) per process; the
-  runspace is owned by the **process**, not by an Activity, so Activity
-  recreation and background/foreground transitions keep session state and
-  process death starts a fresh runspace. No foreground service, deliberately.
-  A **dedicated UI runspace** separate from the persistent command runspace
-  drove the packed-cell canvas.
-- **One application, two targets.** ARM64 (Samsung S23) and ARM32 (Google TV,
-  Android 14 / API 34, `android-arm` / `armeabi-v7a`). The architecture is a
-  build/runtime dependency choice; touch versus D-pad is an input-adapter
-  choice. Neither may fork the host.
-- **Milestones:** recovery firmware proven on ARM32 and at parity on ARM64
-  (2026-09-02); host emitted from PowerShell for both builds (2026-09-03);
-  oracle `classes.dex` and `AndroidManifest.xml` eliminated (2026-09-05).
+`lib/minimal-assembly-order.txt` is the ordered 102-image payload. It contains
+CoreCLR and SMA dependencies plus `Microsoft.PowerShell.Commands.Utility`,
+`.Commands.Management` and `.Security`; Roslyn remains absent, so
+source-compiling `Add-Type` remains outside the supported payload. The command
+assemblies and their required framework additions pass the build and store
+gates; their import path still needs execution receipts on all three backends.
 
-It was still built with the conventional toolchain: an Android workload
-materialised from NuGet, a disposable MSBuild packaging project generated under
-`build/temp`, and an NDK-built `libpsl-native.so`.
+Step 4 removes every ReadyToRun body while preserving IL, metadata, resources
+and field data. Step 5 rejects any image that still has a ReadyToRun header or
+lacks the IL-only flag. Every image in the NativeActivity store begins on a
+16-byte boundary.
 
-What is unproven, and what this repository is for, is producing that same
-appliance **from one PowerShell script with no toolchain**, and then replacing
-the .NET for Android host with an owned one. Do not spend time re-demonstrating
-that SMA can execute on a device; the open work is build-side and native
-architecture correctness.
+Step 6 emits:
 
-## 7. Proven on 2026-09-17
+- `libassembly-store.so`, containing the aligned store;
+- `libpwsh-host.so`, which starts CoreCLR and enters the managed host;
+- `libpsl-native.so`, which provides the 21 SMA native exports admitted by the
+  build.
 
-Emulator: `pwsh-api36`, Android 16 / API 36, `google_apis` x86_64.
+Every emitted instruction is decoded by an independent reader. ELF headers,
+program headers, dynamic entries, relocations, symbols, hash tables, memory
+permissions and ABI control flow are checked before packaging.
 
-- **PowerShell runs in the app.** The runspace opened, `Profile.ps1` was
-  missing, and the host reported `START_MISSING`. With a profile present, the
-  script was parsed and analysed.
-- **`setup.ps1` emitted its first machine code.** `libpsl-native.so`:
-  AArch64 ET_DYN, 21 exports, 4 `libc.so` imports through a GOT with
-  `R_AARCH64_GLOB_DAT` and `DT_FLAGS` BIND_NOW, non-executable stack.
-  Android's loader accepted it (`nativeloader: Load … libpsl-native.so`).
-- **Emitted assemblies round-trip** (Windows, PS 7.7.0-preview.4 / .NET 11
-  preview 6): a saved assembly's typed `calli` called a real native function,
-  `[UnmanagedCallersOnly]` survived the save, and its function pointer was
-  callable. This is what lets the JNI layer be emitted at build time.
-- **x64 target, 2026-09-19.** `-Architecture x64` builds a fully x86_64 APK
-  (`lib/x86_64/`, an x86-64 `libpsl-native.so`, `R_X86_64_RELATIVE` in
-  `libxamarin-app.so`). On the API 36 emulator, with no translation, a profile
-  ran and wrote: `pwsh 7.7.0-preview.4 on Android (API level 36) X64`,
-  `2 + 40 = 42`, the live `MainActivity`, and 48 available cmdlets. Next gap:
-  the Management and Utility module cmdlets (for example `Join-Path`) do not
-  autoload, because their module manifests are not in the payload.
-- **arm64 on the phone, 2026-09-19,** on the same pinned versions: installs,
-  starts, and reaches `START_MISSING` without a crash.
-- **Emulator limit:** the x86_64 image aborts inside
-  `ndk_translation/arm64_to_x86_64` when RyuJIT-generated ARM code runs. An ARM
-  APK cannot be exercised on an x86_64 emulator. This is why the x64 target
-  exists.
+## 8. Evidence boundary
 
-## 7. libpsl-native
+Gates 2a through 2d pass on the x86-64 emulator, the arm64 phone and the arm32
+device. The same three backends have receipts for JNI calls, Android `Canvas`
+text and color, the 63-vector console model, input consumption and resize
+reflow. `AGENTS.md` records the exact claim boundaries and receipt dates.
 
-SMA resolves `libpsl-native` by name. Its `ResolvingUnmanagedDll` handler
-derives a directory from `assembly.Location`, which is empty for store-loaded
-assemblies, so `Path.Combine` throws `ArgumentNullException`. The library must
-therefore be found by the loader's default search, before that handler runs.
+These receipts do not prove the remaining compatibility assembly, exact frozen
+CellCanvas execution, the integrated terminal, recovery UI, production startup
+lifecycle, all 102 store images, the command-assembly import path, hashing/TLS initialization, or release
+performance. Unchecked `ROADMAP.md` items remain planned.
 
-Exports at SMA v7.7.0-preview.4 (21): 17 from `CorePsPlatform.cs`, 3 from
-`SysLogProvider.cs` (`Native_OpenLog`, `Native_SysLog`, `Native_CloseLog`), and
-`ForkAndExecProcess` from `RunspaceConnectionInfo.cs`.
+## 9. Build and device checks
 
-Implemented: the three syslog entries forward to bionic (`openlog` with
-`LOG_NDELAY | LOG_PID` = `0x9`, `syslog` with a fixed `"%s"` so `%` in messages
-is data, `closelog`), and `GetCurrentThreadId` forwards to `gettid`. The rest
-report failure and are semantic gaps, not finished work.
-
-The .NET for Android host waits for a Java-side load of any library missing
-from its DSO cache, which we emit empty, so the emitted activity calls
-`JavaSystem.LoadLibrary("psl-native")` before the runspace opens. That call goes
-away with the host.
-
-## 8. Leaving .NET for Android
-
-Decision: build an owned host. `NativeActivity` plus an emitted
-`ANativeActivity_onCreate` that starts CoreCLR and nothing else; Android reached
-through C APIs, JNI only where no C API exists; callbacks as
-`[UnmanagedCallersOnly]` methods.
-
-**No binding types.** Android APIs become data: class name, member name, JNI
-descriptor, operation kind. The descriptors are extracted mechanically at build
-time from `Mono.Android.dll`'s `[Register]` attributes, so no signature is ever
-guessed; then that assembly leaves the payload.
-
-The JNI layer is emitted IL in `Pwsh.Native.dll`, not native code and not
-runtime codegen: typed `calli` stubs generated from the pinned `jni.h`, plus
-callback entry points. Rules that decide whether it works:
-
-- Cache the `JavaVM*`, never a `JNIEnv*`; `GetEnv`, and `AttachCurrentThread`
-  only on `JNI_EDETACHED`; detach only threads we attached.
-- `FindClass` on an attached thread uses the system class loader and cannot see
-  app classes. Cache the app `ClassLoader` as a global reference and call
-  `loadClass` (dotted names) for those.
-- `PushLocalFrame`/`PopLocalFrame` around each invocation; promote survivors.
-- After every call: `ExceptionCheck`, then `ExceptionOccurred`/`ExceptionClear`.
-  Almost nothing else is legal while an exception is pending.
-- `RegisterNatives` binds emitted DEX forwarder classes to those callbacks; no
-  `Java_pkg_Class_method` exports are needed.
-
-Android integration points are declared in the manifest up front with
-`android:enabled="false"` and switched on at run time by script, so the manifest
-shape freezes early (see `audit.md` §5.8 for the assistant role).
-
-## 9. Validation oracles (`-Debug` only)
-
-`-Debug` (the common parameter, read from `$PSBoundParameters`) writes the
-intermediates and runs validation against an independent producer. Two oracles,
-kept separate, both out-of-tree, both optional, neither used to produce shipped
-bytes:
-
-1. **Managed oracle, .NET SDK.** Publishes a reference .NET for Android app in a
-   temp folder and compares the Java peer package name (`acw-map.txt`) and
-   `classes.dex` with what this build derives. Implemented.
-2. **Native oracle, NDK/JDK.** Compiles small specimens and compares ELF layout,
-   relocations and instruction bytes with the emitted shim. Not implemented.
-   This is what replaces MSBuild as the reference once the host is ours: the
-   question stops being "does it match Xamarin" and becomes "does it match the
-   platform".
-
-The debug menu should offer them separately.
-
-## 10. Testing
+Build the signed artifact:
 
 ```powershell
-# build (writes only the APK)
 pwsh -NoProfile -File .\setup.ps1 -c -Step 9 -AcceptWritePlan
-
-# emulator
-C:\bin\android-sdk\emulator\emulator.exe -avd pwsh-api36
-adb install -r .\build\dev.mansfieldplumbing.pwsh.apk
-adb shell monkey -p dev.mansfieldplumbing.pwsh -c android.intent.category.LAUNCHER 1
-adb logcat -d | Select-String ' Pwsh '
 ```
 
-A startup script goes to `/data/data/dev.mansfieldplumbing.pwsh/files/Profile.ps1`
-(`adb root` first on a `google_apis` image, then `chown` it to the app's uid).
+For a debuggable build already installed on an attached device, run a profile
+without rebuilding:
 
-Before believing an x64 build: `ro.product.cpu.abilist` includes `x86_64`, the
-APK carries `lib/x86_64/libcoreclr.so`, `libclrjit.so` and `libpsl-native.so`,
-the shim is ELF64 `EM_X86_64`, and logcat shows no `berberis` or
-`ndk_translation` frames at all.
+```powershell
+pwsh -NoProfile -File .\tools\Invoke-DeviceScript.ps1 `
+  -Path .\scripts\ScreenProbe.ps1 `
+  -Device emulator
+```
 
-Before pushing, enable the tracked hook once per clone with
-`git config core.hooksPath .githooks`. Its `pre-push` runs
-`tools/Test-PendingChanges.ps1 -PrePush`, which scans the added lines of every
-commit being pushed for private keys, known token formats, credential
-assignments, home-directory paths, email addresses, device identifiers and key
-files, and refuses the push on any finding or on any scan failure. Findings name
-the rule and `path:line`, never the matched text. Run the script without
-`-PrePush` to scan the working tree. GitHub secret scanning with push
-protection is enabled on the repository as a second check.
+The device runner uses `run-as`, never prints device serials, waits for the host
+completion marker, checks process liveness and reports matching crash-buffer
+lines. Directory input places `Profile.ps1` and its companion files together.
 
-## 11. Open questions
+Before pushing, enable the tracked hook once per clone:
 
-Carried in `audit.md` §8. The ones that block work:
+```powershell
+git config core.hooksPath .githooks
+```
 
-1. Runtime properties `coreclr_initialize` needs without the .NET for Android
-   host.
-2. Whether the host must call the Android crypto library's `JNI_OnLoad` when it
-   is loaded with `dlopen`.
-3. Whether `coreclr_initialize` can run on the UI thread inside `onCreate`
-   without an ANR.
-4. How assemblies load without the XABA store (`AAssetManager` over
-   uncompressed APK entries, fed to CoreCLR as its trusted assembly list).
-5. Whether every download is verified before use.
-6. Why the host's exception for a failed Java callback is masked: the type map
-   covers only the emitted assembly, so `JavaProxyThrowable` has no peer.
+The hook runs `tools/Test-PendingChanges.ps1 -PrePush` and refuses secrets, key
+files, credential assignments, personal paths and device identifiers without
+printing matched values.
+
+## 10. Downstream consumption
+
+Another repository must consume Pwsh only from an immutable Git commit and a
+pinned digest. It must not read this working tree, depend on uncommitted changes
+or copy build output. If it imports selected helpers from `setup.ps1`, it must
+verify the admitted file before parsing or invoking them and record the source
+commit in its own receipt.
+
+The build remains the producer. Independent implementations may decode,
+disassemble, load or execute emitted artifacts as oracles, but they do not
+replace a build gate or produce bytes that ship.
+
+## 11. Where to continue
+
+- `ROADMAP.md`: ordered implementation and release gates.
+- `AGENTS.md`: repository rules and established facts.
+- `docs/android-facade.md`: gate 2e compatibility boundary.
+- `docs/host.md`: planned host lifecycle and runspace dispatch.
+- `docs/shell.md`: planned event, frame and remote-consumer contracts.
+- `docs/ui.md`: terminal and composited-UI design.
+- `docs/assembly-audit.md`: candidate payload study, not current release state.
+- `audit.md` and `docs/xamarin-inventory.md`: historical migration records.

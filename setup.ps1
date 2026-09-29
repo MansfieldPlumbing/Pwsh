@@ -202,9 +202,10 @@ OPTIONS
   -Architecture <arm64|x64|arm32>
                             Target. arm64 for phones, x64 for the x86_64
                             emulator. arm32 for 32-bit ARMv7 devices.
-  -ValidateManifest         Check the manifest emitter and reader in seconds:
-                            the manifest through the production reader and
-                            resource-id check, and malformed-document controls.
+  -ValidateManifest         Check the manifest and adaptive-icon emitters in
+                            seconds: binary XML through the production reader
+                            and resource-id check, plus malformed-document
+                            controls for the manifest.
                             Writes nothing. -Aapt2Path <aapt2.exe> adds an
                             independent parse (one temporary file, deleted).
   -Debug                    Write the intermediates (as -KeepIntermediates).
@@ -604,7 +605,7 @@ $script:KeepPackageCache = -not $DeletePackages -and $Packages -eq 'Folder'
 # any of them fails verification before a single byte is parsed.
 $script:RepositoryLibBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/fea685e5769999ef969a988bb63686cd1fd73d81/lib/'
 $script:LibRootManifestPath = 'manifest.json'
-$script:LibRootManifestSha256 = 'DFF9A7F419A0CFA56A6CFF632687527879A8B1A7E907E8816D58FFE89A62A945'
+$script:LibRootManifestSha256 = 'AD71EDB7BF2BA77023BE88853F88E7AF022D403AF5529BC7ACC9DA69448C15EC'
 $script:LibSourceManifest = $null
 
 function Get-LibFileBytes {
@@ -2052,6 +2053,7 @@ function New-ManagedHostAssemblyBytes {
         $resultVar = [Linq.Expressions.Expression]::Variable([int], 'result')
         $filesVar = [Linq.Expressions.Expression]::Variable([string], 'files')
         $profileVar = [Linq.Expressions.Expression]::Variable([string], 'profile')
+        $moduleShell = [Linq.Expressions.Expression]::Variable([powershell], 'moduleShell')
         $profileShell = [Linq.Expressions.Expression]::Variable([powershell], 'profileShell')
         $stateShell = [Linq.Expressions.Expression]::Variable([powershell], 'stateShell')
         $startCommand = [Linq.Expressions.Expression]::Variable([Management.Automation.CommandInfo], 'startCommand')
@@ -2076,6 +2078,8 @@ function New-ManagedHostAssemblyBytes {
         $profileErrors = New-ClrProperty (New-ClrProperty $profileShell (Get-ExactProperty ([powershell]) 'Streams')) (Get-ExactProperty ([Management.Automation.PSDataStreams]) 'Error')
         $errorCollection = (Get-ExactProperty ([Management.Automation.PSDataStreams]) 'Error').PropertyType
         $firstError = [Linq.Expressions.Expression]::MakeIndex($profileErrors, $errorCollection.GetProperty('Item', [type[]]@([int])), [Linq.Expressions.Expression[]]@((New-ClrConstant 0 ([int]))))
+        $moduleErrors = New-ClrProperty (New-ClrProperty $moduleShell (Get-ExactProperty ([powershell]) 'Streams')) (Get-ExactProperty ([Management.Automation.PSDataStreams]) 'Error')
+        $firstModuleError = [Linq.Expressions.Expression]::MakeIndex($moduleErrors, $errorCollection.GetProperty('Item', [type[]]@([int])), [Linq.Expressions.Expression[]]@((New-ClrConstant 0 ([int]))))
         $stateResults = New-ClrCall $stateShell $invoke[0]
         $stateValue = [Linq.Expressions.Expression]::Unbox((New-ClrProperty ([Linq.Expressions.Expression]::Property($stateResults, 'Item', [Linq.Expressions.Expression[]]@(New-ClrConstant 0 ([int])))) (Get-ExactProperty ([psobject]) 'BaseObject')), [int])
         $profilePhase = New-ClrBlock @() @(
@@ -2110,6 +2114,46 @@ function New-ManagedHostAssemblyBytes {
                     (New-ClrCall $stateShell (Get-ExactMethod ([powershell]) 'AddScript' @([string])) @((New-ClrConstant '[int]$global:Gate2d' ([string])))),
                     (& $log $infoPriority (New-StaticCall $concat @((New-ClrConstant 'GATE2D profile state 0x' ([string])), (& $hexText $stateValue)))))),
                 (& $mark 'GATE2D START_MISSING')))
+        # CreateDefault2 imports only Microsoft.PowerShell.Core. The three
+        # command assemblies are admitted by the store, loaded by identity
+        # through the external probe, and imported from Assembly objects so
+        # no filesystem path or package extraction is involved.
+        $assemblyNameCtor = [Reflection.AssemblyName].GetConstructor([type[]]@([string]))
+        $assemblyLoad = Get-ExactMethod ([Reflection.Assembly]) 'Load' @([Reflection.AssemblyName]) ([Reflection.BindingFlags]'Public,Static')
+        $commandAssemblies = [Linq.Expressions.Expression]::NewArrayInit(
+            [Reflection.Assembly],
+            [Linq.Expressions.Expression[]]@(
+                (New-StaticCall $assemblyLoad @((New-ClrNew $assemblyNameCtor @((New-ClrConstant 'Microsoft.PowerShell.Commands.Management' ([string])))))),
+                (New-StaticCall $assemblyLoad @((New-ClrNew $assemblyNameCtor @((New-ClrConstant 'Microsoft.PowerShell.Commands.Utility' ([string])))))),
+                (New-StaticCall $assemblyLoad @((New-ClrNew $assemblyNameCtor @((New-ClrConstant 'Microsoft.PowerShell.Security' ([string]))))))))
+        $importExpressions = @(
+            (& $mark 'COMMANDS import begin'),
+            (New-ClrAssign $moduleShell (New-StaticCall (Get-ExactMethod ([powershell]) 'Create' @($runspaceType)) @($runspaceVar))),
+            (New-ClrCall $moduleShell (Get-ExactMethod ([powershell]) 'AddCommand' @([string])) @((New-ClrConstant 'Import-Module' ([string])))),
+            (New-ClrCall $moduleShell (Get-ExactMethod ([powershell]) 'AddParameter' @([string], [object])) @(
+                (New-ClrConstant 'Assembly' ([string])), [Linq.Expressions.Expression]::Convert($commandAssemblies, [object]))),
+            (New-ClrCall $moduleShell $invoke[0]),
+            [Linq.Expressions.Expression]::IfThen(
+                (New-ClrProperty $moduleShell (Get-ExactProperty ([powershell]) 'HadErrors')),
+                [Linq.Expressions.Expression]::Throw((New-ClrNew ([InvalidOperationException].GetConstructor([type[]]@([string]))) @(
+                    [Linq.Expressions.Expression]::Condition(
+                        [Linq.Expressions.Expression]::GreaterThan((New-ClrProperty $moduleErrors (Get-ExactProperty $errorCollection 'Count')), (New-ClrConstant 0 ([int]))),
+                        (New-ClrCall $firstModuleError (Get-ExactMethod ([Management.Automation.ErrorRecord]) 'ToString' @())),
+                        (New-ClrConstant 'One or more command assemblies failed to import.' ([string]))))))),
+            (& $mark 'COMMANDS import complete'))
+        $commandLookup = New-ClrProperty $sessionState (Get-ExactProperty ([Management.Automation.Runspaces.SessionStateProxy]) 'InvokeCommand')
+        foreach ($commandName in 'Get-ChildItem', 'ConvertTo-Json', 'ConvertFrom-SecureString') {
+            $importExpressions += [Linq.Expressions.Expression]::IfThen(
+                [Linq.Expressions.Expression]::Equal(
+                    (New-ClrCall $commandLookup (Get-ExactMethod ([Management.Automation.CommandInvocationIntrinsics]) 'GetCommand' @([string], [Management.Automation.CommandTypes])) @(
+                        (New-ClrConstant $commandName ([string])),
+                        (New-ClrConstant ([Management.Automation.CommandTypes]::Cmdlet) ([Management.Automation.CommandTypes])))),
+                    [Linq.Expressions.Expression]::Constant($null, [Management.Automation.CommandInfo])),
+                [Linq.Expressions.Expression]::Throw((New-ClrNew ([InvalidOperationException].GetConstructor([type[]]@([string]))) @(
+                    (New-ClrConstant "Command assembly admission did not register '$commandName'." ([string]))))))
+        }
+        $importExpressions += (& $mark 'COMMANDS verified')
+        $importCommands = New-ClrBlock @() $importExpressions
         $try = New-ClrBlock @() @(
             [Linq.Expressions.Expression]::IfThen(
                 [Linq.Expressions.Expression]::Equal($nativeActivity, [Linq.Expressions.Expression]::Default([IntPtr])),
@@ -2131,6 +2175,7 @@ function New-ManagedHostAssemblyBytes {
             (New-ClrCall $runspaceVar (Get-ExactMethod $runspaceType 'Open' @())),
             (New-ClrAssign (New-ClrProperty $null (Get-ExactProperty $runspaceType 'DefaultRunspace')) $runspaceVar),
             (& $mark 'GATE2C DefaultRunspace set'),
+            $importCommands,
             # Gate 2e admission prerequisite. The facade may read env/vm/
             # clazz from this borrowed pointer on the owning main thread.
             # Revocation at onDestroy belongs to the lifecycle gate.
@@ -2147,7 +2192,7 @@ function New-ManagedHostAssemblyBytes {
         # Run holds every SMA reference. Admit references none, so a load or
         # JIT failure of Run surfaces as an exception inside Admit's try.
         $run = Add-PersistedMethod $nativeHostType 'Run' ([Reflection.MethodAttributes]'Private,Static,HideBySig') ([int]) @([IntPtr]) `
-            ([Func[IntPtr,int]]) @($nativeActivity) (New-ClrBlock @($issVar, $runspaceVar, $shellVar, $resultVar, $filesVar, $profileVar, $profileShell, $stateShell, $startCommand) @($try))
+            ([Func[IntPtr,int]]) @($nativeActivity) (New-ClrBlock @($issVar, $runspaceVar, $shellVar, $resultVar, $filesVar, $profileVar, $moduleShell, $profileShell, $stateShell, $startCommand) @($try))
         # RunPowerShell returns the HResult of any exception, and the native
         # host logs it. The handler first logs the exception's type and
         # message (not ToString, which pulls in stack-trace machinery), inside
@@ -6234,8 +6279,17 @@ function Invoke-AssembleStep {
     }
 
     & $add 'AndroidManifest.xml' ([byte[]]$script:BuildContext.AndroidManifest.Bytes) $false 0
-    & $add 'resources.arsc' (New-ResourceTable -PackageName $script:PackageName -IconPath 'res/mipmap/ic_launcher.png') $true 4
-    & $add 'res/mipmap/ic_launcher.png' (Import-LibSourceBytes -Path 'ic_launcher.png') $true 4
+    $adaptiveIcon = New-AdaptiveIconAxml -ForegroundResourceId 0x7f010001 -BackgroundResourceId 0x7f020000
+    $adaptiveReport = Test-BinaryAxml -Document $adaptiveIcon
+    $adaptiveAttributeIds = Assert-ManifestAttributeIds -Report $adaptiveReport
+    if ($adaptiveAttributeIds -ne 2) { throw "The adaptive icon has $adaptiveAttributeIds checked android: attributes; expected 2." }
+    & $add 'resources.arsc' (New-ResourceTable `
+        -PackageName $script:PackageName `
+        -IconPath 'res/mipmap-anydpi-v26/ic_launcher.xml' `
+        -ForegroundPath 'res/mipmap-nodpi-v4/ic_launcher_foreground.png' `
+        -BackgroundColor ([uint32]4278926638)) $true 4
+    & $add 'res/mipmap-anydpi-v26/ic_launcher.xml' $adaptiveIcon $false 0
+    & $add 'res/mipmap-nodpi-v4/ic_launcher_foreground.png' (Import-LibSourceBytes -Path 'ic_launcher.png') $true 4
     & $add "lib/$abi/libpwsh-host.so" ([byte[]]$script:BuildContext.NativeHost.Bytes) $false 0
     & $add "lib/$abi/libassembly-store.so" ([byte[]]$script:BuildContext.StoreLibrary.Bytes) $false 0
     & $add "lib/$abi/libpsl-native.so" ([byte[]]$script:BuildContext.PslNative.Bytes) $false 0
@@ -6599,54 +6653,101 @@ function New-ResStringPool {
 
 function New-ResourceTable {
     <#
-        A resources.arsc holding one package (0x7f) with one type and one
-        entry: mipmap/ic_launcher -> res/mipmap/ic_launcher.png, resource id
-        0x7f010000. Layouts follow lib/ResourceTypes.h: ResTable_header,
+        A resources.arsc holding one package (0x7f) with two types. The mipmap
+        type has two configurations: mipmap/ic_launcher is an anydpi-v26 adaptive-icon XML
+        at resource id 0x7f010000; mipmap/ic_launcher_foreground is its nodpi
+        bitmap artwork at 0x7f010001. color/ic_launcher_background is the
+        adaptive background at 0x7f020000. Layouts follow
+        lib/ResourceTypes.h: ResTable_header,
         ResTable_package, ResTable_typeSpec, ResTable_type with a 64-byte
         ResTable_config, ResTable_entry, Res_value.
     #>
     param(
         [Parameter(Mandatory)][string] $PackageName,
-        [Parameter(Mandatory)][string] $IconPath
+        [Parameter(Mandatory)][string] $IconPath,
+        [Parameter(Mandatory)][string] $ForegroundPath,
+        [Parameter(Mandatory)][uint32] $BackgroundColor
     )
 
-    $valueStrings = New-ResStringPool -Strings @($IconPath)
-    $typeStrings  = New-ResStringPool -Strings @('mipmap')
-    $keyStrings   = New-ResStringPool -Strings @('ic_launcher')
+    $valueStrings = New-ResStringPool -Strings @($IconPath, $ForegroundPath)
+    $typeStrings  = New-ResStringPool -Strings @('mipmap', 'color')
+    $keyStrings   = New-ResStringPool -Strings @('ic_launcher', 'ic_launcher_foreground', 'ic_launcher_background')
 
-    # ResTable_typeSpec: id 1, one entry, no configuration flags.
+    # ResTable_typeSpec: id 1, two entries, no configuration flags.
     $spec = [System.IO.MemoryStream]::new()
     $w = [System.IO.BinaryWriter]::new($spec)
-    $w.Write([uint16]0x0202); $w.Write([uint16]16); $w.Write([uint32](16 + 4))
-    $w.Write([byte]1); $w.Write([byte]0); $w.Write([uint16]0); $w.Write([uint32]1)
+    $w.Write([uint16]0x0202); $w.Write([uint16]16); $w.Write([uint32](16 + 8))
+    $w.Write([byte]1); $w.Write([byte]0); $w.Write([uint16]0); $w.Write([uint32]2)
+    $w.Write([uint32]0); $w.Write([uint32]0)
+    $w.Flush()
+
+    # ResTable_typeSpec: id 2, one color entry.
+    $colorSpec = [System.IO.MemoryStream]::new()
+    $w = [System.IO.BinaryWriter]::new($colorSpec)
+    $w.Write([uint16]0x0202); $w.Write([uint16]16); $w.Write([uint32]20)
+    $w.Write([byte]2); $w.Write([byte]0); $w.Write([uint16]0); $w.Write([uint32]1)
     $w.Write([uint32]0)
     $w.Flush()
 
-    # ResTable_type: config is all defaults except density NONE (0xFFFF), so a
-    # large source image is never scaled up for the screen density.
+    function New-IconTypeChunk {
+        param(
+            [Parameter(Mandatory)][ValidateRange(0, 1)][int] $EntryIndex,
+            [Parameter(Mandatory)][uint16] $Density,
+            [Parameter(Mandatory)][uint16] $SdkVersion
+        )
+
+        $configSize = 64
+        $headerSize = 20 + $configSize
+        $entriesStart = $headerSize + 8
+        $type = [System.IO.MemoryStream]::new()
+        $tw = [System.IO.BinaryWriter]::new($type)
+        $tw.Write([uint16]0x0201); $tw.Write([uint16]$headerSize); $tw.Write([uint32]($entriesStart + 16))
+        $tw.Write([byte]1); $tw.Write([byte]0); $tw.Write([uint16]0)
+        $tw.Write([uint32]2); $tw.Write([uint32]$entriesStart)
+        $config = [byte[]]::new($configSize)
+        [BitConverter]::GetBytes([uint32]$configSize).CopyTo($config, 0)
+        [BitConverter]::GetBytes($Density).CopyTo($config, 14)
+        [BitConverter]::GetBytes($SdkVersion).CopyTo($config, 24)
+        $tw.Write($config)
+        for ($i = 0; $i -lt 2; $i++) {
+            $tw.Write([uint32]$(if ($i -eq $EntryIndex) { 0 } else { [uint32]::MaxValue }))
+        }
+        $tw.Write([uint16]8); $tw.Write([uint16]0); $tw.Write([uint32]$EntryIndex)
+        $tw.Write([uint16]8); $tw.Write([byte]0); $tw.Write([byte]0x03) # TYPE_STRING
+        $tw.Write([uint32]$EntryIndex)
+        $tw.Flush()
+        return ,$type.ToArray()
+    }
+
+    # Android's resource compiler emits adaptive launcher XML as anydpi-v26;
+    # the bitmap foreground remains nodpi so its source pixels are not scaled.
+    $iconType = New-IconTypeChunk -EntryIndex 0 -Density ([uint16]0xFFFE) -SdkVersion 26
+    $foregroundType = New-IconTypeChunk -EntryIndex 1 -Density ([uint16]0xFFFF) -SdkVersion 0
+
+    # The adaptive-icon inflater requires a resource reference for its
+    # background. A color resource is drawable through Resources.getDrawable.
     $configSize = 64
     $headerSize = 20 + $configSize
     $entriesStart = $headerSize + 4
-    $type = [System.IO.MemoryStream]::new()
-    $w = [System.IO.BinaryWriter]::new($type)
+    $colorType = [System.IO.MemoryStream]::new()
+    $w = [System.IO.BinaryWriter]::new($colorType)
     $w.Write([uint16]0x0201); $w.Write([uint16]$headerSize); $w.Write([uint32]($entriesStart + 16))
-    $w.Write([byte]1); $w.Write([byte]0); $w.Write([uint16]0)
+    $w.Write([byte]2); $w.Write([byte]0); $w.Write([uint16]0)
     $w.Write([uint32]1); $w.Write([uint32]$entriesStart)
     $config = [byte[]]::new($configSize)
     [BitConverter]::GetBytes([uint32]$configSize).CopyTo($config, 0)
-    [BitConverter]::GetBytes([uint16]0xFFFF).CopyTo($config, 14)   # density
     $w.Write($config)
-    $w.Write([uint32]0)                                              # entry 0 offset
-    $w.Write([uint16]8); $w.Write([uint16]0); $w.Write([uint32]0)    # ResTable_entry: key 0
-    $w.Write([uint16]8); $w.Write([byte]0); $w.Write([byte]0x03)     # Res_value: TYPE_STRING
-    $w.Write([uint32]0)                                              # value string 0
+    $w.Write([uint32]0)
+    $w.Write([uint16]8); $w.Write([uint16]0); $w.Write([uint32]2)
+    $w.Write([uint16]8); $w.Write([byte]0); $w.Write([byte]0x1c) # TYPE_INT_COLOR_ARGB8
+    $w.Write($BackgroundColor)
     $w.Flush()
 
     # ResTable_package: 288-byte header, then type and key pools, then chunks.
     $packageHeaderSize = 288
     $typeStringsOffset = $packageHeaderSize
     $keyStringsOffset = $typeStringsOffset + $typeStrings.Length
-    $packageSize = $keyStringsOffset + $keyStrings.Length + $spec.Length + $type.Length
+    $packageSize = $keyStringsOffset + $keyStrings.Length + $spec.Length + $iconType.Length + $foregroundType.Length + $colorSpec.Length + $colorType.Length
     $package = [System.IO.MemoryStream]::new()
     $w = [System.IO.BinaryWriter]::new($package)
     $w.Write([uint16]0x0200); $w.Write([uint16]$packageHeaderSize); $w.Write([uint32]$packageSize)
@@ -6656,11 +6757,12 @@ function New-ResourceTable {
     if ($nameBytes.Length -gt 254) { throw "Package name '$PackageName' exceeds 127 UTF-16 units." }
     $nameBytes.CopyTo($name, 0)
     $w.Write($name)
-    $w.Write([uint32]$typeStringsOffset); $w.Write([uint32]1)
-    $w.Write([uint32]$keyStringsOffset); $w.Write([uint32]1)
+    $w.Write([uint32]$typeStringsOffset); $w.Write([uint32]2)
+    $w.Write([uint32]$keyStringsOffset); $w.Write([uint32]3)
     $w.Write([uint32]0)                                              # typeIdOffset
     $w.Write($typeStrings); $w.Write($keyStrings)
-    $w.Write($spec.ToArray()); $w.Write($type.ToArray())
+    $w.Write($spec.ToArray()); $w.Write($iconType); $w.Write($foregroundType)
+    $w.Write($colorSpec.ToArray()); $w.Write($colorType.ToArray())
     $w.Flush()
 
     # ResTable_header.
@@ -6674,13 +6776,97 @@ function New-ResourceTable {
     return , $table.ToArray()
 }
 
+function New-AdaptiveIconAxml {
+    <#
+        Binary form of Android's adaptive-icon resource. The drawable
+        attribute id is taken from the pinned public-final.xml, and the chunk
+        structures follow the pinned ResourceTypes.h.
+    #>
+    param(
+        [Parameter(Mandatory)][uint32] $ForegroundResourceId,
+        [Parameter(Mandatory)][uint32] $BackgroundResourceId
+    )
+
+    $allStrings = @(
+        'drawable',
+        'adaptive-icon',
+        'background',
+        'foreground',
+        'android',
+        'http://schemas.android.com/apk/res/android'
+    )
+    $strMap = @{}
+    for ($i = 0; $i -lt $allStrings.Count; $i++) { $strMap[$allStrings[$i]] = $i }
+    function S([string]$Value) { return $strMap[$Value] }
+
+    $stringPoolChunk = New-ResStringPool -Strings $allStrings
+    $rm = [System.IO.MemoryStream]::new()
+    $w = [System.IO.BinaryWriter]::new($rm)
+    $w.Write([uint16]0x0180); $w.Write([uint16]8); $w.Write([uint32]12)
+    $w.Write([uint32]0x01010199) # android:drawable, pinned public-final.xml
+    $resourceMapChunk = $rm.ToArray()
+    $w.Dispose(); $rm.Dispose()
+
+    $tree = [System.IO.MemoryStream]::new()
+    $w = [System.IO.BinaryWriter]::new($tree)
+
+    function Write-IconNamespace([uint16]$type) {
+        $w.Write($type); $w.Write([uint16]16); $w.Write([uint32]24)
+        $w.Write([uint32]1); $w.Write([uint32]4294967295)
+        $w.Write([int32](S 'android'))
+        $w.Write([int32](S 'http://schemas.android.com/apk/res/android'))
+    }
+    function Write-IconStartElement([string]$Name, [AllowEmptyCollection()][array]$Attributes, [uint32]$Line) {
+        $w.Write([uint16]0x0102); $w.Write([uint16]16)
+        $w.Write([uint32](36 + 20 * $Attributes.Count))
+        $w.Write($Line); $w.Write([uint32]4294967295)
+        $w.Write([int32]-1); $w.Write([int32](S $Name))
+        $w.Write([uint16]20); $w.Write([uint16]20); $w.Write([uint16]$Attributes.Count)
+        $w.Write([uint16]0); $w.Write([uint16]0); $w.Write([uint16]0)
+        foreach ($attribute in $Attributes) {
+            $w.Write([int32](S 'http://schemas.android.com/apk/res/android'))
+            $w.Write([int32](S 'drawable'))
+            $w.Write([int32]-1)
+            $w.Write([uint16]8); $w.Write([byte]0); $w.Write([byte]$attribute.Type)
+            $w.Write([uint32]$attribute.Data)
+        }
+    }
+    function Write-IconEndElement([string]$Name, [uint32]$Line) {
+        $w.Write([uint16]0x0103); $w.Write([uint16]16); $w.Write([uint32]24)
+        $w.Write($Line); $w.Write([uint32]4294967295)
+        $w.Write([int32]-1); $w.Write([int32](S $Name))
+    }
+
+    Write-IconNamespace 0x0100
+    Write-IconStartElement 'adaptive-icon' @() 2
+    Write-IconStartElement 'background' @([pscustomobject]@{ Type = 0x01; Data = $BackgroundResourceId }) 3
+    Write-IconEndElement 'background' 3
+    Write-IconStartElement 'foreground' @([pscustomobject]@{ Type = 0x01; Data = $ForegroundResourceId }) 4
+    Write-IconEndElement 'foreground' 4
+    Write-IconEndElement 'adaptive-icon' 2
+    Write-IconNamespace 0x0101
+
+    $treeBytes = $tree.ToArray()
+    $w.Dispose(); $tree.Dispose()
+
+    $document = [System.IO.MemoryStream]::new()
+    $w = [System.IO.BinaryWriter]::new($document)
+    $size = 8 + $stringPoolChunk.Length + $resourceMapChunk.Length + $treeBytes.Length
+    $w.Write([uint16]0x0003); $w.Write([uint16]8); $w.Write([uint32]$size)
+    $w.Write($stringPoolChunk); $w.Write($resourceMapChunk); $w.Write($treeBytes)
+    $w.Flush()
+    $bytes = $document.ToArray()
+    $w.Dispose(); $document.Dispose()
+    return ,$bytes
+}
+
 function New-BinaryAxmlManifest {
     param(
         [Parameter(Mandatory)] [string] $PackageName,
         [Parameter(Mandatory)] [string] $ActivityClassName,
         [string] $ActivityLabel = "Pwsh",
         [int] $VersionCode = 1,
-        [string] $VersionName = "1.0",
+        [string] $VersionName = "1.0-preview",
         [int] $MinSdkVersion = 26,
         [int] $TargetSdkVersion = 37,
         [int] $CompileSdkVersion = 37,
@@ -6985,6 +7171,7 @@ function New-BinaryAxmlManifest {
     $activityAttrs = @(
         (Attr-Ref 'theme' 0x0103022E),
         (Attr-String 'label' $ActivityLabel),
+        (Attr-Ref 'icon' 0x7f010000),
         (Attr-String 'name' $activityFullName),
         (Attr-Bool 'exported' $true),
         (Attr-IntDec 'launchMode' 1)
@@ -7298,16 +7485,30 @@ function Invoke-Aapt2ManifestCheck {
 }
 
 function Invoke-ManifestValidation {
-    # The inner loop for manifest work: the production emitter, reader and
+    # The inner loop for binary Android XML: production emitters, reader and
     # checks, without the rest of the build. Returns the exit code.
     try {
         [void](Test-AndroidAttributeIds)
         $native = New-BinaryAxmlManifest -PackageName $script:PackageName -ActivityClassName $script:ActivityClassName -ActivityLabel $script:ApplicationLabel
         $count = Assert-ManifestAttributeIds -Report (Test-BinaryAxml -Document $native)
         $controls = Test-ManifestNegativeControls -Document $native
+        $adaptive = New-AdaptiveIconAxml -ForegroundResourceId 0x7f010001 -BackgroundResourceId 0x7f020000
+        $adaptiveReport = Test-BinaryAxml -Document $adaptive
+        $adaptiveIds = Assert-ManifestAttributeIds -Report $adaptiveReport
+        $adaptiveNames = @($adaptiveReport.Elements | ForEach-Object Name)
+        if (($adaptiveNames -join '/') -cne 'adaptive-icon/background/foreground') {
+            throw "The adaptive icon emitted unexpected elements: $($adaptiveNames -join '/')."
+        }
+        if ($adaptiveIds -ne 2) { throw "The adaptive icon has $adaptiveIds checked android: attributes; expected 2." }
+        if ($adaptiveReport.Elements[1].Attributes['drawable'] -ne [uint32]0x7f020000) {
+            throw 'The adaptive icon background reference did not round-trip.'
+        }
+        if ($adaptiveReport.Elements[2].Attributes['drawable'] -ne [uint32]0x7f010001) {
+            throw 'The adaptive icon foreground reference did not round-trip.'
+        }
         if ($Aapt2Path) { Invoke-Aapt2ManifestCheck -Document $native -Label 'NativeActivity' }
-        Write-Host ('[PASS] Manifest validation: the manifest passes the reader with {0} android: attributes matched to public-final.xml ids; {1} malformed-document controls rejected for the expected reason{2}.' -f
-            $count, $controls, $(if ($Aapt2Path) { '; aapt2 parses it' } else { '' })) -ForegroundColor Green
+        Write-Host ('[PASS] Binary XML validation: the manifest and adaptive icon pass the reader with {0} and {1} android: attributes matched to public-final.xml ids; {2} malformed-document controls rejected for the expected reason{3}.' -f
+            $count, $adaptiveIds, $controls, $(if ($Aapt2Path) { '; aapt2 parses the manifest' } else { '' })) -ForegroundColor Green
         return 0
     }
     catch {

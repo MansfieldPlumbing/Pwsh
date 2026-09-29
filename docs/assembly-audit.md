@@ -1,8 +1,11 @@
 # Assembly audit
 
-Status: draft. Its decisions predate the source checks in
-`powershell-load-behavior.md` and are reconciled against them before any
-payload is frozen from this list.
+Status: preview.5 comparison study, not the current 1.0-preview release
+manifest. The current `lib/manifest.json` pins PowerShell 7.7.0-preview.4 and
+the 102-image payload: the previously proven 91-image base, the Utility,
+Management and Security command assemblies, and eight framework additions
+retained by this study's supported closure. The preview.4 candidate passes the
+build and store gates; its command import still requires device receipts.
 
 Date: 2026-09-25. Produced by an earlier version of
 `tools/Get-AssemblyClosure.ps1`; every number

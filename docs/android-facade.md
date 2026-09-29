@@ -1,8 +1,10 @@
 # Owned Android facade
 
-This is the gate 2e implementation boundary, not a claim of device execution.
-The repository contract and frozen CellCanvas take precedence over earlier
-Vulkan/console-thread proposals in `xamarin-inventory.md`.
+This is the gate 2e implementation boundary. The JNI and Android `Canvas`
+mechanisms have device receipts; the owned compatibility assembly and exact
+frozen CellCanvas workload do not. The repository contract and frozen
+CellCanvas take precedence over the historical proposals in
+`xamarin-inventory.md`.
 
 ## Layers
 
@@ -59,26 +61,28 @@ These are additional acceptance requirements, not inferred CellCanvas coverage.
 
 No process-global current Activity.
 
-## First implemented prerequisite and next proof
+## Implemented prerequisites and remaining gate
 
 `setup.ps1` passes the saved Activity pointer in x0 (AAPCS64), r0 (AAPCS32), or
 rdi (SysV AMD64) to `RunPowerShell(IntPtr)`. The managed entry rejects null and
 places the pointer in that invocation's runspace as `NativeActivityHandle` before
 the profile executes. `Admit()` retains its existing constant-result invariant.
-This is borrowed admission only: it does not implement lifecycle revocation,
-JNI, surfaces, multiple-Activity runtime reentry, or gate 2e.
+This is borrowed admission only; lifecycle revocation and multiple-Activity
+runtime reentry remain open.
 
-Local verification on 2026-09-25: both scripts parse; the inventory records 31
-Android/Java type names and 513 total member sites, including 80 static
-Android/Java sites. The frozen workload hash matches. A NativeActivity x64
-Step 6 build was attempted, but stopped during Step 1 with the build's network
-failure report. No emission, ABI-check pass, or device execution is claimed for
-this change. The pre-change setup script is retained outside the repository.
+On 2026-09-26, the x86-64 emulator, arm64 phone and arm32 device all passed the
+JNI smoke and Android `Canvas` probes: JNI version, fields, instance and static
+calls, `jvalue[]`, a window `Surface`, text and the eight Campbell colors. The
+same mechanism is packaged by `modules/AndroidCanvas.psm1`. On 2026-09-27 the
+console model passed all 63 vectors on those backends and its device probe drew,
+consumed input and reflowed after pinch-to-resize. These receipts prove the
+binding and presentation mechanisms, not the compatibility assembly or exact
+CellCanvas execution.
 
 Evidence: pinned `lib/native_activity.h` (manifest URL commit
 `bfcf75076e562945bae131a4929f29a90d0d2481`) defines pointer ownership and the
 main-thread environment/callback contract. Existing per-ISA emitter/ABI checks
-in `setup.ps1` define the call sites. Build and device checks must pass before
-promoting this new admission path. Next: pin JNI source, prove the four-call JNI
-smoke on all three backends, then implement one Paint/Bitmap/Canvas readback
-slice with cleanup. Expand to window callbacks only after those pass.
+in `setup.ps1` define the call sites. Next: admit `jni.h` through
+`lib/manifest.json`, emit the compatibility surface required by the frozen
+workload, and run the exact `scripts/CellCanvas.ps1` bytes as gate 2f on all
+three backends.

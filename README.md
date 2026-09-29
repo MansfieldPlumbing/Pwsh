@@ -1,4 +1,10 @@
-# Pwsh — a scripting appliance for Android
+# Pwsh — PowerShell runspaces on Android
+
+> A bespoke SDK in one PowerShell script, bringing in-process PowerShell
+> runspaces to Android—because “every system” should mean every system.
+
+**Status: 1.0-preview.** The build and Android hosting substrate are working;
+the integrated terminal and general application surface remain gated work.
 
 One PowerShell script. No .NET SDK, no Android SDK, no JDK, no NuGet client, no
 MSBuild, no Roslyn, no `aapt2`, no `javac`, no `d8`, no `apksigner`, no
@@ -18,13 +24,14 @@ addresses.
 
 ## Status
 
-Steps 1 through 9 pass. `-Step 9` produces a signed
-`dev.mansfieldplumbing.pwsh.apk` (about 16.5 MB for arm64) with no DEX and no
-.NET for Android: the framework's `android.app.NativeActivity` loads the emitted
-`libpwsh-host.so`, which starts CoreCLR, serves 91 IL-only assemblies in place
-from the emitted store, opens a PowerShell runspace on the main thread and runs
-`Profile.ps1`. Proven on the x86_64 emulator, a Samsung Galaxy S23 (arm64) and
-an onn 4K Plus (arm32).
+Steps 1 through 9 pass. The current arm64 command-payload candidate is a
+21.31 MB unsigned APK with no DEX and no .NET for Android: the framework's
+`android.app.NativeActivity` loads the emitted `libpwsh-host.so`, which starts
+CoreCLR, serves 102 IL-only assemblies in place from the emitted store, opens a
+PowerShell runspace on the main thread and runs `Profile.ps1`. The preceding
+91-image payload is proven on the x86_64 emulator, a Samsung Galaxy S23 (arm64)
+and an onn 4K Plus (arm32); the 102-image command payload still needs that
+three-backend device gate.
 
 | Emitted | Proven by |
 | --- | --- |
@@ -38,22 +45,28 @@ an onn 4K Plus (arm32).
 
 Not yet done, stated plainly:
 
-- **No cmdlet modules.** Commands such as `Get-ChildItem` and `Get-Process`
-  (`Microsoft.PowerShell.Commands.Management`) are not present.
-- **Drawing is probes so far.** Run as `Profile.ps1`, `scripts/ScreenProbe.ps1`
-  fills the window, and `scripts/probes/canvas` draws text and ANSI colors
-  with Android's `Canvas` through JNI, on all three devices; there is no
-  terminal renderer or input handling yet.
+- **Command payload device gate.** The build now admits and imports
+  `Microsoft.PowerShell.Commands.Utility`, `.Commands.Management` and
+  `.Security` directly from the in-memory store, and verifies one registered
+  cmdlet from each family before `Profile.ps1`. The APK builds; execution on
+  all three device backends is not yet recorded.
+- **The console is still a probe, not the product shell.** The PowerShell
+  console model passes its 63 conformance vectors on all three backends, and
+  the device probe draws it, consumes input and reflows after pinch-to-resize.
+  It is not yet wired into the release host as an interactive terminal.
 - **CellCanvas does not run yet.** It ran under .NET for Android; it returns
   when gate 2e supplies its Android compatibility surface (`ROADMAP.md`).
 - **Startup.** Without ReadyToRun the JIT compiles the startup path: about
   1.0 s on the S23 and 7 s on the onn. A leaner initial session is next.
 - **Hashing and TLS** need the planned emitted `NativeActivity` subclass,
   which loads the runtime's Android crypto library from Java.
+- **Release metadata** is not complete. The SBOM, applicable third-party
+  notices and per-backend release receipts remain release gates.
+
 ## Design
 
 **The build script is inside the thing it builds.** The assemblies `setup.ps1`
-relies on are all among the 91 it ships, because a PowerShell host and an APK
+relies on are all among the 102 it ships, because a PowerShell host and an APK
 builder need the same things:
 
 ```
@@ -89,10 +102,10 @@ was measured as 4.4x trimming and 3.2x Zstandard compression.
 ## Why no build tools
 
 Because none of them are load-bearing. An APK is a ZIP with a particular index,
-a DEX file, a binary XML manifest, some ELF64 shared objects, and a signature
-block. Every one of those is a documented byte format. The SDKs are convenient,
-not necessary, and once you drop them the build stops depending on a machine's
-installed state.
+a binary XML manifest, native libraries, optional DEX, and a signature block.
+Every one of those is a documented byte format. This preview deliberately has
+no DEX. The SDKs are convenient, not necessary, and once you drop them the
+build stops depending on a machine's installed state.
 
 What replaces them is provenance. Every input is pinned by SHA-256 and verified
 before it is parsed:
@@ -123,7 +136,7 @@ Each step runs its dependencies first, so `-Step 9` is a full build.
 | 1 | Verify pinned specifications against their digests and upstream addresses |
 | 2 | Acquire and hash the pinned NuGet packages |
 | 3 | Inspect and classify every payload in those packages |
-| 4 | Select the 91-assembly payload; re-emit ReadyToRun images as IL-only |
+| 4 | Select the 102-assembly payload; re-emit ReadyToRun images as IL-only |
 | 5 | Emit and verify the assembly store |
 | 6 | Wrap the store in an ELF library; emit `libpwsh-host.so` and `libpsl-native.so` |
 | 7 | Emit the binary `AndroidManifest.xml` |
@@ -154,6 +167,7 @@ ABI's control-flow rules.
 re-emitted IL-only: its IL, field data, metadata and resources are kept, its
 native code is dropped, and its method and field addresses are rewritten. The
 store serves the images in place and the JIT compiles what runs.
+
 ## Layout
 
 ```
@@ -163,14 +177,16 @@ lib/manifest.json the root provenance manifest; setup.ps1 holds only its digest
 ROADMAP.md        where the project is going, gate by gate
 docs/DEVELOPER.md decisions, proofs, architecture targets, testing
 scripts/          the frozen CellCanvas workload, its reference inventory, device probes
-modules/          AndroidCanvas.psm1: draw with Android Canvas from PowerShell (JNI, NDK)
+modules/          console model; Android Canvas binding from PowerShell (JNI, NDK)
+src/addons/       optional host-side capabilities; inert until separately admitted
 tools/            device script runner (run-as, no rebuild); payload closure probe; pre-push scan
 .githooks/        pre-push hook (git config core.hooksPath .githooks)
 ```
 
-The only file the build writes inside the repository is the signed APK. It
-fails if anything else in the repository changed during a run, and it ends by
-listing every file it wrote with its SHA-512.
+By default, the only file the build writes inside the repository is the signed
+APK under `build\`. With `-KeepIntermediates`, its intermediates are written
+there too. The build fails if anything outside its confirmed write plan changes
+during a run, and it ends by listing every file it wrote with its SHA-512.
 
 The signed APK is written to `build\dev.mansfieldplumbing.pwsh.apk` (the
 Android package name). `build\` is the only place inside the repository the
@@ -197,10 +213,11 @@ no other contributors.
 
 ## Disclaimer
 
-Pwsh is an independent project. Neither Pwsh nor its author is affiliated with,
-endorsed by, or sponsored by Microsoft Corporation. PowerShell, .NET and
-related names are trademarks of Microsoft; Android is a trademark of Google LLC.
-They are used here only to describe what this project builds and runs on.
+Pwsh is an independent project and is neither affiliated with, nor authorized,
+sponsored, or approved by Microsoft Corporation. Microsoft, .NET and PowerShell
+are trademarks of the Microsoft group of companies. Android is a trademark of
+Google LLC. All other trademarks are the property of their respective owners.
+The names are used here only to describe what this project builds and runs on.
 
 The packages `setup.ps1` downloads, including the .NET runtime and PowerShell,
 are published by Microsoft and remain under their own licenses.

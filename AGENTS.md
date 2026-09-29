@@ -170,7 +170,7 @@ only when that group's evidence exists. Name the source for every new fact.
   reproduce bytes proven on hardware. Do not make them agree as part of any
   other change.
 - The payload is the names in `lib/minimal-assembly-order.txt`, pinned
-  by digest; its length (91) is the assembly count every step checks.
+  by digest; its current length (102) is the assembly count every step checks.
 - `libpwsh-host.so` (x86-64, arm64, and arm32 in
   Thumb-2)
   starts CoreCLR: `DT_NEEDED` libc, liblog, libcoreclr and the store library;
@@ -204,10 +204,12 @@ only when that group's evidence exists. Name the source for every new fact.
   `debuggable`, which the admission check enforces.
 - The NativeActivity APK packages the emitted `libpsl-native.so`, so CoreCLR's
   default native probing finds it in the APK's library directory.
-- The payload has no cmdlet modules (`Microsoft.PowerShell.Commands.*`), so
-  `Get-ChildItem` and `Get-Process` are absent, and no Roslyn
-  (`Microsoft.CodeAnalysis.*`), so `Add-Type -TypeDefinition` and
-  `-MemberDefinition` cannot work on device.
+- The current build candidate includes and imports the Utility, Management and
+  Security command assemblies from the in-memory store. Its arm64 build gate
+  passes; command execution is not established until the x86-64, arm64 and
+  arm32 device receipts exist. Roslyn (`Microsoft.CodeAnalysis.*`) remains
+  absent, so `Add-Type -TypeDefinition` and `-MemberDefinition` cannot work on
+  device.
 
 ### Independently cross-checked (implementations this repository did not write)
 
@@ -377,9 +379,9 @@ only when that group's evidence exists. Name the source for every new fact.
   (`WindowInsets.Type.systemBars`, S23 portrait 98 px top, 45 px bottom), and
   pinch changes the text size and reflows the grid within the visible area:
   89 grid sizes from 63x66 to 25x26 cells, no module error, process alive.
-- The current payload contains no cmdlet modules, so commands such as
-  `Join-Path` and `Write-Error` are unavailable in this `CreateDefault2`
-  runspace. Profile fixtures use the language and .NET only.
+- The 2026-09-27 console receipts used the preceding 91-image payload without
+  cmdlet modules, so their profile fixtures use the language and .NET only.
+  They do not prove commands in the current 102-image candidate.
 - During those runs SMA also asked the probe for
   `System.Management.Automation.dll` by its full path under the app's files
   directory. The probe has no entry by path, so it declined; execution

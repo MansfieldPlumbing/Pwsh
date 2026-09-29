@@ -12,7 +12,7 @@ proven until `ROADMAP.md` names a gate and a receipt for it.
   bus, input produced in its own runspace, every queued event drained before
   one render, a dirty flag, a cell grid, and output emitted only where the
   format changes.
-- `System.ConsoleEngine.ts` (an AI Studio terminal prototype) has the console
+- `System.ConsoleEngine.ts` (an external terminal prototype) has the console
   model: a transcript of entries tagged by PowerShell stream, a line editor
   with caret, selection and IME composition, reflow by relayout at the current
   width, packed cells, and a renderer that repaints only changed cells.

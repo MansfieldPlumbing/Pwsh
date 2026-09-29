@@ -8,12 +8,14 @@ their evidence classes live in `AGENTS.md` (Established facts) and
 ## Product boundary
 
 Pwsh turns a PowerShell script into an Android app and owns every byte in
-between. `setup.ps1` emits the IL, DEX, manifest, ELF libraries, machine code
-and signed APK from pinned, hash-verified inputs. On the device an owned native
-host starts CoreCLR and runs PowerShell; Android is reached through its C APIs
-or JNI bound from pinned headers. Applications are PowerShell scripts.
+between. `setup.ps1` emits the IL, manifest, ELF libraries, machine code and
+signed APK from pinned, hash-verified inputs. The current preview deliberately
+contains no DEX; the fixed Java subclasses planned below will be emitted when
+their gates are ready. On the device an owned native host starts CoreCLR and
+runs PowerShell; Android is reached through its C APIs or JNI bound from pinned
+headers. Applications are PowerShell scripts.
 
-Ship versions are locked: PowerShell 7.7.0-preview.5 and .NET
+The current build inputs pin PowerShell 7.7.0-preview.4 and .NET
 11.0.0-rc.1.26425.128.
 
 ## Verified checkpoints
@@ -24,9 +26,9 @@ Ship versions are locked: PowerShell 7.7.0-preview.5 and .NET
   device: CoreCLR from `ANativeActivity_onCreate`, assemblies served in place
   from the aligned store, a `UseCurrentThread` runspace, and the product's
   `Profile.ps1` path. These runs predate the gate 2e host change below.
-- [x] Package pins: 18 packages pinned by id, version, RID and SHA-512; step 2
-  yields the same 14 packages per target, byte for byte, as the resolver it
-  replaced.
+- [x] Package pins: 15 packages pinned by id, version, RID and SHA-512; step 2
+  selects 13 packages for a target, including its one RID-specific runtime
+  pack.
 - [x] All generated output under the git-ignored `build/`; the write guard
   refuses any other repository path.
 - [x] Pre-push scan for secrets, key files and personal data
@@ -45,7 +47,7 @@ Ship versions are locked: PowerShell 7.7.0-preview.5 and .NET
   fills the `NativeActivity` window; `screencap` confirmed the colors
   (`AGENTS.md`, Pixels from PowerShell).
 
-## Next: unblock the build
+## Completed build-unblocking work
 
 - [x] Byte-identical APK proof of the 2026-09-26 refactor (package pins,
   `build/` output, renames, `git-v2` transport): every target under both
@@ -63,7 +65,14 @@ Ship versions are locked: PowerShell 7.7.0-preview.5 and .NET
 
 ## Payload
 
-- [ ] Stage 2 pins (preview.5, rc.1). Owner decision first: the
+- [ ] Command payload candidate: preview.4 Utility, Management and Security
+  packages are pinned; the ordered payload is 102 IL-only images; the host
+  imports the three assemblies from in-memory `Assembly` objects and requires
+  `Get-ChildItem`, `ConvertTo-Json` and `ConvertFrom-SecureString` before the
+  profile. The arm64 build and store gates pass. Run the import and representative
+  commands on x86-64, arm64 and arm32 before checking this item.
+- [ ] Candidate payload refresh to PowerShell preview.5. Owner decision first:
+  the
   `Microsoft.PowerShell.SDK` package or SMA plus the Utility, Management and
   Security packages.
 - [ ] Reconcile `docs/assembly-audit.md` with
@@ -226,3 +235,6 @@ tick or polling loops.
 - [ ] Numbers measured on hardware and published: cold start, time to first
   frame, idle CPU, input-to-photon latency, APK and store size.
 - [ ] A reproducible manifest, SBOM and signed APK, with per-backend receipts.
+- [ ] Generate the applicable third-party notices from the pinned package and
+  source licenses; include them in the release bundle and verify their release
+  identity.

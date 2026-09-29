@@ -1,6 +1,11 @@
 # Xamarin inventory
 
-Xamarin (.NET for Android) currently provides two different things:
+> Historical migration inventory. It describes the Xamarin baseline before
+> .NET for Android was removed on 2026-09-26. Present-tense statements below
+> refer to that baseline; current status lives in `README.md`, `ROADMAP.md` and
+> `AGENTS.md`.
+
+Xamarin (.NET for Android) provided two different things:
 application capabilities and bootstrap infrastructure. Most of the bootstrap
 infrastructure should be deleted, not reimplemented. Only application
 capabilities observed in execution are candidates for replacement.
@@ -112,6 +117,7 @@ Passed on all three targets with `-Admission NativeActivity`: the framework
 `GATE1 ANativeActivity_onCreate` on the main thread (Samsung Galaxy S23 arm64,
 x86_64 emulator, arm32 device). The APK has four entries and no application DEX,
 no `MonoRuntimeProvider`, and no Xamarin libraries.
+
 ## Gate 2a result
 
 Passed on the x86_64 emulator and on an arm64 physical device (Samsung Galaxy
