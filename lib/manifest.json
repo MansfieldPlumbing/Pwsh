@@ -120,9 +120,9 @@
     },
     {
       "path": "ic_launcher.png",
-      "sha256": "10AEE66835F938E8E7548F186B49810F5F4C53D3EAB32AD87EF87C9A8C8722D3",
+      "sha256": "586531483E017A9408ECCC17E91798AAD0410C84FFDC1ADE2093580A631ABA50",
       "url": null,
-      "role": "Adaptive launcher foreground, 2048x2048 transparent PNG. Packaged at full source size behind the emitted adaptive-icon resource."
+      "role": "Adaptive launcher foreground, 432x432 (108 dp at xxxhdpi) 32-color palette PNG with alpha. Packaged at source size behind the emitted adaptive-icon resource."
     },
     {
       "path": "android-native-producer.contract.json",

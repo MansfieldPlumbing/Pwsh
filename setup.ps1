@@ -605,7 +605,7 @@ $script:KeepPackageCache = -not $DeletePackages -and $Packages -eq 'Folder'
 # any of them fails verification before a single byte is parsed.
 $script:RepositoryLibBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/fea685e5769999ef969a988bb63686cd1fd73d81/lib/'
 $script:LibRootManifestPath = 'manifest.json'
-$script:LibRootManifestSha256 = 'AD71EDB7BF2BA77023BE88853F88E7AF022D403AF5529BC7ACC9DA69448C15EC'
+$script:LibRootManifestSha256 = '7B97D042A0C529E9C17BDF6695676AEBF6F290937A505B20718FA551D299E0D1'
 $script:LibSourceManifest = $null
 
 function Get-LibFileBytes {
