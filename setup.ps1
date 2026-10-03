@@ -46,6 +46,12 @@ param(
     # files directory. Without it the manifest is the release one, unchanged.
     [switch] $Debuggable,
 
+    # What the host starts (docs/console-host.md).
+    # Profile:     Profile.ps1 from the app's files directory (gate 2d).
+    # ConsoleHost: the shipped console (scripts/console/Start-Console.ps1),
+    #              which then runs Profile.ps1 inside the console session.
+    [ValidateSet('Profile', 'ConsoleHost')]
+    [string] $Startup = 'Profile',
 
     # Minimal:  Assembly set, IL only, no ReadyToRun (R2R) code.
     # Standard: every runtime assembly the packages ship, R2R code included.
@@ -110,6 +116,7 @@ for ($i = 0; $i -lt $LongArguments.Count; $i++) {
         'packages'                              { $Packages = (Get-Culture).TextInfo.ToTitleCase((& $value).ToLowerInvariant()) }
         'debug'                                 { $Debug = $true }
         'payload'                               { $Payload = & $value }
+        'startup'                               { $Startup = (Get-Culture).TextInfo.ToTitleCase((& $value).ToLowerInvariant()).Replace('Consolehost', 'ConsoleHost') }
         'architecture'                          { $Architecture = & $value }
         'cachedirectory'                        { $CacheDirectory = & $value }
         'outputdirectory'                       { $OutputDirectory = & $value }
@@ -122,6 +129,11 @@ for ($i = 0; $i -lt $LongArguments.Count; $i++) {
             exit 2
         }
     }
+}
+
+if ($Startup -cnotin 'Profile', 'ConsoleHost') {
+    Write-Host "[FAIL] -Startup must be Profile or ConsoleHost, not '$Startup'." -ForegroundColor Red
+    exit 2
 }
 
 # One literal record per target. The facade name is never used as a path; it
@@ -209,6 +221,11 @@ OPTIONS
                             Writes nothing. -Aapt2Path <aapt2.exe> adds an
                             independent parse (one temporary file, deleted).
   -Debug                    Write the intermediates (as -KeepIntermediates).
+  -Startup <Profile|ConsoleHost>
+                            Profile (default): the host runs Profile.ps1
+                            from the app's files directory. ConsoleHost: the
+                            host starts the shipped console from the APK's
+                            scripts, which runs Profile.ps1 inside it.
   -Payload <Minimal|Standard|SDK>
                             Minimal: the pinned assembly set, IL only, no
                             ReadyToRun (R2R) code. Standard: every runtime
@@ -1634,6 +1651,9 @@ function Set-DeterministicMvid {
 # Methods compiled from expression trees during this build.
 $script:PersistedMethods = [System.Collections.Generic.List[object]]::new()
 
+# -Startup ConsoleHost script assets, read once by Get-StartupScriptAssets.
+$script:StartupScriptAssets = $null
+
 # ==============================================================================
 # Expression kit
 #
@@ -2161,6 +2181,149 @@ function New-ManagedHostAssemblyBytes {
                     (New-ClrCall $stateShell (Get-ExactMethod ([powershell]) 'AddScript' @([string])) @((New-ClrConstant '[int]$global:Gate2d' ([string])))),
                     (& $log $infoPriority (New-StaticCall $concat @((New-ClrConstant 'GATE2D profile state 0x' ([string])), (& $hexText $stateValue)))))),
                 (& $mark 'GATE2D START_MISSING')))
+        $startPhase = $profilePhase
+        $appDirVar = [Linq.Expressions.Expression]::Variable([string], 'appScripts')
+        $userDirVar = [Linq.Expressions.Expression]::Variable([string], 'userScripts')
+        $markerVar = [Linq.Expressions.Expression]::Variable([string], 'assetMarker')
+        if ($Startup -eq 'ConsoleHost') {
+            # docs/console-host.md: copy the APK's assets/scripts into
+            # PWSH_APP_SCRIPTS when the asset set changed, put PWSH_USER_SCRIPTS
+            # then PWSH_APP_SCRIPTS on PATH, and run the shipped start script.
+            # AAssetManager calls: include/android/asset_manager.h at
+            # frameworks/native bfcf7507 (lines 78-84, 95, 102, 114, 124, 131,
+            # 156, 175); size_t and off64_t cross as nint and long.
+            $assets = Get-StartupScriptAssets
+            $assetType = $module.DefineType('Dev.MansfieldPlumbing.Pwsh.AndroidAssets',
+                [Reflection.TypeAttributes]'NotPublic,Abstract,Sealed,BeforeFieldInit')
+            $import = { param([string] $Name, [Type] $Return, [Type[]] $Parameters)
+                $m = $assetType.DefinePInvokeMethod($Name, 'libandroid.so',
+                    [Reflection.MethodAttributes]'Public,Static,PinvokeImpl,HideBySig', [Reflection.CallingConventions]::Standard,
+                    $Return, $Parameters, [Runtime.InteropServices.CallingConvention]::Cdecl, [Runtime.InteropServices.CharSet]::Ansi)
+                $m.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)
+                $m }
+            $openDir = & $import 'AAssetManager_openDir' ([IntPtr]) @([IntPtr], [string])
+            $nextName = & $import 'AAssetDir_getNextFileName' ([IntPtr]) @([IntPtr])
+            $closeDir = & $import 'AAssetDir_close' ([void]) @([IntPtr])
+            $openAsset = & $import 'AAssetManager_open' ([IntPtr]) @([IntPtr], [string], [int])
+            $assetLength = & $import 'AAsset_getLength64' ([long]) @([IntPtr])
+            $assetRead = & $import 'AAsset_read' ([int]) @([IntPtr], [byte[]], [IntPtr])
+            $closeAsset = & $import 'AAsset_close' ([void]) @([IntPtr])
+            $assetType.CreateType() | Out-Null
+            $streamingMode = 2   # AASSET_MODE_STREAMING
+
+            # ExtractScripts(manager, directory): every file of assets/scripts
+            # written to directory; returns the count. Throws on a missing
+            # directory, an unopenable asset or a short read.
+            $mgr = [Linq.Expressions.Expression]::Parameter([IntPtr], 'manager')
+            $dest = [Linq.Expressions.Expression]::Parameter([string], 'directory')
+            $dirVar = [Linq.Expressions.Expression]::Variable([IntPtr], 'dir')
+            $namePtrVar = [Linq.Expressions.Expression]::Variable([IntPtr], 'namePtr')
+            $nameVar = [Linq.Expressions.Expression]::Variable([string], 'name')
+            $assetVar = [Linq.Expressions.Expression]::Variable([IntPtr], 'asset')
+            $bytesVar = [Linq.Expressions.Expression]::Variable([byte[]], 'bytes')
+            $chunkVar = [Linq.Expressions.Expression]::Variable([byte[]], 'chunk')
+            $readVar = [Linq.Expressions.Expression]::Variable([int], 'read')
+            $offsetVar = [Linq.Expressions.Expression]::Variable([int], 'offset')
+            $countVar = [Linq.Expressions.Expression]::Variable([int], 'count')
+            $zero = [Linq.Expressions.Expression]::Default([IntPtr])
+            $fail = { param([Linq.Expressions.Expression] $Message)
+                [Linq.Expressions.Expression]::Throw((New-ClrNew ([InvalidOperationException].GetConstructor([type[]]@([string]))) @($Message))) }
+            $namesDone = [Linq.Expressions.Expression]::Label('namesDone')
+            $readDone = [Linq.Expressions.Expression]::Label('readDone')
+            $readLoop = [Linq.Expressions.Expression]::Loop((New-ClrBlock @() @(
+                [Linq.Expressions.Expression]::IfThen(
+                    [Linq.Expressions.Expression]::GreaterThanOrEqual($offsetVar, [Linq.Expressions.Expression]::ArrayLength($bytesVar)),
+                    [Linq.Expressions.Expression]::Break($readDone)),
+                (New-ClrAssign $readVar (New-StaticCall $assetRead @($assetVar, $chunkVar,
+                    (New-ClrNew ([IntPtr].GetConstructor([type[]]@([int]))) @([Linq.Expressions.Expression]::ArrayLength($chunkVar)))))),
+                [Linq.Expressions.Expression]::IfThen(
+                    [Linq.Expressions.Expression]::LessThanOrEqual($readVar, (New-ClrConstant 0 ([int]))),
+                    [Linq.Expressions.Expression]::Break($readDone)),
+                (New-StaticCall (Get-ExactMethod ([Buffer]) 'BlockCopy' @([Array], [int], [Array], [int], [int])) @(
+                    $chunkVar, (New-ClrConstant 0 ([int])), $bytesVar, $offsetVar, $readVar)),
+                (New-ClrAssign $offsetVar ([Linq.Expressions.Expression]::Add($offsetVar, $readVar))))), $readDone)
+            $nameLoop = [Linq.Expressions.Expression]::Loop((New-ClrBlock @() @(
+                (New-ClrAssign $namePtrVar (New-StaticCall $nextName @($dirVar))),
+                [Linq.Expressions.Expression]::IfThen([Linq.Expressions.Expression]::Equal($namePtrVar, $zero), [Linq.Expressions.Expression]::Break($namesDone)),
+                (New-ClrAssign $nameVar (New-StaticCall (Get-ExactMethod ([Runtime.InteropServices.Marshal]) 'PtrToStringUTF8' @([IntPtr])) @($namePtrVar))),
+                (New-ClrAssign $assetVar (New-StaticCall $openAsset @($mgr,
+                    (New-StaticCall $concat @((New-ClrConstant 'scripts/' ([string])), $nameVar)),
+                    (New-ClrConstant $streamingMode ([int]))))),
+                [Linq.Expressions.Expression]::IfThen([Linq.Expressions.Expression]::Equal($assetVar, $zero),
+                    (& $fail (New-StaticCall $concat @((New-ClrConstant 'Cannot open asset scripts/' ([string])), $nameVar)))),
+                (New-ClrAssign $bytesVar ([Linq.Expressions.Expression]::NewArrayBounds([byte], [Linq.Expressions.Expression[]]@(
+                    [Linq.Expressions.Expression]::Convert((New-StaticCall $assetLength @($assetVar)), [int]))))),
+                (New-ClrAssign $offsetVar (New-ClrConstant 0 ([int]))),
+                $readLoop,
+                (New-StaticCall $closeAsset @($assetVar)),
+                [Linq.Expressions.Expression]::IfThen(
+                    [Linq.Expressions.Expression]::NotEqual($offsetVar, [Linq.Expressions.Expression]::ArrayLength($bytesVar)),
+                    (& $fail (New-StaticCall $concat @((New-ClrConstant 'Short read of asset scripts/' ([string])), $nameVar)))),
+                (New-StaticCall (Get-ExactMethod ([IO.File]) 'WriteAllBytes' @([string], [byte[]])) @(
+                    (New-StaticCall (Get-ExactMethod ([IO.Path]) 'Combine' @([string], [string])) @($dest, $nameVar)), $bytesVar)),
+                (New-ClrAssign $countVar ([Linq.Expressions.Expression]::Add($countVar, (New-ClrConstant 1 ([int]))))))), $namesDone)
+            $extract = Add-PersistedMethod $nativeHostType 'ExtractScripts' ([Reflection.MethodAttributes]'Private,Static,HideBySig') ([int]) @([IntPtr], [string]) `
+                ([Func[IntPtr, string, int]]) @($mgr, $dest) (New-ClrBlock @($dirVar, $namePtrVar, $nameVar, $assetVar, $bytesVar, $chunkVar, $readVar, $offsetVar, $countVar) @(
+                    (New-ClrAssign $dirVar (New-StaticCall $openDir @($mgr, (New-ClrConstant 'scripts' ([string]))))),
+                    [Linq.Expressions.Expression]::IfThen([Linq.Expressions.Expression]::Equal($dirVar, $zero),
+                        (& $fail (New-ClrConstant 'The APK has no assets/scripts directory.' ([string])))),
+                    (New-ClrAssign $chunkVar ([Linq.Expressions.Expression]::NewArrayBounds([byte], [Linq.Expressions.Expression[]]@((New-ClrConstant 65536 ([int])))))),
+                    (New-ClrAssign $countVar (New-ClrConstant 0 ([int]))),
+                    $nameLoop,
+                    (New-StaticCall $closeDir @($dirVar)),
+                    $countVar))
+
+            $assetManagerOffset = Get-NativeActivityFieldOffset -Field 'assetManager' -PointerSize ($script:Target.ElfClass / 8)
+            $combine = Get-ExactMethod ([IO.Path]) 'Combine' @([string], [string])
+            $setEnv = Get-ExactMethod ([Environment]) 'SetEnvironmentVariable' @([string], [string])
+            $createDir = Get-ExactMethod ([IO.Directory]) 'CreateDirectory' @([string])
+            $startPhase = New-ClrBlock @() @(
+                (New-ClrAssign $filesVar (New-StaticCall (Get-ExactMethod ([IO.Path]) 'TrimEndingDirectorySeparator' @([string])) @((New-ClrProperty $null (Get-ExactProperty ([AppContext]) 'BaseDirectory'))))),
+                (New-ClrAssign $appDirVar (New-StaticCall $combine @($filesVar, (New-ClrConstant 'app-scripts' ([string]))))),
+                (New-ClrAssign $userDirVar (New-StaticCall $combine @($filesVar, (New-ClrConstant 'scripts' ([string]))))),
+                (New-ClrAssign $markerVar (New-StaticCall $combine @($appDirVar, (New-ClrConstant '.assets' ([string]))))),
+                [Linq.Expressions.Expression]::IfThen(
+                    [Linq.Expressions.Expression]::Not([Linq.Expressions.Expression]::AndAlso(
+                        (New-StaticCall (Get-ExactMethod ([IO.File]) 'Exists' @([string])) @($markerVar)),
+                        (New-StaticCall (Get-ExactMethod ([string]) 'Equals' @([string], [string])) @(
+                            (New-StaticCall (Get-ExactMethod ([IO.File]) 'ReadAllText' @([string])) @($markerVar)),
+                            (New-ClrConstant $assets.Sha256 ([string])))))),
+                    (New-ClrBlock @() @(
+                        [Linq.Expressions.Expression]::IfThen(
+                            (New-StaticCall (Get-ExactMethod ([IO.Directory]) 'Exists' @([string])) @($appDirVar)),
+                            (New-StaticCall (Get-ExactMethod ([IO.Directory]) 'Delete' @([string], [bool])) @($appDirVar, (New-ClrConstant $true ([bool]))))),
+                        (New-StaticCall $createDir @($appDirVar)),
+                        (& $log $infoPriority (New-StaticCall $concat @((New-ClrConstant 'CONSOLEHOST copied script assets: ' ([string])),
+                            (New-ClrCall (New-StaticCall $extract @(
+                                (New-StaticCall (Get-ExactMethod ([Runtime.InteropServices.Marshal]) 'ReadIntPtr' @([IntPtr], [int])) @($nativeActivity, (New-ClrConstant $assetManagerOffset ([int])))),
+                                $appDirVar)) (Get-ExactMethod ([int]) 'ToString' @()))))),
+                        (New-StaticCall (Get-ExactMethod ([IO.File]) 'WriteAllText' @([string], [string])) @($markerVar, (New-ClrConstant $assets.Sha256 ([string]))))))),
+                (New-StaticCall $createDir @($userDirVar)),
+                (New-StaticCall $setEnv @((New-ClrConstant 'PWSH_APP_SCRIPTS' ([string])), $appDirVar)),
+                (New-StaticCall $setEnv @((New-ClrConstant 'PWSH_USER_SCRIPTS' ([string])), $userDirVar)),
+                (New-StaticCall $setEnv @((New-ClrConstant 'PATH' ([string])), (New-StaticCall (Get-ExactMethod ([string]) 'Concat' @([string[]])) @(
+                    [Linq.Expressions.Expression]::NewArrayInit([string], [Linq.Expressions.Expression[]]@(
+                        $userDirVar, (New-ClrConstant ':' ([string])), $appDirVar, (New-ClrConstant ':' ([string])),
+                        [Linq.Expressions.Expression]::Coalesce(
+                            (New-StaticCall (Get-ExactMethod ([Environment]) 'GetEnvironmentVariable' @([string])) @((New-ClrConstant 'PATH' ([string])))),
+                            (New-ClrConstant '' ([string]))))))))),
+                (New-ClrAssign $profileVar (New-StaticCall $combine @($appDirVar, (New-ClrConstant 'Start-Console.ps1' ([string]))))),
+                (New-ClrAssign $startCommand (New-ClrCall (New-ClrProperty $sessionState (Get-ExactProperty ([Management.Automation.Runspaces.SessionStateProxy]) 'InvokeCommand')) `
+                    (Get-ExactMethod ([Management.Automation.CommandInvocationIntrinsics]) 'GetCommand' @([string], [Management.Automation.CommandTypes])) @(
+                        $profileVar, (New-ClrConstant ([Management.Automation.CommandTypes]::ExternalScript) ([Management.Automation.CommandTypes]))))),
+                (New-ClrAssign $profileShell (New-StaticCall (Get-ExactMethod ([powershell]) 'Create' @($runspaceType)) @($runspaceVar))),
+                (New-ClrCall $profileShell (Get-ExactMethod ([powershell]) 'AddCommand' @([Management.Automation.CommandInfo])) @($startCommand)),
+                (& $mark 'CONSOLEHOST START_INVOKE_BEGIN'),
+                (New-ClrCall $profileShell $invoke[0]),
+                (& $mark 'CONSOLEHOST START_INVOKE_END'),
+                [Linq.Expressions.Expression]::IfThen(
+                    (New-ClrProperty $profileShell (Get-ExactProperty ([powershell]) 'HadErrors')),
+                    [Linq.Expressions.Expression]::Throw((New-ClrNew ([InvalidOperationException].GetConstructor([type[]]@([string]))) @(
+                        [Linq.Expressions.Expression]::Condition(
+                            [Linq.Expressions.Expression]::GreaterThan((New-ClrProperty $profileErrors (Get-ExactProperty $errorCollection 'Count')), (New-ClrConstant 0 ([int]))),
+                            (New-ClrCall $firstError (Get-ExactMethod ([Management.Automation.ErrorRecord]) 'ToString' @())),
+                            (New-ClrConstant 'Start-Console.ps1 reported one or more PowerShell errors.' ([string]))))))))
+        }
         # CreateDefault2 imports only Microsoft.PowerShell.Core. The three
         # command assemblies are admitted by the store, loaded by identity
         # through the external probe, and imported from Assembly objects so
@@ -2234,12 +2397,13 @@ function New-ManagedHostAssemblyBytes {
             (& $log $infoPriority (New-StaticCall (Get-ExactMethod ([string]) 'Concat' @([string], [string])) @(
                 (New-ClrConstant 'GATE2C script result 0x' ([string])),
                 (New-ClrCall $resultVar (Get-ExactMethod ([int]) 'ToString' @([string])) @((New-ClrConstant 'x8' ([string]))))))),
-            $profilePhase,
+            $startPhase,
             $resultVar)
         # Run holds every SMA reference. Admit references none, so a load or
         # JIT failure of Run surfaces as an exception inside Admit's try.
         $run = Add-PersistedMethod $nativeHostType 'Run' ([Reflection.MethodAttributes]'Private,Static,HideBySig') ([int]) @([IntPtr]) `
-            ([Func[IntPtr,int]]) @($nativeActivity) (New-ClrBlock @($issVar, $runspaceVar, $shellVar, $resultVar, $filesVar, $profileVar, $moduleShell, $profileShell, $stateShell, $startCommand) @($try))
+            ([Func[IntPtr,int]]) @($nativeActivity) (New-ClrBlock (@($issVar, $runspaceVar, $shellVar, $resultVar, $filesVar, $profileVar, $moduleShell, $profileShell, $stateShell, $startCommand) +
+                $(if ($Startup -eq 'ConsoleHost') { @($appDirVar, $userDirVar, $markerVar) } else { @() })) @($try))
         # RunPowerShell returns the HResult of any exception, and the native
         # host logs it. The handler first logs the exception's type and
         # message (not ToString, which pulls in stack-trace machinery), inside
@@ -5097,10 +5261,10 @@ function Get-HostRuntimeContractLayout {
 }
 
 function Get-NativeActivityFieldOffset {
-    # The offset of a field of ANativeActivity (lib/native_activity.h). Every
-    # member before the ones read here is a pointer: struct and JavaVM, JNIEnv
-    # pointers, and jobject, a JNI reference the size of a pointer (jni.h, not
-    # pinned). Anything else before the field throws.
+    # The offset of a field of ANativeActivity (lib/native_activity.h), with
+    # C natural alignment: pointers and jobject (a JNI reference the size of a
+    # pointer, jni.h) are PointerSize wide and aligned; int32_t is 4 wide and
+    # aligned. Any other member type before the field throws.
     param([Parameter(Mandatory)][string] $Field, [Parameter(Mandatory)][ValidateSet(4, 8)][int] $PointerSize)
     $text = [System.Text.Encoding]::UTF8.GetString((Import-LibSourceBytes -Path 'native_activity.h'))
     $body = [regex]::Match($text, 'typedef struct ANativeActivity \{(.*?)\} ANativeActivity;', 'Singleline')
@@ -5109,9 +5273,12 @@ function Get-NativeActivityFieldOffset {
     foreach ($line in ($body.Groups[1].Value -split "`n")) {
         $member = [regex]::Match($line, '^\s*(?<type>[A-Za-z_][\w\s]*?\*?)\s*(?<name>\w+);\s*$')
         if (-not $member.Success) { continue }
+        $type = $member.Groups['type'].Value.Trim()
+        $size = if ($type -match '\*$' -or $type -ceq 'jobject') { $PointerSize } elseif ($type -ceq 'int32_t') { 4 } else {
+            throw "ANativeActivity.$($member.Groups['name'].Value), before or at $Field, has unsupported type '$type'." }
+        $offset = ($offset + $size - 1) -band -$size
         if ($member.Groups['name'].Value -ceq $Field) { return $offset }
-        if ($member.Groups['type'].Value -notmatch '\*$' -and $member.Groups['type'].Value.Trim() -cne 'jobject') { throw "ANativeActivity.$($member.Groups['name'].Value), before $Field, is not a pointer." }
-        $offset += $PointerSize
+        $offset += $size
     }
     throw "ANativeActivity has no field '$Field'."
 }
@@ -6321,6 +6488,43 @@ function Test-ApkArchive {
     }
 }
 
+function Get-StartupScriptAssets {
+    # -Startup ConsoleHost: the scripts the APK carries under assets/scripts/,
+    # copied by the host into PWSH_APP_SCRIPTS (docs/work-optional-scripts.md):
+    # the console start script, the two modules it imports, and every command
+    # bundle under scripts/commands. Flat by file name; a duplicate name fails.
+    # Hash: SHA-256 over each name, a NUL, the length and the bytes, in ordinal
+    # name order. The host compares it to decide whether to copy again.
+    if ($script:StartupScriptAssets) { return $script:StartupScriptAssets }
+    $root = $script:RepositoryRoot
+    $files = [System.Collections.Generic.List[string]]::new()
+    $files.Add((Join-Path $root 'scripts/console/Start-Console.ps1'))
+    $files.Add((Join-Path $root 'modules/Console.psm1'))
+    $files.Add((Join-Path $root 'modules/AndroidCanvas.psm1'))
+    foreach ($bundle in Get-ChildItem -LiteralPath (Join-Path $root 'scripts/commands') -Directory -ErrorAction SilentlyContinue | Sort-Object Name) {
+        foreach ($file in Get-ChildItem -LiteralPath $bundle.FullName -File -Filter '*.ps1' | Sort-Object Name) { $files.Add($file.FullName) }
+    }
+    $byName = [System.Collections.Generic.SortedDictionary[string, byte[]]]::new([System.StringComparer]::Ordinal)
+    foreach ($path in $files) {
+        if (-not [System.IO.File]::Exists($path)) { throw "Startup script asset missing: $path" }
+        $name = [System.IO.Path]::GetFileName($path)
+        if ($byName.ContainsKey($name)) { throw "Two startup script assets are named '$name'." }
+        $byName[$name] = [System.IO.File]::ReadAllBytes($path)
+    }
+    $hash = [System.Security.Cryptography.IncrementalHash]::CreateHash([System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    try {
+        foreach ($entry in $byName.GetEnumerator()) {
+            $hash.AppendData([System.Text.Encoding]::UTF8.GetBytes($entry.Key + [char]0))
+            $hash.AppendData([BitConverter]::GetBytes([int64]$entry.Value.Length))
+            $hash.AppendData($entry.Value)
+        }
+        $digest = [Convert]::ToHexString($hash.GetHashAndReset())
+    }
+    finally { $hash.Dispose() }
+    $script:StartupScriptAssets = [pscustomobject]@{ Files = $byName; Sha256 = $digest }
+    $script:StartupScriptAssets
+}
+
 function Invoke-AssembleStep {
 
     $abi = $script:Target.Abi
@@ -6352,6 +6556,13 @@ function Invoke-AssembleStep {
         & $add "lib/$abi/$name" (Get-NativePayload -PackageId $runtimePack -EntryPath "runtimes/$($script:Target.Rid)/native/$name") $false 0
     }
 
+    $assetNote = ''
+    if ($Startup -eq 'ConsoleHost') {
+        $assets = Get-StartupScriptAssets
+        foreach ($asset in $assets.Files.GetEnumerator()) { & $add "assets/scripts/$($asset.Key)" ([byte[]]$asset.Value) $false 0 }
+        $assetNote = " ConsoleHost startup: $($assets.Files.Count) script assets, set SHA-256 $($assets.Sha256)."
+    }
+
     $apkBytes = New-ApkArchive -Entries $entries
     $report = Test-ApkArchive -Apk $apkBytes -Entries $entries
     Assert-NativeAdmissionApk -EntryNames $report.Names
@@ -6372,10 +6583,11 @@ function Invoke-AssembleStep {
         Sha256 = $apkHash
     }
 
-    Write-Host ('[PASS] Step 8 complete: Pwsh-unsigned.apk assembled from {0} entries into {1} bytes, every entry read back byte-identical by an independent reader. SHA-256 {2}' -f
+    Write-Host ('[PASS] Step 8 complete: Pwsh-unsigned.apk assembled from {0} entries into {1} bytes, every entry read back byte-identical by an independent reader. SHA-256 {2}{3}' -f
         $report.EntryCount,
         $report.Size,
-        $apkHash) -ForegroundColor Green
+        $apkHash,
+        $assetNote) -ForegroundColor Green
 }
 
 function Get-LengthPrefixed {
