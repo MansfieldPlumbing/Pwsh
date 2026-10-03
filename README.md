@@ -24,19 +24,33 @@ addresses.
 
 ## Status
 
-Steps 1 through 9 pass. The current arm64 command-payload candidate is a
-21.31 MB unsigned APK with no DEX and no .NET for Android: the framework's
+Steps 1 through 9 pass for the current x86-64 development candidate: a
+18,244,452-byte signed, debuggable APK with no DEX and no .NET for Android. The framework's
 `android.app.NativeActivity` loads the emitted `libpwsh-host.so`, which starts
-CoreCLR, serves 102 IL-only assemblies in place from the emitted store, opens a
+CoreCLR, serves the requested startup images from a 104-assembly IL-only store, opens a
 PowerShell runspace on the main thread and runs `Profile.ps1`. The preceding
 91-image payload is proven on the x86_64 emulator, a Samsung Galaxy S23 (arm64)
-and an onn 4K Plus (arm32); the 102-image command payload still needs that
-three-backend device gate.
+and an onn 4K Plus (arm32). The 102-image command candidate failed Utility
+import on the emulator; the current candidate adds its pinned MarkdownRender
+and Markdig dependencies. It passes the [x86-64 hardware Canvas probe](docs/receipt-hardware-canvas-x64.md),
+including filesystem/JSON commands and extended liveness with telemetry disabled.
+The current command payload still needs arm64/arm32 receipts and cryptographic
+command execution. Hardware Canvas remains a diagnostic script; the managed
+UI, installed startup payload and IME are subsequent gates.
 
+The artifact above is the retained 104-image diagnostic build. The current source
+payload is 98 images; dependencies leave it in the order of step 2 of
+[the implementation plan](docs/implementation-plan.md), each only when its
+replacement passes. It is not yet a replacement release.
+
+The APK preview has an explicit [release finish line](ROADMAP.md#release-apk-preview-finish-line):
+a working installed console, an independent retained graphical pane, Android
+text input, profile recovery, and matching release-artifact receipts. Full TUI
+compatibility and optional native application hosting are later capabilities.
 | Emitted | Proven by |
 | --- | --- |
 | IL-only assembly store | CoreCLR loaded CoreLib, SMA and the startup set in place from the mapped store |
-| `libassembly-store.so` | the host resolved the store symbol and served every image from it |
+| `libassembly-store.so` | the host resolved the store symbol and served the requested startup images |
 | `libpwsh-host.so` | `ANativeActivity_onCreate` started CoreCLR; `Admit` returned 0x50575348 |
 | `libpsl-native.so` | SMA's native calls during `Open` resolved |
 | `Dev.MansfieldPlumbing.Pwsh.dll` | `RunPowerShell` opened the runspace and ran `Profile.ps1` |
@@ -63,10 +77,35 @@ Not yet done, stated plainly:
 - **Release metadata** is not complete. The SBOM, applicable third-party
   notices and per-backend release receipts remain release gates.
 
+## Platform support
+
+PowerShell is not released for Android, and .NET treats Android as an
+application platform rather than a PowerShell host, so every backend here is
+this project's own work. The three backends are not equally easy to prove:
+
+| ABI | Proven on | Notes |
+| --- | --- | --- |
+| x86-64 | Android emulator (API 36) | The fastest loop; finds the next boundary first. |
+| arm64 | A physical phone (API 36) | Confirms each gate on real hardware. |
+| arm32 | An onn 4K Plus, Google TV (API 34) | The only arm32 hardware available. Phone-class arm32 is **not tested**: current arm64 phones often ship without 32-bit support, and emulated ARM on an x86-64 image proves the translator, not the hardware. |
+
+Google TV makes arm32 harder than a phone would:
+
+- **Activity re-creation.** Google TV destroys and re-creates activities in a
+  running process far more readily than a phone. The host currently starts
+  CoreCLR on every `ANativeActivity_onCreate`, so a re-creation fails
+  (`coreclr_initialize` 0x80131022); the fix, re-attaching the running session
+  to the new activity, is on the [roadmap](ROADMAP.md) and applies to every ABI.
+- **No touch, no window resize.** Input is a remote (D-pad, Select, Back) and an
+  on-screen keyboard; windows do not resize in normal use. TV receipts check
+  relaunch and re-creation instead of resize.
+- **Slower hardware.** Startup is about 7 s with the IL-only store, and
+  interpreted drawing is slow until the console is lowered to IL.
+
 ## Design
 
 **The build script is inside the thing it builds.** The assemblies `setup.ps1`
-relies on are all among the 102 it ships, because a PowerShell host and an APK
+relies on are all among the 98 it ships, because a PowerShell host and an APK
 builder need the same things:
 
 ```
@@ -83,6 +122,26 @@ run.
 **Scripts are meant to be the application layer.** The planned host starts a
 runspace and runs a start script; a `.ps1` is a feature, not a configuration
 file. Today the activity runs `Profile.ps1` in a runspace it opens at startup (see Status).
+
+## Documentation
+
+Published at [learn.mansfieldplumbing.dev/Pwsh](https://learn.mansfieldplumbing.dev/Pwsh/).
+Status of every item is in [ROADMAP.md](ROADMAP.md); proofs are in
+[docs/receipt-hardware-canvas-x64.md](docs/receipt-hardware-canvas-x64.md) and
+the established facts in [AGENTS.md](AGENTS.md).
+
+| Topic | Document |
+| --- | --- |
+| Startup modes, crash-loop breaker, Recovery, private storage | [docs/console-host.md](docs/console-host.md) |
+| Console core and its 63 conformance vectors | [docs/console-reference.md](docs/console-reference.md) |
+| Text editing: one core, cell and proportional layouts | [docs/editor.md](docs/editor.md) |
+| Start tiles, control surfaces, endpoint tiles and zones, navigation tree | [docs/views-and-tiles.md](docs/views-and-tiles.md) |
+| Commands as scripts on `PATH` | [docs/work-optional-scripts.md](docs/work-optional-scripts.md) |
+| Processes, native bundles, the broker, updates outside a store | [docs/native-extensions.md](docs/native-extensions.md) |
+| Lowering PowerShell to IL, the IL stack check | [docs/lowering.md](docs/lowering.md) |
+| Payload reduction and compatibility stand-ins | [docs/implementation-plan.md](docs/implementation-plan.md) |
+| Working practices | [docs/practices.md](docs/practices.md) |
+| What is published where, and what is never published | [docs/publishing.md](docs/publishing.md) |
 
 ## What this actually is
 
@@ -136,7 +195,7 @@ Each step runs its dependencies first, so `-Step 9` is a full build.
 | 1 | Verify pinned specifications against their digests and upstream addresses |
 | 2 | Acquire and hash the pinned NuGet packages |
 | 3 | Inspect and classify every payload in those packages |
-| 4 | Select the 102-assembly payload; re-emit ReadyToRun images as IL-only |
+| 4 | Select the 98-assembly payload; re-emit ReadyToRun images as IL-only |
 | 5 | Emit and verify the assembly store |
 | 6 | Wrap the store in an ELF library; emit `libpwsh-host.so` and `libpsl-native.so` |
 | 7 | Emit the binary `AndroidManifest.xml` |
