@@ -75,28 +75,22 @@
       "sha512": "D8AE69C763AA128703FF2A159FF804FAB46E22A4088759FC7017E1DEDA1227703CAA72003DD20D2528B97B84F975E655E68A7AFBE6100D9D63EE3490272580B7"
     },
     {
+      "id": "Markdig.Signed",
+      "version": "1.3.2",
+      "rid": null,
+      "sha512": "A2991DD9903822E967F138D6DFC37D149031B63690D0F59175CF86FD34A669F1C35C3FCB65183972BB4193D670A3A5CE5EE19E678D3ABA78DE7D91D096AAF51F"
+    },
+    {
+      "id": "Microsoft.PowerShell.MarkdownRender",
+      "version": "7.2.1",
+      "rid": null,
+      "sha512": "57B690134424ADF02A83C0320E05B0A37809C53C4A978F8083D74262B3778B0F4661EEC41A2F52C4EEC2DA3BEFE296664E710219572E884EEACCFECBBF1537B4"
+    },
+    {
       "id": "Newtonsoft.Json",
       "version": "13.0.4",
       "rid": null,
       "sha512": "6D1FAFF84FF227A83B195DAE5F0D8EAD44A36187E32E438B0BC243E24092DB79AC2DAA672AD7493C1240EF97F01C7FBE12B21F7DE22ACD82132F102EAF82805C"
-    },
-    {
-      "id": "System.CodeDom",
-      "version": "11.0.0-rc.1.26425.128",
-      "rid": null,
-      "sha512": "52E003A0B165130FE5890B119CDFC2742820497FBB7FACBB2F9EC0F70EB8CEF45D8E94E647E1CEFD1BA234F56CF355CAB51D4CAF31FA284A27FF490E79425E06"
-    },
-    {
-      "id": "System.Configuration.ConfigurationManager",
-      "version": "11.0.0-preview.6.26359.118",
-      "rid": null,
-      "sha512": "1B2894859AF31E420CD3CE7766483BABB9E325BFA1B43A0F23D0B55593169F52AFEB9F0E72FD5AF6D0FE59CFBBF8659E8EFBF3CC0A8B5B70E97812BF1C87FED4"
-    },
-    {
-      "id": "System.Diagnostics.EventLog",
-      "version": "11.0.0-preview.6.26359.118",
-      "rid": null,
-      "sha512": "8E93105EA4390E45DDD054DA0F217EFC03C09BE483230530E726856D7E7F93DA41FF0551CD38030A5E44989EE8A6D21929CDF70B9140D48CCCBE509F0377B93F"
     },
     {
       "id": "System.Security.Cryptography.Pkcs",
@@ -104,19 +98,46 @@
       "rid": null,
       "sha512": "DE29562DF8D55CB15E4EC4020E055C6801A1E516ABFF80B023AE2131500F0CBE230B355E926AA0B6A7A12D5AC46A8DCB9544E865B95E5374EA436F115D93294F"
     },
-    {
-      "id": "System.Security.Cryptography.ProtectedData",
-      "version": "11.0.0-preview.6.26359.118",
-      "rid": null,
-      "sha512": "9D7DC659D43B84FBA3F6B2D7E1610A585FA0AC8CD0D37F509373A6A43F7D76D57DF08365426CB308F992C1B1639D13B9E6526C082C821320D5CFD9FF3BDF9DF3"
-    }
   ],
   "sources": [
     {
+      "path": "Telemetry.cs",
+      "sha256": "9C3F18D01766D964C05511833A4DB1929F4DC4D8580E5752C51B45A0584A0962",
+      "url": "https://raw.githubusercontent.com/PowerShell/PowerShell/1481b98f0079f979f658e49a7281024cc754049b/src/System.Management.Automation/utils/Telemetry.cs",
+      "role": "Telemetry startup guard at the informational-version commit of the shipped SMA 7.7.0-preview.4. The host sets POWERSHELL_TELEMETRY_OPTOUT before SMA can initialize this type."
+    },
+    {
+      "path": "jni.h",
+      "sha256": "C88CE2CB6CE10378CD4C706A3A2AD017794AEDB9314DDCC341E39B470CDB601A",
+      "url": "https://android.googlesource.com/platform/libnativehelper",
+      "transport": "git-v2",
+      "commit": "af5fd77f9cb6b30654e4812b03d0b49495520a06",
+      "file": "include_jni/jni.h",
+      "role": "JNI 1.6 function table at android-14.0.0_r1. Derive function slots from this declaration; each entry is one target pointer."
+    },
+    {
+      "path": "Surface.java",
+      "sha256": "479F3FB7A65D4BDC0DD340DDD8B963095C4F988B521324507F5EDEDED522895B",
+      "url": "https://android.googlesource.com/platform/frameworks/base",
+      "transport": "git-v2",
+      "commit": "299fe6f5d6fc6f1af7c3411dcf4e5efdf7217368",
+      "file": "core/java/android/view/Surface.java",
+      "role": "Hardware Canvas locking, full-frame coverage, posting and Surface release contracts at android-14.0.0_r1."
+    },
+    {
+      "path": "Canvas.java",
+      "sha256": "CEC5D0255CB032F012F8BED12641FA303FEFBDF3946425CDF10F18FCFABE3961",
+      "url": "https://android.googlesource.com/platform/frameworks/base",
+      "transport": "git-v2",
+      "commit": "299fe6f5d6fc6f1af7c3411dcf4e5efdf7217368",
+      "file": "graphics/java/android/graphics/Canvas.java",
+      "role": "Canvas acceleration query, save/restore, clipping, translation and drawing signatures at android-14.0.0_r1."
+    },
+    {
       "path": "minimal-assembly-order.txt",
-      "sha256": "3D689A44E17EE6EF235CBE79A901F43CA3E84FF20C0D73CA112A34E3BC2EFE63",
+      "sha256": "A27D82735A1A71EB983080F355184090B358BCFF297F60F26B8C7466D1BE9E34",
       "url": null,
-      "role": "Ordered 102-name minimal assembly payload with the Utility, Management and Security command assemblies. Architecture-neutral IL, used for every target."
+      "role": "Ordered 98-name minimal assembly payload with the Utility, Management and Security command assemblies. Architecture-neutral IL, used for every target."
     },
     {
       "path": "ic_launcher.png",

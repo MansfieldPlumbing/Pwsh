@@ -20,7 +20,6 @@ System.Diagnostics.TextWriterTraceListener.dll
 System.Diagnostics.TraceSource.dll
 System.Diagnostics.Tracing.dll
 System.Drawing.Primitives.dll
-System.Drawing.dll
 System.Formats.Asn1.dll
 System.IO.Compression.Brotli.dll
 System.IO.Compression.ZipFile.dll
@@ -44,7 +43,6 @@ System.Net.Quic.dll
 System.Net.Requests.dll
 System.Net.Security.dll
 System.Net.Sockets.dll
-System.Net.WebClient.dll
 System.Net.WebHeaderCollection.dll
 System.ObjectModel.dll
 System.Private.CoreLib.dll
@@ -87,16 +85,14 @@ System.Xml.XPath.dll
 System.Xml.XmlSerializer.dll
 System.dll
 netstandard.dll
+Markdig.Signed.dll
 Microsoft.ApplicationInsights.dll
 Microsoft.Management.Infrastructure.dll
 Microsoft.PowerShell.Commands.Management.dll
 Microsoft.PowerShell.Commands.Utility.dll
+Microsoft.PowerShell.MarkdownRender.dll
 Microsoft.PowerShell.Security.dll
 Newtonsoft.Json.dll
-System.CodeDom.dll
-System.Configuration.ConfigurationManager.dll
-System.Diagnostics.EventLog.dll
 System.Management.Automation.dll
 System.Security.Cryptography.Pkcs.dll
-System.Security.Cryptography.ProtectedData.dll
 Dev.MansfieldPlumbing.Pwsh.dll

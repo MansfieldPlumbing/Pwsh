@@ -1,14 +1,10 @@
-# Work order: the console core on Android devices
+# Console core on Android devices: test protocol
 
-> Completed 2026-09-27 and retained as the reproducible device-test protocol.
-> The accepted results are recorded in `AGENTS.md` and the checked console item
-> in `ROADMAP.md`; this file is not an open assignment.
+Completed 2026-09-27. The results are recorded in `AGENTS.md` and the checked
+console item in `ROADMAP.md`. This file is the reproducible protocol for the
+two device tests.
 
-For an agent working in this repository. Do exactly these two tasks, in
-order. Do not change any file outside the paths named here. Where this
-document is silent, stop and report instead of guessing.
-
-## What already exists (read these first)
+## Components
 
 - `modules/Console.psm1`: the console core in PowerShell. Exported functions:
   `New-ConsoleModel`, `New-ConsoleFrame`, `Compare-ConsoleFrame`,
@@ -28,22 +24,18 @@ document is silent, stop and report instead of guessing.
 - `tools/Invoke-DeviceScript.ps1`: places every file of a directory in the
   app's files directory through `run-as` on attached devices, starts the app,
   and reports log lines, liveness and crashes. `-CapturePath` saves a raw
-  `screencap` per device. The app must already be installed as a
-  `-Debuggable` build.
-- The vectors: 63 JSON files, in the directory the owner gives you.
+  `screencap` per device. The app must be installed as a `-Debuggable` build.
+- The vectors: 63 JSON files from the admitted reference input directory.
 
-## Rules on the device (each has already cost a failed run)
+## Device constraints
 
-- The recorded console receipts used the earlier 91-image payload without
-  cmdlet modules. Until the 102-image command payload passes on all three
-  backends, keep probes portable and use .NET instead of assuming commands such
-  as `Join-Path`, `Test-Path`, `Add-Member`, `ConvertFrom-Json`, `Write-Host`,
-  `Measure-Object`, `Get-Content` or `Get-ChildItem`:
-  `[IO.Path]::Combine`, `[IO.File]::Exists`, `[IO.File]::ReadAllText`,
-  `[IO.Directory]::GetFiles`. `ForEach-Object`, `Where-Object` and
-  `Import-Module` are in SMA and work.
-- Parse JSON with `[Newtonsoft.Json.Linq.JToken]::Parse($text)`
-  (`Newtonsoft.Json.dll` ships in the payload).
+- These receipts used the earlier 91-image payload without cmdlet modules, so
+  the probes use .NET instead of commands such as `Join-Path`, `Test-Path`,
+  `Add-Member`, `ConvertFrom-Json`, `Write-Host`, `Measure-Object`,
+  `Get-Content` or `Get-ChildItem`: `[IO.Path]::Combine`, `[IO.File]::Exists`,
+  `[IO.File]::ReadAllText`, `[IO.Directory]::GetFiles`. `ForEach-Object`,
+  `Where-Object` and `Import-Module` are in SMA.
+- JSON is parsed with `[Newtonsoft.Json.Linq.JToken]::Parse($text)`.
 - PowerShell variable names are case-insensitive: a local `$m` overwrites a
   script-level `$M`.
 - In a class method, a local variable may not share a name with a property.
@@ -52,15 +44,14 @@ document is silent, stop and report instead of guessing.
 - An exception that escapes a window callback aborts the process. Every
   callback catches everything, including failures of its own logging.
 - Everything runs on the main thread. No loops that wait, poll or sleep.
-- Log with `Write-AndroidLog` (tag `Pwsh`); `tools/Invoke-DeviceScript.ps1`
+- Logging uses `Write-AndroidLog` (tag `Pwsh`); `tools/Invoke-DeviceScript.ps1`
   collects those lines.
 
-## Task 1: the vectors on the devices
+## Test 1: the vectors on the devices
 
-Create `scripts/probes/console-vectors/Profile.ps1`. For each run, place in
-one directory: that profile, `modules/Console.psm1`,
-`modules/AndroidCanvas.psm1` (for `Write-AndroidLog`) and the 63 vector files.
-The profile:
+`scripts/probes/console-vectors/Profile.ps1`, placed in one directory with
+`modules/Console.psm1`, `modules/AndroidCanvas.psm1` (for `Write-AndroidLog`)
+and the 63 vector files:
 
 1. imports both modules with `Import-Module ([IO.Path]::Combine($PSScriptRoot, '<file>'))`;
 2. replays every `*.json` in `$PSScriptRoot` the way `Invoke-Step` in
@@ -69,14 +60,13 @@ The profile:
    `tools/Test-ConsoleVectors.ps1` does;
 4. logs one line per failing vector, then `CONSOLE PASS <n> FAIL <m>`.
 
-Acceptance: `CONSOLE PASS 63 FAIL 0` on the x86_64 emulator, the S23 and the
-onn 4K Plus, each process alive afterwards with no crash lines. Record the
-three log lines.
+Acceptance: `CONSOLE PASS 63 FAIL 0` on every backend, each process alive
+afterwards with no crash lines.
 
-## Task 2: the console on the screen
+## Test 2: the console on the screen
 
-Create `scripts/probes/console-screen/Profile.ps1`. Place it with
-`modules/Console.psm1` and `modules/AndroidCanvas.psm1`. The profile:
+`scripts/probes/console-screen/Profile.ps1`, placed with `modules/Console.psm1`
+and `modules/AndroidCanvas.psm1`:
 
 1. imports both modules and calls `Initialize-AndroidCanvas -NativeActivity $NativeActivityHandle`;
 2. registers one window draw handler that:
@@ -93,15 +83,9 @@ Create `scripts/probes/console-screen/Profile.ps1`. Place it with
      `x = col * cellWidth`, `y = (row + 0.8) * cellHeight`;
    - logs `CONSOLE DREW <cols>x<rows>`.
 
-Acceptance, with `-CapturePath`: on each device, the pixel 2 px right and
+Acceptance, with `-CapturePath`: on each backend, the pixel 2 px right and
 2 px below the top-left corner of the progress row's first cell has the color
 `F9F1A5` (Yellow, the progress background; the cell's center can fall on the
 black glyph), and the same pixel of the first cell of the empty area below the
-editor has `0C0C0C`. Report the cell size, the rows and the two
-pixel values per device, and whether each process stayed alive.
-
-## Report
-
-For each task: the files created, the exact commands run, the log lines, and
-anything not done. Do not claim a result that is not in a log line or a
-capture.
+editor has `0C0C0C`. Each receipt records the cell size, the rows, the two
+pixel values and process liveness.

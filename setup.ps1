@@ -9,7 +9,7 @@ param(
     [ValidatePattern('^\d{1,2}(-\d{1,2})?(,\d{1,2}(-\d{1,2})?)*$')]
     [string] $Step = '1',
 
-    # Download location. Folder: -CacheDirectory (the user temp folder unless
+    # Download location. Folder: -CacheDirectory (the current account temporary directory unless
     # set), reused next run. Memory: never written to disk.
     [ValidateSet('Folder', 'Memory')]
     [string] $Packages = 'Memory',
@@ -394,7 +394,7 @@ $script:LibDirectory = Join-Path $PSScriptRoot 'lib'
 # Write plan
 #
 # Every file this script creates goes through Write-BuildFile, which admits a
-# path only when it lies under a location the user confirmed and outside this
+# path only when it lies under an explicitly approved location and outside this
 # repository. The written set is reported with SHA-512 digests at the end.
 # ==============================================================================
 
@@ -605,7 +605,7 @@ $script:KeepPackageCache = -not $DeletePackages -and $Packages -eq 'Folder'
 # any of them fails verification before a single byte is parsed.
 $script:RepositoryLibBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/fea685e5769999ef969a988bb63686cd1fd73d81/lib/'
 $script:LibRootManifestPath = 'manifest.json'
-$script:LibRootManifestSha256 = '7B97D042A0C529E9C17BDF6695676AEBF6F290937A505B20718FA551D299E0D1'
+$script:LibRootManifestSha256 = '04E0B859FB6569884749E9E4FCC1057EB106FB220361C1BF722D0F7F634B5913'
 $script:LibSourceManifest = $null
 
 function Get-LibFileBytes {
@@ -950,6 +950,27 @@ function Import-LibSourceText {
     return [System.Text.Encoding]::UTF8.GetString((Import-LibSourceBytes -Path $Path))
 }
 
+function Get-JniFunctionTable {
+    # All fields in this pinned C declaration are pointers. Reserved entries
+    # participate in indexing; offsets are computed with the target pointer size.
+    $text = Import-LibSourceText -Path 'jni.h'
+    $body = [regex]::Match($text, '(?s)struct JNINativeInterface\s*\{(?<body>.*?)\n\};')
+    if (-not $body.Success) { throw 'jni.h does not declare JNINativeInterface.' }
+    $fields = [regex]::Matches($body.Groups['body'].Value,
+        'void\*\s+(?<reserved>reserved[0-3])\s*;|\(\*(?<function>[A-Za-z][A-Za-z0-9_]*)\)')
+    $slots = [ordered]@{}
+    for ($index = 0; $index -lt $fields.Count; $index++) {
+        $field = $fields[$index]
+        $name = if ($field.Groups['reserved'].Success) { $field.Groups['reserved'].Value } else { $field.Groups['function'].Value }
+        if ($slots.Contains($name)) { throw "Duplicate JNI field '$name'." }
+        $slots[$name] = $index
+    }
+    if ($slots.Count -ne 233 -or $slots.GetVersion -ne 4 -or $slots.GetObjectRefType -ne 232) {
+        throw 'The admitted JNI 1.6 table has an unexpected shape.'
+    }
+    return $slots
+}
+
 function Get-MinimalAssemblyManifest {
     $text = Import-LibSourceText -Path 'minimal-assembly-order.txt'
     $names = [System.Collections.Generic.List[string]]::new()
@@ -1009,6 +1030,32 @@ function Invoke-VerifyStep {
             $pin.path, $remoteBytes.Length, $remoteHash) -ForegroundColor Green
     }
 
+    $script:JniFunctionTable = Get-JniFunctionTable
+    # Historical probes carry a generated table. Check every entry without
+    # executing their module, when the repository copy is available.
+    $jniModule = Join-Path $PSScriptRoot 'modules/AndroidCanvas.psm1'
+    if (Test-Path -LiteralPath $jniModule -PathType Leaf) {
+        $jniTokens = $null; $jniErrors = $null
+        $jniAst = [System.Management.Automation.Language.Parser]::ParseFile($jniModule, [ref]$jniTokens, [ref]$jniErrors)
+        if ($jniErrors.Count) { throw 'AndroidCanvas.psm1 contains syntax errors.' }
+        $assignment = @($jniAst.FindAll({ param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -ceq '$script:JniSlot'
+        }, $false))
+        if ($assignment.Count -ne 1) { throw 'AndroidCanvas.psm1 must declare one JNI slot table.' }
+        $tableAst = $assignment[0].Right.Find({ param($node)
+            $node -is [System.Management.Automation.Language.HashtableAst]
+        }, $false)
+        if ($null -eq $tableAst) { throw 'The probe JNI slot initializer is not a literal table.' }
+        $probeSlots = $tableAst.SafeGetValue()
+        if ($probeSlots.Count -ne ($script:JniFunctionTable.Count - 4)) { throw 'The probe JNI table has a different function count.' }
+        foreach ($name in $probeSlots.Keys) {
+            if (-not $script:JniFunctionTable.Contains($name) -or $probeSlots[$name] -ne $script:JniFunctionTable[$name]) {
+                throw "The probe JNI slot '$name' differs from the admitted header."
+            }
+        }
+    }
+    Write-Host '[PASS] JNI 1.6: 233 pointer entries derived from the admitted header.' -ForegroundColor Green
     $attributeCount = Test-AndroidAttributeIds
     $names = Get-MinimalAssemblyManifest
     $contract = Get-AndroidNativeContract
@@ -2208,7 +2255,14 @@ function New-ManagedHostAssemblyBytes {
                 [Linq.Expressions.Expression]::Catch([Exception], [Linq.Expressions.Expression]::Empty())),
             (New-ClrProperty $errorVar (Get-ExactProperty ([Exception]) 'HResult')))))
         [void](Add-PersistedMethod $nativeHostType 'RunPowerShell' ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([int]) @([IntPtr]) `
-            ([Func[IntPtr,int]]) @($nativeActivity) ([Linq.Expressions.Expression]::TryCatch((New-StaticCall $run @($nativeActivity)), $catch)))
+            ([Func[IntPtr,int]]) @($nativeActivity) ([Linq.Expressions.Expression]::TryCatch((New-ClrBlock @() @(
+                # Set this before the separate Run method can JIT/load SMA.
+                # lib/Telemetry.cs: its static constructor returns before
+                # creating an Application Insights client when opted out.
+                (New-StaticCall (Get-ExactMethod ([Environment]) 'SetEnvironmentVariable' @([string], [string])) @(
+                    (New-ClrConstant 'POWERSHELL_TELEMETRY_OPTOUT' ([string])),
+                    (New-ClrConstant '1' ([string])))),
+                (New-StaticCall $run @($nativeActivity)))), $catch)))
         # Gate 2a, kept as an in-process invariant: the host calls it first
         # and requires 'PWSH' (0x50575348) before it calls RunPowerShell.
         [void](Add-PersistedMethod $nativeHostType 'Admit' ([Reflection.MethodAttributes]'Public,Static,HideBySig') ([int]) @() `
@@ -6584,7 +6638,7 @@ function Invoke-SignStep {
 
     $outputDirectory = Join-Path $OutputDirectory $script:Target.Abi
     # The signing identity outlives any build folder: Android refuses to upgrade
-    # an installed app whose signer changed, so the key lives in the user's
+    # an installed app whose signer changed, so the key remains in private
     # local application data rather than beside disposable output.
     $certificate = Get-SigningCertificate -Path $SigningKeyPath
 
@@ -8006,7 +8060,7 @@ function Start-PipelineWorker {
                 CacheDirectory  = $CacheDirectory
                 OutputDirectory = $OutputDirectory
                 SigningKeyPath  = $SigningKeyPath
-                # The user confirmed the plan before the interface opened.
+                # The write plan was approved before the interface opened.
                 AcceptWritePlan = $true
             }
             if ($DeletePackages) { $arguments['DeletePackages'] = $true }

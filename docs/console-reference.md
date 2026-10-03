@@ -30,7 +30,7 @@ below, stop and report it; do not substitute another version.
 | `https://www.unicode.org/Public/16.0.0/ucd/UnicodeData.txt` | SHA-256 `FF58E5823BD095166564A006E47D111130813DCF8BF234EF79FA51A870EDB48F` | general categories for zero-width scalars |
 | `https://vt100.net/emu/dec_ansi_parser` | SHA-256 `72DB5905EBD81BB4F3DA420DB66DB390BFA6693704BC5E24AEC74290D2CE691D` | the escape-sequence parser state machine |
 | `https://invisible-island.net/xterm/ctlseqs/ctlseqs.txt` | XTerm Patch #411, SHA-256 `364C1C1987C85B1C1135E57A93E9008054F46D09A338DE8DCC66EA9A7C613709` | only "CSI Pm m" (Character Attributes, SGR) |
-| `terminal-best-example` (uploaded by the owner) | as uploaded | prior art only: `src/System.ConsoleEngine.ts` (transcript tagged by stream, line editor, history) and `src/components/Terminal.App.Console.tsx` (repaint only changed cells). Do not copy anything else from it. |
+| `terminal-best-example` (supplied as a project reference) | as uploaded | prior art only: `src/System.ConsoleEngine.ts` (transcript tagged by stream, line editor, history) and `src/components/Terminal.App.Console.tsx` (repaint only changed cells). Do not copy anything else from it. |
 
 Generated tables (widths, categories) are produced by a script in the
 deliverable from the pinned Unicode files, and the script records their

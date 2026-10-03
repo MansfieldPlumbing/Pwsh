@@ -170,7 +170,7 @@ only when that group's evidence exists. Name the source for every new fact.
   reproduce bytes proven on hardware. Do not make them agree as part of any
   other change.
 - The payload is the names in `lib/minimal-assembly-order.txt`, pinned
-  by digest; its current length (102) is the assembly count every step checks.
+  by digest; its current length (98) is the assembly count every step checks.
 - `libpwsh-host.so` (x86-64, arm64, and arm32 in
   Thumb-2)
   starts CoreCLR: `DT_NEEDED` libc, liblog, libcoreclr and the store library;
@@ -381,7 +381,7 @@ only when that group's evidence exists. Name the source for every new fact.
   89 grid sizes from 63x66 to 25x26 cells, no module error, process alive.
 - The 2026-09-27 console receipts used the preceding 91-image payload without
   cmdlet modules, so their profile fixtures use the language and .NET only.
-  They do not prove commands in the current 102-image candidate.
+  They do not prove commands in the current payload.
 - During those runs SMA also asked the probe for
   `System.Management.Automation.dll` by its full path under the app's files
   directory. The probe has no entry by path, so it declined; execution
@@ -429,7 +429,7 @@ only when that group's evidence exists. Name the source for every new fact.
   Mono.Android, Mono.Android.Runtime, Java.Interop, libmonodroid,
   libxamarin-app, Xamarin DEX and type maps absent.
 - Every gate runs on three backends: x86-64 on the emulator finds the next
-  boundary; arm64 on the S23 confirms it on a physical device; arm32 must pass
+  boundary; arm64 on a physical device confirms it; arm32 must pass
   before the gate is called portable. Each backend is independent evidence:
   a failure on x86-64 or arm64 may not reproduce on arm32, and an arm32 pass
   does not waive a 64-bit invariant (a misaligned fat method header is fatal

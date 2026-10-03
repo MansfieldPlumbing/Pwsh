@@ -72,20 +72,28 @@ service need manifest declarations fixed at the freeze (`INTERNET`, the
 service slot and its types, `POST_NOTIFICATIONS`); TLS needs the crypto
 initialization from the emitted `NativeActivity` subclass.
 
-## Rendering: a display list with cells as its first client
+## Rendering: retained controls and terminal content
 
-The renderer executes a display list against a `Canvas`. Its first
-primitives are the two the cell grid needs: a filled rectangle for a
-background run and a text run, one `drawText` per span of same-format cells in
-a damaged row (the span merge `Render-Canvas` already does). `desktop.ps1`'s
-`DrawingContext` operations (rounded rectangles, clip, transform, opacity,
-shadow, icons) are added later as further primitives on the same list.
-PowerShell records the list; lowered code executes it.
+This section describes graphical presentation, not the application runtime.
+The preview's retained tab controls and console panes share hardware Canvas,
+with ordinary UI coordinates outside the terminal. The host also supports
+applications and Android services that never use a console or this display
+list. [The managed UI work order](work-managed-ui.md) defines the preview gates.
+
+The renderer executes a general display list against hardware `Canvas`.
+Retained controls record rectangles, text, icons and drawing-state operations
+in ordinary UI coordinates. Terminal panes contribute background and text
+runs derived from cells, with one `drawText` per merged same-format span.
+Additional operations such as opacity and shadows have their own binding and
+measurement gates. PowerShell orchestrates state changes; lowered code builds
+and executes repeated layout and drawing work. Every hardware submission
+covers the required full surface; damage decides when to request it.
 
 ## Apps
 
-The window manager owns displays, windows, z-order, motion, the display list,
-damage, hit regions, input dispatch and themes. An app is a small module that
+For graphical applications, the window manager owns displays, windows, z-order,
+motion, the display list, damage, hit regions, input dispatch and themes.
+An app is a small module that
 declares, with no host setup and no loop:
 
 - `Get-AppInfo`: title, icon, default size;
@@ -97,7 +105,7 @@ declares, with no host setup and no loop:
 
 Themes are `.psd1` data (palette, layout constants, fonts, radii).
 `Import-PowerShellDataFile` is in `Microsoft.PowerShell.Commands.Utility`,
-which the payload does not ship; reading a `.psd1` through SMA's parser is to
-be verified before relying on it. Each app may run in its own runspace behind
+which the current command-payload candidate admits but has not yet proved on
+all device backends. Each app may run in its own runspace behind
 the dispatcher, so an app's exception stays in its window. A stable
 `Show-App` is a candidate for the device-persisted IL path in `AGENTS.md`.

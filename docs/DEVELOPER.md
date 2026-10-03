@@ -32,7 +32,7 @@ current graph is a path:
 | 1 | Verify | verify every pinned specification and source |
 | 2 | Acquire | download and hash the pinned NuGet packages |
 | 3 | Inspect | classify package payloads |
-| 4 | Select | choose the 102 assemblies and re-emit R2R images as IL-only |
+| 4 | Select | choose the 98 assemblies and re-emit R2R images as IL-only |
 | 5 | Store | emit and verify the aligned assembly store |
 | 6 | Native | emit the store library, native host and SMA native library |
 | 7 | Manifest | emit and read back binary Android XML |
@@ -102,7 +102,7 @@ Startup is:
 
 1. Android loads `libpwsh-host.so` and calls `ANativeActivity_onCreate`.
 2. The host starts the pinned CoreCLR and supplies the assembly probe.
-3. The probe serves the 102 IL-only assemblies from the read-only mapped store.
+3. The probe serves the 98 IL-only assemblies from the read-only mapped store.
 4. `Dev.MansfieldPlumbing.Pwsh.NativeHost` opens a Full Language,
    `UseCurrentThread` runspace on the Android main thread.
 5. The host loads the Utility, Management and Security command assemblies by
@@ -122,12 +122,13 @@ bytes on all three backends.
 
 ## 7. Payload and native outputs
 
-`lib/minimal-assembly-order.txt` is the ordered 102-image payload. It contains
+`lib/minimal-assembly-order.txt` is the ordered 98-image payload. It contains
 CoreCLR and SMA dependencies plus `Microsoft.PowerShell.Commands.Utility`,
-`.Commands.Management` and `.Security`; Roslyn remains absent, so
-source-compiling `Add-Type` remains outside the supported payload. The command
-assemblies and their required framework additions pass the build and store
-gates; their import path still needs execution receipts on all three backends.
+`.Commands.Management` and `.Security`, and MarkdownRender and Markdig, which
+Utility's import needs until step 2.8 of the implementation plan; Roslyn remains
+absent, so source-compiling `Add-Type` remains outside the supported payload.
+The command import path has debuggable receipts on the x86-64 emulator and an
+arm64 phone; arm32 remains open.
 
 Step 4 removes every ReadyToRun body while preserving IL, metadata, resources
 and field data. Step 5 rejects any image that still has a ReadyToRun header or
@@ -154,7 +155,7 @@ reflow. `AGENTS.md` records the exact claim boundaries and receipt dates.
 
 These receipts do not prove the remaining compatibility assembly, exact frozen
 CellCanvas execution, the integrated terminal, recovery UI, production startup
-lifecycle, all 102 store images, the command-assembly import path, hashing/TLS initialization, or release
+lifecycle, all 98 store images, the command-assembly import path, hashing/TLS initialization, or release
 performance. Unchecked `ROADMAP.md` items remain planned.
 
 ## 9. Build and device checks

@@ -37,6 +37,7 @@
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
 $Interop = [Runtime.InteropServices.Marshal]
+$script:Activity = [IntPtr]::Zero
 
 # --- 1. Function pointers as delegates ----------------------------------------
 $script:Emit = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly(
@@ -400,7 +401,10 @@ function ConvertTo-ArgbColor {
 
 function Initialize-AndroidCanvas {
     <# Binds JNI on activity->env and resolves the Canvas, Paint and Surface members this module uses. Call once, on the main thread. #>
-    param([Parameter(Mandatory)][IntPtr] $NativeActivity)
+    param([Parameter(Mandatory)][IntPtr] $NativeActivity, [switch] $Hardware, [switch] $TraceFrameTiming)
+    if ($script:Activity -ne [IntPtr]::Zero) { throw 'AndroidCanvas is already initialized; choose one renderer per activity.' }
+    $script:HardwareCanvas = [bool]$Hardware
+    $script:TraceFrameTiming = [bool]$TraceFrameTiming
     $script:Activity = $NativeActivity
     $script:JniEnv = $Interop::ReadIntPtr($NativeActivity, 2 * [IntPtr]::Size)   # callbacks, vm, env, clazz, ...
     $b = [byte]; $f = [float]; $v = [void]
@@ -410,6 +414,7 @@ function Initialize-AndroidCanvas {
         ExceptionClear = Get-JniFunction ExceptionClear $v
         FindClass = Get-JniFunction FindClass $I @($I)
         NewGlobalRef = Get-JniFunction NewGlobalRef $I @($I)
+        DeleteGlobalRef = Get-JniFunction DeleteGlobalRef $v @($I)
         DeleteLocalRef = Get-JniFunction DeleteLocalRef $v @($I)
         GetMethodID = Get-JniFunction GetMethodID $I @($I, $I, $I)
         GetStaticMethodID = Get-JniFunction GetStaticMethodID $I @($I, $I, $I)
@@ -475,7 +480,14 @@ function Initialize-AndroidCanvas {
         GetFontSpacing = Get-JavaMethod $paint 'getFontSpacing' '()F'
         DrawRoundRect = Get-JavaMethod $canvas 'drawRoundRect' '(FFFFFFLandroid/graphics/Paint;)V'
         DrawCircle = Get-JavaMethod $canvas 'drawCircle' '(FFFLandroid/graphics/Paint;)V'
+        IsHardwareAccelerated = Get-JavaMethod $canvas 'isHardwareAccelerated' '()Z'
+        Save = Get-JavaMethod $canvas 'save' '()I'
+        RestoreToCount = Get-JavaMethod $canvas 'restoreToCount' '(I)V'
+        ClipRect = Get-JavaMethod $canvas 'clipRect' '(FFFF)Z'
+        Translate = Get-JavaMethod $canvas 'translate' '(FF)V'
+        ReleaseSurface = Get-JavaMethod $surface 'release' '()V'
     }
+    if ($Hardware) { $script:K.LockHardwareCanvas = Get-JavaMethod $surface 'lockHardwareCanvas' '()Landroid/graphics/Canvas;' }
     # One Paint for the module's lifetime: antialiased, monospace.
     $flag = $script:Jni.GetStaticIntField.Invoke($script:JniEnv, $paint, (Get-JavaField $paint 'ANTI_ALIAS_FLAG' 'I' -Static))
     $local = Invoke-JavaCall $script:Jni.NewObjectA $paint (Get-JavaMethod $paint '<init>' '(I)V') @([int]$flag)
@@ -525,12 +537,12 @@ function Add-CanvasText {
           [float] $Size = 32, [Parameter(Mandatory)][int] $Color, [IntPtr] $Typeface = [IntPtr]::Zero)
     Invoke-JavaCall $script:Jni.CallVoidMethodA $script:Paint $script:K.SetColor @($Color)
     Invoke-JavaCall $script:Jni.CallVoidMethodA $script:Paint $script:K.SetTextSize @($Size)
-    if ($Typeface -ne [IntPtr]::Zero) { [void](Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$Typeface)) }
+    if ($Typeface -ne [IntPtr]::Zero) { Remove-JavaLocalRef (Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$Typeface)) }
     $s = New-JavaString $Text
     try { Invoke-JavaCall $script:Jni.CallVoidMethodA $Canvas $script:K.DrawText @([IntPtr]$s, $X, $Y, [IntPtr]$script:Paint) }
     finally {
         Remove-JavaLocalRef $s
-        if ($Typeface -ne [IntPtr]::Zero) { [void](Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$script:Monospace)) }
+        if ($Typeface -ne [IntPtr]::Zero) { Remove-JavaLocalRef (Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$script:Monospace)) }
     }
 }
 
@@ -550,12 +562,12 @@ function Measure-CanvasText {
     <# The advance width of $Text in pixels at $Size, in -Typeface or the monospace font. #>
     param([Parameter(Mandatory)][AllowEmptyString()][string] $Text, [float] $Size = 32, [IntPtr] $Typeface = [IntPtr]::Zero)
     Invoke-JavaCall $script:Jni.CallVoidMethodA $script:Paint $script:K.SetTextSize @($Size)
-    if ($Typeface -ne [IntPtr]::Zero) { [void](Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$Typeface)) }
+    if ($Typeface -ne [IntPtr]::Zero) { Remove-JavaLocalRef (Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$Typeface)) }
     $s = New-JavaString $Text
     try { [float](Invoke-JavaCall $script:Jni.CallFloatMethodA $script:Paint $script:K.MeasureText @([IntPtr]$s)) }
     finally {
         Remove-JavaLocalRef $s
-        if ($Typeface -ne [IntPtr]::Zero) { [void](Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$script:Monospace)) }
+        if ($Typeface -ne [IntPtr]::Zero) { Remove-JavaLocalRef (Invoke-JavaCall $script:Jni.CallObjectMethodA $script:Paint $script:K.SetTypeface @([IntPtr]$script:Monospace)) }
     }
 }
 
@@ -583,13 +595,80 @@ function Get-AndroidTypeface {
 function Invoke-CanvasFrame {
     <# Locks a Canvas on the window, runs $Draw with it, and posts the frame. #>
     param([Parameter(Mandatory)][IntPtr] $Window, [Parameter(Mandatory)][scriptblock] $Draw)
-    [void]$script:SetGeometry.Invoke($Window, 0, 0, 1)                 # WINDOW_FORMAT_RGBA_8888 (native_window.h)
-    $surface = $script:ToSurface.Invoke($script:JniEnv, $Window)
-    $canvas = Invoke-JavaCall $script:Jni.CallObjectMethodA $surface $script:K.LockCanvas @([IntPtr]::Zero)
-    try { & $Draw $canvas }
+    $surface = [IntPtr]::Zero; $canvas = [IntPtr]::Zero
+    $timing = if ($script:TraceFrameTiming) { [Diagnostics.Stopwatch]::StartNew() } else { $null }
+    $acquiredMs = 0.0; $drawnMs = 0.0
+    try {
+        if ($script:HardwareCanvas) {
+            if ($script:HardwareWindow -ne $Window) {
+                Close-HardwareSurface
+                if ($script:SetGeometry.Invoke($Window, 0, 0, 1) -ne 0) { throw 'RGBA8888 geometry was rejected.' }
+                $local = $script:ToSurface.Invoke($script:JniEnv, $Window)
+                Assert-NoJavaException 'ANativeWindow_toSurface'
+                if ($local -eq [IntPtr]::Zero) { throw 'The window has no Java Surface.' }
+                try { $script:HardwareSurface = $script:Jni.NewGlobalRef.Invoke($script:JniEnv, $local) }
+                finally { Remove-JavaLocalRef $local }
+                Assert-NoJavaException 'NewGlobalRef(hardware Surface)'
+                if ($script:HardwareSurface -eq [IntPtr]::Zero) { throw 'Could not retain the hardware Surface.' }
+                $script:HardwareWindow = $Window
+            }
+            $surface = $script:HardwareSurface
+            $canvas = Invoke-JavaCall $script:Jni.CallObjectMethodA $surface $script:K.LockHardwareCanvas
+        }
+        else {
+            if ($script:SetGeometry.Invoke($Window, 0, 0, 1) -ne 0) { throw 'RGBA8888 geometry was rejected.' }
+            $surface = $script:ToSurface.Invoke($script:JniEnv, $Window)
+            $canvas = Invoke-JavaCall $script:Jni.CallObjectMethodA $surface $script:K.LockCanvas @([IntPtr]::Zero)
+        }
+        if ($canvas -eq [IntPtr]::Zero) { throw 'Canvas locking returned null.' }
+        if ($script:HardwareCanvas -and -not (Test-CanvasHardware $canvas)) { throw 'Hardware Canvas locking returned a software Canvas.' }
+        if ($null -ne $timing) { $acquiredMs = $timing.Elapsed.TotalMilliseconds }
+        # Hardware buffers are not preserved: the handler must cover the frame.
+        & $Draw $canvas
+        if ($null -ne $timing) { $drawnMs = $timing.Elapsed.TotalMilliseconds }
+    }
     finally {
-        Invoke-JavaCall $script:Jni.CallVoidMethodA $surface $script:K.UnlockCanvasAndPost @([IntPtr]$canvas)
-        Remove-JavaLocalRef $canvas; Remove-JavaLocalRef $surface
+        try {
+            if ($canvas -ne [IntPtr]::Zero) { Invoke-JavaCall $script:Jni.CallVoidMethodA $surface $script:K.UnlockCanvasAndPost @([IntPtr]$canvas) }
+            if ($null -ne $timing -and $drawnMs -gt 0) {
+                Write-AndroidLog ('P1 PRESENT acquireMs={0:F3} drawMs={1:F3} postMs={2:F3}' -f
+                    $acquiredMs, ($drawnMs - $acquiredMs), ($timing.Elapsed.TotalMilliseconds - $drawnMs))
+            }
+        }
+        finally {
+            Remove-JavaLocalRef $canvas
+            if (-not $script:HardwareCanvas) { Remove-JavaLocalRef $surface }
+        }
+    }
+}
+
+function Test-CanvasHardware {
+    param([Parameter(Mandatory)][IntPtr] $Canvas)
+    return [bool](Invoke-JavaCall $script:Jni.CallBooleanMethodA $Canvas $script:K.IsHardwareAccelerated)
+}
+function Save-CanvasState {
+    param([Parameter(Mandatory)][IntPtr] $Canvas)
+    return Invoke-JavaCall $script:Jni.CallIntMethodA $Canvas $script:K.Save
+}
+function Restore-CanvasState {
+    param([Parameter(Mandatory)][IntPtr] $Canvas, [Parameter(Mandatory)][int] $Count)
+    if ($Count -lt 1) { throw 'Canvas save count must be positive.' }
+    Invoke-JavaCall $script:Jni.CallVoidMethodA $Canvas $script:K.RestoreToCount @($Count)
+}
+function Set-CanvasClip {
+    param([Parameter(Mandatory)][IntPtr] $Canvas, [float] $Left, [float] $Top, [float] $Right, [float] $Bottom)
+    return [bool](Invoke-JavaCall $script:Jni.CallBooleanMethodA $Canvas $script:K.ClipRect @($Left, $Top, $Right, $Bottom))
+}
+function Move-CanvasOrigin {
+    param([Parameter(Mandatory)][IntPtr] $Canvas, [float] $X, [float] $Y)
+    Invoke-JavaCall $script:Jni.CallVoidMethodA $Canvas $script:K.Translate @($X, $Y)
+}
+function Close-HardwareSurface {
+    $surface = $script:HardwareSurface
+    $script:HardwareSurface = [IntPtr]::Zero; $script:HardwareWindow = [IntPtr]::Zero
+    if ($surface -ne [IntPtr]::Zero) {
+        try { Invoke-JavaCall $script:Jni.CallVoidMethodA $surface $script:K.ReleaseSurface }
+        finally { $script:Jni.DeleteGlobalRef.Invoke($script:JniEnv, $surface) }
     }
 }
 
@@ -608,6 +687,10 @@ $script:Monospace = [IntPtr]::Zero
 $script:Timer = $null
 $script:Draw = $null
 $script:Window = [IntPtr]::Zero
+$script:HardwareCanvas = $false
+$script:TraceFrameTiming = $false
+$script:HardwareSurface = [IntPtr]::Zero
+$script:HardwareWindow = [IntPtr]::Zero
 
 function Request-WindowDraw {
     <# Draws the window again with the registered draw handler, now, on the calling (main) thread. Call it after a state change; nothing redraws on its own. #>
@@ -625,10 +708,21 @@ function Register-WindowDrawHandler {
         catch { try { Write-AndroidLog ('AndroidCanvas: ' + $_.Exception.GetType().FullName + ': ' + $_.Exception.Message) 6 } catch { } } }
     $created = [Management.Automation.LanguagePrimitives]::ConvertTo($handler, $type)
     $redraw = [Management.Automation.LanguagePrimitives]::ConvertTo($handler, $type)
-    $script:Callbacks = @($created, $redraw)                          # rooted for the process lifetime
+    $destroyHandler = { param([IntPtr] $Activity, [IntPtr] $Window)
+        try {
+            $script:Window = [IntPtr]::Zero
+            Close-HardwareSurface
+            Write-AndroidLog 'AndroidCanvas window released'
+        }
+        catch { try { Write-AndroidLog ('AndroidCanvas cleanup: ' + $_.Exception.Message) 6 } catch { } }
+    }
+    $destroyed = [Management.Automation.LanguagePrimitives]::ConvertTo($destroyHandler, $type)
+    $script:Callbacks = @($created, $redraw, $destroyed)              # rooted for the process lifetime
     $table = $Interop::ReadIntPtr($script:Activity, 0)
     $Interop::WriteIntPtr($table, 7 * [IntPtr]::Size, $Interop::GetFunctionPointerForDelegate($created))   # onNativeWindowCreated
     $Interop::WriteIntPtr($table, 9 * [IntPtr]::Size, $Interop::GetFunctionPointerForDelegate($redraw))    # onNativeWindowRedrawNeeded
+    $Interop::WriteIntPtr($table, 8 * [IntPtr]::Size, $Interop::GetFunctionPointerForDelegate($redraw))    # onNativeWindowResized
+    $Interop::WriteIntPtr($table, 10 * [IntPtr]::Size, $Interop::GetFunctionPointerForDelegate($destroyed)) # onNativeWindowDestroyed
 }
 
 # --- 6. System-bar insets ------------------------------------------------------------
@@ -943,4 +1037,5 @@ Export-ModuleMember -Function New-NativeFunction, Get-NativeExport, Write-Androi
     Show-SoftKeyboard, Hide-SoftKeyboard, Get-KeyUnicode, Get-AndroidTypeface, Get-AndroidSystemTypeface,
     Add-CanvasRoundRect, Add-CanvasCircle, Measure-CanvasText,
     Initialize-AndroidCanvas, Get-CanvasSize, Get-TextCell, Clear-Canvas, Add-CanvasRect, Add-CanvasText,
-    Invoke-CanvasFrame, Register-WindowDrawHandler
+    Invoke-CanvasFrame, Register-WindowDrawHandler, Test-CanvasHardware, Save-CanvasState,
+    Restore-CanvasState, Set-CanvasClip, Move-CanvasOrigin

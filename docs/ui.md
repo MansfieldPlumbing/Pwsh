@@ -74,11 +74,19 @@ grid.
 Composition is therefore the first thing to establish. If layers composite
 correctly and cheaply, no other part of the UI has to fit the cell grid.
 
-This document does not choose a renderer. The repository already records two:
-Android `Canvas` and AGSL reached through JNI, which gate 2e/2f requires for
-CellCanvas (`docs/android-facade.md`), and a Vulkan swapchain on the
-`NativeActivity` window (`ROADMAP.md`, UI and platform). The terminal is built
-on whichever of them the owner confirms, using the bridges gate 2e proves.
+The preview uses Android hardware Canvas through owned JNI bindings for both
+retained controls and console panes. Software rasterization is not a production
+fallback. The current AndroidCanvas probe calls `Surface.lockCanvas`; hardware
+acquisition, lowered submission and the new retained UI require their own
+three-backend gates in [the managed UI work order](work-managed-ui.md).
+
+Request frames on damage, and cover the whole surface on each hardware Canvas
+submission: its buffer is not preserved between frames. Retained scene state
+does not waive that requirement. The frozen CellCanvas hardware/AGSL workload
+keeps its separate compatibility gates; Vulkan is a future backend.
+
+The tabbed interface is an application of the host. A graphical pane need not
+allocate terminal cells, and an Android service need not instantiate this UI.
 
 ## Text input
 
@@ -90,7 +98,7 @@ only `ANativeActivity_showSoftInput` and `hideSoftInput`. Soft-keyboard text
 (committed and composing text, deletions) therefore needs a view that returns
 an `InputConnection`, which means emitted DEX. The same emitted `NativeActivity`
 subclass that forwards `onNewIntent` can host that view. How it attaches
-without `setContentView` over the native content view is an owner decision.
+without `setContentView` over the native content view is defined by the managed UI work order.
 `NativeActivity` also sets `SOFT_INPUT_ADJUST_RESIZE` (`:136-138`), so the IME
 arrives as a content-rect change, and sets the window format to RGB_565
 (`:135`); the host must select a 32-bit buffer format before drawing colour.
@@ -124,7 +132,7 @@ fill becomes an explicit benchmark mode. Neither is default behaviour.
 
 ## Seed script triage
 
-`C:\Scripts\Terminal_20260909-093632_CD2D9A69.ps1` (1,259 lines, not pinned,
+An earlier terminal script (1,259 lines, not pinned,
 not vendored) was reviewed as a possible starting point.
 
 Rejected:

@@ -25,14 +25,24 @@ The cost is first-use JIT of SMA and CoreLib. The planned order:
 
 1. `onCreate` returns after CoreCLR starts and the window and input callbacks
    are installed.
-2. The terminal draws at once from emitted IL: cell grid, glyphs, damage. It
-   touches no SMA. Device metrics (screen, cell size, font) are read at run
-   time; the code shape is fixed at build time.
-3. The host then creates the runspaces behind the first frame, runs
-   `Profile.ps1`, and shows the prompt. Keystrokes typed meanwhile are queued.
-4. If a runspace or the profile fails, the same terminal shows the error with
-   Retry, Copy and Import. Recovery is a state of the host, not a separate
-   screen; the host that creates the runspaces is the one that recovers them.
+2. The preview's retained UI draws a first hardware frame from emitted IL
+   without touching SMA. Terminal panes are one content type. Device metrics
+   are read at run time; fixed code shapes are lowered at build time.
+3. The host admits the PowerShell adapter and creates runspaces, records a
+   startup attempt before executing `Profile.ps1`, and enables the appropriate
+   application interface. Console sessions have separate worker runspaces.
+4. If admission or startup fails, the host selects recovery in the same
+   retained UI. Built-in profile export/replacement/rollback and diagnostics
+   remain available without SMA; a profile-free REPL requires a working SMA
+   engine. An incomplete startup marker bypasses the profile on the next
+   launch. A hung main-thread profile requires force-stop/relaunch; this is
+   not process isolation or live recovery from a blocked main thread.
+
+The host owns component lifetime and dispatch independently of this preview
+application. Graphical Activities and non-visual services do not require
+console state, tabs or a rendering backend. The retained UI and console are
+clients of host capabilities. [The managed UI work order](work-managed-ui.md)
+defines the implementation sequence and receipts; `ROADMAP.md` owns status.
 
 ## Runspaces and dispatch
 
