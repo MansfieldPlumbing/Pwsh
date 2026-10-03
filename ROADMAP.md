@@ -340,7 +340,7 @@ Follow [the optional scripts work order](docs/work-optional-scripts.md). Command
 - [ ] O3: port the ADB protocol separately from Windows WinUSB and Android USB-host/wireless transports; structured commands plus an Invoke-Adb CLI adapter supporting global -s, with Set-Alias adb Invoke-Adb in Profile.ps1. Admit pairing independently and prove actual transport roles, stream bounds and teardown.
 - [ ] O4: a setup.ps1 option (and setup UI picker) that embeds selected `scripts/` bundles in the APK; record selected bundles, compressed APK/store deltas and notices without renumbering established steps.
 - [ ] Application content hook: `setup.ps1 -Application <folder>` builds a downstream application (start script, scripts, resources, launcher icon, package name and label) from bounded paths with hashed content, writing only to the caller's build folder. The ConsoleHost console is its first application; a downstream project is its second.
-- [ ] ADB bundle: `scripts/commands/Adb` from the ADB project's pushed commit, pinned and hashed, once that project is a pushed repository.
+- [ ] ADB in-repo tooling (`scripts/commands/Adb`): `adb.ps1` as a drop-in for adb.exe over WinUSB, object commands (`Invoke-AdbShell`, `Send-AdbFile`, `Receive-AdbFile`, `Install-AdbPackage`), and a per-user connection holder so each device sees one CNXN. Passing on the arm32 Google TV device: repeated one-shot commands, exit codes, byte-identical round trips 1 KiB to 3 MiB, APK install. Open: the arm64 phone answers CNXN with a sync-style FAIL even after a replug; trace against aosp-adb before relying on it. Then switch `tools/Invoke-HardwareCanvasProbe.ps1` from adb.exe so R7/R8 evidence uses in-repo tooling.
 
 ## Processes, native bundles and the broker
 

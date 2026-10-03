@@ -6501,7 +6501,10 @@ function Get-StartupScriptAssets {
     $files.Add((Join-Path $root 'scripts/console/Start-Console.ps1'))
     $files.Add((Join-Path $root 'modules/Console.psm1'))
     $files.Add((Join-Path $root 'modules/AndroidCanvas.psm1'))
-    foreach ($bundle in Get-ChildItem -LiteralPath (Join-Path $root 'scripts/commands') -Directory -ErrorAction SilentlyContinue | Sort-Object Name) {
+    # Bundles shipped in the APK, until the setup.ps1 bundle option (ROADMAP O4)
+    # selects them. Adb is PC tooling: its WinUSB transport is Windows-only.
+    $shippedBundles = @('Parsers')
+    foreach ($bundle in Get-ChildItem -LiteralPath (Join-Path $root 'scripts/commands') -Directory -ErrorAction SilentlyContinue | Where-Object Name -in $shippedBundles | Sort-Object Name) {
         foreach ($file in Get-ChildItem -LiteralPath $bundle.FullName -File -Filter '*.ps1' | Sort-Object Name) { $files.Add($file.FullName) }
     }
     $byName = [System.Collections.Generic.SortedDictionary[string, byte[]]]::new([System.StringComparer]::Ordinal)
