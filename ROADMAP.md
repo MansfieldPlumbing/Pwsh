@@ -50,6 +50,36 @@ The current build inputs pin PowerShell 7.7.0-preview.4 and .NET
   fills the `NativeActivity` window; `screencap` confirmed the colors
   (`AGENTS.md`, Pixels from PowerShell).
 
+## Next work, in order (as of 2026-10-04)
+
+The queue for whoever picks this up. Each item links to its full entry.
+Compiler work happens in [PSLowering](https://github.com/MansfieldPlumbing/PSLowering)
+(its own [ROADMAP.md](https://github.com/MansfieldPlumbing/PSLowering/blob/main/ROADMAP.md));
+Pwsh takes it at a pinned commit.
+
+1. **Console input defect:** bursts of key events lose characters on the arm32
+   device (a 30-key `input text` burst arrived as 26; the same keys one at a
+   time all arrived). `modules/AndroidCanvas.psm1:984-1012` drains the input
+   queue correctly, so the loss is after it. Trace and fix before any
+   acceptance claim about typing (ConsoleHost, below).
+2. **ConsoleHost acceptance:** the remaining items of
+   [docs/console-host.md](docs/console-host.md#spike-acceptance): on-screen
+   keyboard input, a fresh install, a shipped parser resolved from `PATH`.
+3. **Activity re-creation:** host re-attach on all three backends (UI and
+   platform, below).
+4. **Startup breakdown:** time each phase on the arm64 and arm32 test devices
+   from the existing markers before any startup optimization (Lowering with
+   PSLowering, below).
+5. **Adopt PSLowering in `setup.ps1`** for the managed host methods, then the
+   console core (Lowering with PSLowering, below).
+6. **ADB:** the arm64 handshake failure, then the emulator's TCP transport and
+   a binary-safe `exec:`; then move `tools/Invoke-DeviceScript.ps1` and
+   `tools/Invoke-HardwareCanvasProbe.ps1` off adb.exe (Optional packaged
+   commands and ADB, below).
+7. **Housekeeping:** remove or pin `setup.ps1 -Aapt2Path` (it runs an
+   installed, unpinned aapt2 as a diagnostic); regenerate the learn site from a
+   pushed SHA per [docs/publishing.md](docs/publishing.md).
+
 ## Completed build-unblocking work
 
 - [x] Byte-identical APK proof of the 2026-09-26 refactor (package pins,
@@ -249,12 +279,12 @@ These tasks refine the gates above. `scripts/ConsoleHost.ps1` is the planned Pow
 - [ ] **P5 Android seam:** complete InputConnection commit/composition/selection/deletion/batch-edit behavior; system-bar/cutout/IME insets, density/font scaling, clipboard and document results. Scope an accessibility semantic-tree bridge against pinned platform source. Preserve NativeContentView and the fixed auxiliary-view contract.
 - [ ] **P3/P6 Settings and editor:** typed settings hierarchy, adaptive navigation, shared theme tokens, terminal palette/font preview and working-copy Save/Discard with atomic persistence. Build a bounded PowerShell-authored editor for profile repair: selection, undo/redo, find, UTF-8 files and dirty-document handling; use SMA parsing/highlighting/completion when available, without making basic recovery depend on SMA.
 - [ ] **P7 Build graph:** develop ConsoleHost emission behind setup.ps1, then add a dedicated ManagedUi node after Select/4 and before Store/5, preserving existing public step IDs. Give each generated image one producer; check identities, hashes, closure/order and store admission. Fold emitter functions into the single setup.ps1 release build.
-- [ ] **Startup modes:** `setup.ps1 -Startup Profile | ConsoleHost`; `ConsoleHost` starts the shipped console with no `run-as` step. Spike acceptance on the x86-64 emulator, x86-64 Windows Subsystem for Android and an arm64 physical device is in [docs/console-host.md](docs/console-host.md#spike-acceptance), including real on-screen keyboard input.
+- [ ] **Startup modes:** `setup.ps1 -Startup Profile | ConsoleHost`; `ConsoleHost` starts the shipped console with no `run-as` step. Spike acceptance on the x86-64 emulator, x86-64 Windows Subsystem for Android and an arm64 physical device is in [docs/console-host.md](docs/console-host.md#spike-acceptance), including real on-screen keyboard input. Observed 2026-10-04 with non-debuggable ConsoleHost APKs built from `fdf4719`: on the x86-64 emulator, the arm64 physical device and the arm32 Google TV device the console started from the launcher with every startup marker, `1+2` typed through `adb shell input` printed `3`, and each process was alive at 40 s with an empty crash buffer; the arm32 device drew no frames during 10 s idle. Not yet shown: on-screen keyboard input, a fresh install, a shipped parser from `PATH`. Open defect: bursts of key events lose characters (Next work, item 1). Windows Subsystem for Android is no longer available from Microsoft; the arm32 device stands in as the third backend.
 - [ ] **Activity re-creation:** the native host starts CoreCLR on every `ANativeActivity_onCreate`; a second `onCreate` in the same process fails with `coreclr_initialize` 0x80131022. Observed on the arm32 Google TV device (API 34) after `wm size` and after HOME then relaunch (`build/s2.1-arm32-receipt`); the phone and emulator resumed the existing activity instead. Keep the host handle and delegates, skip initialization on re-entry, and call a managed `Reattach(nativeActivity)` that rebinds the existing session (window and input callbacks, redraw). Emitted host code on x86-64, A64 and Thumb-2; receipt on all three including recreation.
 - [ ] **Remote-control input (Google TV):** D-pad, Select and Back drive the console and views through the navigation verbs ([docs/views-and-tiles.md](docs/views-and-tiles.md)); the TV on-screen keyboard is part of the R4 input acceptance.
 - [ ] **Crash-loop breaker and safe start:** an unfinished profile run makes the next launch start without the profile; a launch option starts without profile or user scripts.
 - [ ] **Recovery:** an SMA-free command processor (`Recovery >`) on the lowered console core, in its own assembly the build checks has no SMA reference; a spartan fallback screen stands in until then.
-- [ ] **Lowering fix and IL check:** re-create the lambda's return label after the IL generator swap in `Write-MicrosoftLambdaToMethodBuilder`; add the `opcode.def`-driven IL stack check after `Add-PersistedMethod` ([docs/lowering.md](docs/lowering.md)). Acceptance: the managed host rebuilds byte-identical and the check reports nothing.
+- [ ] **Lowering fix and IL check:** superseded by adopting PSLowering (Lowering with PSLowering, below), which does not use `Write-MicrosoftLambdaToMethodBuilder`. Do this only if adoption slips: re-create the lambda's return label after the IL generator swap; add the `opcode.def`-driven IL stack check after `Add-PersistedMethod` ([docs/lowering.md](docs/lowering.md)). Acceptance: the managed host rebuilds byte-identical and the check reports nothing.
 - [ ] **P8 Acceptance:** clean installation -> managed UI -> IME input -> asynchronous command -> formatted output -> prompt returns; graphical pane remains independent of cells; resize/window recreation works; profile failure leaves usable repair/export/clipboard controls. Record the same-artifact receipts on each backend.
 
 Microsoft guidance defines VT behavior, retained scene semantics and Terminal/Fluent interaction. Google guidance defines hardware Surface coverage, JNI thread/reference lifetimes, NativeActivity teardown, InputConnection, density/insets and accessibility. Exact source links and their implementation consequences are in [the work order](docs/work-managed-ui.md#consolehost-naming-and-managed-contract-refinement-2026-10-01). Following those contracts introduces no WinUI/XAML, Xamarin, browser, AndroidX or third-party managed UI dependency.
@@ -357,6 +387,82 @@ Design in [docs/native-extensions.md](docs/native-extensions.md). Each item is i
 - [ ] Launch-condition matrix per release candidate: cold start, warm resume, HOME then relaunch, activity re-creation, process death while backgrounded, trim-memory, first install, upgrade with data kept, cleared data, multi-window. Settings changes on a personal device (font scale, dark mode, airplane mode) only with the owner's approval.
 - [ ] On-device new package: a script or tile built on the device as its own app (own package name, icon, permissions, Keystore key) installs and runs; needs the proposed native-emission rule change.
 - [ ] On-device self-install: blocked on the signing-key decision (Keystore device key or APK Signature Scheme v3 rotation) and the proposed native-emission rule change in [docs/native-extensions.md](docs/native-extensions.md#updating-outside-a-store).
+
+## Lowering with PSLowering
+
+PSLowering compiles typed PowerShell classes to IL with its own emitter and
+checks every compiled method against PowerShell itself. It replaces the
+hand-built expression trees in `setup.ps1` and is the means for R3 and R6.
+Its output matched PowerShell on all three backends for every oracle call of
+`25427b2` (AGENTS.md, PSLowering output on devices). Take it from GitHub at a
+pinned commit and digest into `build/cache`, never from a local checkout.
+
+### Adoption
+
+- [ ] Managed host: compile `FindProfile` (its typed form is PSLowering's
+  `tests/fixtures/PwshFindProfileFixture.ps1`), the script-extraction method and
+  the asset bindings with PSLowering instead of `New-FindProfileMethod` and the
+  hand-built trees in `New-ManagedHostAssemblyBytes`. Gate: the host behaves the
+  same (gates 2a-2d and the ConsoleHost start on all three backends); the
+  bytes may differ.
+- [ ] Load compiled assemblies from private storage before `Profile.ps1`
+  (Private-storage assembly load, below), admitted by hash; the 2026-10-04
+  probe loaded them inside a running profile only.
+- [ ] R3 console core: compile `Console.psm1`'s parser, cell grid, width table,
+  line store, wrap map and frame differ as they become finished; measure
+  compiled against interpreted per frame on the arm64 and arm32 devices.
+  PSLowering compiles 39 of the 70 class methods today; its ROADMAP lists the
+  remaining gaps.
+- [ ] R6 Recovery: the console core plus a command loop in an assembly with no
+  SMA reference, started without SMA (PSLowering's `-EntryPoint` and
+  `Test-DotnetHost` prove the mechanism on Windows).
+
+### The parts bin
+
+Compile a piece when it is hot (per frame, sample, cell, packet or input
+event), must run without SMA (before the runspace, in Recovery, or called from
+native code), or is used by two or more consumers, and its contract has stopped
+changing. Keep orchestration, one-off setup, build-time generators, anything
+still being designed, users' scripts and diagnostics in PowerShell.
+
+Candidates, in build order:
+1. Native call primitives: callbacks and function-pointer calls (PSLowering
+   1.2), then the NDK bindings in `modules/AndroidCanvas.psm1` (window,
+   input queue, looper, choreographer) and the JNI table from
+   `scripts/probes/jni/Jni.ps1`.
+2. Audio: AAudio with a data callback, shared with Kokoro-Hexagon.
+3. Console: parser, styles, width table, cell grid, frame differ.
+4. Startup: persisted-assembly admission (hash, manifest, active pointer,
+   rollback).
+5. ADB framing and stream routing from `scripts/commands/Adb/UsbAdb.psm1`.
+
+Each part is its own small assembly with a stable public surface, a version and
+a hash; PowerShell loads and wires the parts (the composition root). Deterministic
+builds make rebuilds incremental: a part's key is the hash of its source, the
+compiler version and its references.
+
+### Measure before optimizing startup
+
+- [ ] Startup breakdown on the arm64 and arm32 test devices from the existing
+  markers (`GATE2A` through `RunPowerShell returned`): runtime start, assembly
+  load, `CreateDefault2`, `Open`, profile. The IL-only store raised startup from
+  0.51-0.55 s to 0.97-1.03 s (arm64) and from 3.8-4.0 s to 6.8-7.2 s (arm32);
+  the breakdown decides between persisted IL, precomputed startup state and
+  selective native code.
+- ReadyToRun stays out of the device build: it ships IL and native code for
+  every assembly. Native code returns only where measured, through the captured
+  leaf rule in AGENTS.md or a later relocatable form, and only through the
+  package installer.
+
+### Dependencies from other ecosystems
+
+Assemblies taken from .NET libraries (for example AI/ML packages) are pinned by
+version and digest like every input; a scheduled job may track their channel
+and propose new pins, promoted only when the suite and the device gates pass.
+Managed wrappers over large native runtimes (ONNX Runtime, TorchSharp) are PC
+tools and oracles unless their native code passes the same review as any native
+code. Nothing third-party enters the parts that must run without SMA unless
+audited.
 
 ## Optional on-device Morse and V.21
 
