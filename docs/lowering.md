@@ -40,11 +40,35 @@ opcode.
 5. `CreateType()`, `Save`, `Set-DeterministicMvid`: the same input gives the
    same bytes, which then go into the store like any other assembly.
 
-PowerShell `class` methods are not a lowering target: the generated method
-calls back into a script block (`ScriptBlockMemberMethodWrapper`,
+The methods SMA generates for a PowerShell `class` are not a lowering target:
+each calls back into a script block (`ScriptBlockMemberMethodWrapper`,
 `ClassOps.cs:98`, invoked at `:234`, PowerShell `149ab5cd`). The reference
 `modules/Console.psm1` stays a reference; the lowered core is a separate typed
 definition.
+
+## PSLowering
+
+[PSLowering](https://github.com/MansfieldPlumbing/PSLowering) compiles the
+*source* of a typed PowerShell class, not SMA's generated methods: it parses
+the class, admits a typed subset, lowers each method with PowerShell's
+meaning, and writes the IL with its own emitter through public
+`System.Reflection.Emit` APIs. Its output references only
+`System.Private.CoreLib`, and its own suites check it against PowerShell
+(a source oracle), against `LambdaCompiler`, and against this repository's
+`Test-ExpressionGraph` at a pinned commit. It is the intended replacement for
+steps 1 and 4 above: methods written as typed PowerShell instead of
+hand-built trees, without the return-label defect below.
+
+Device receipt, 2026-10-04: `tools/Build-LoweringProbe.ps1` takes PSLowering
+from GitHub at a pinned commit into `build/cache`, compiles every fixture
+class its oracle vectors use, and stages them with
+`scripts/probes/lowering/Profile.ps1`. Placed with
+`tools/Invoke-DeviceScript.ps1` in a `-Debuggable` build, the probe loads each
+assembly by path from private storage and runs every vector as the fixture's
+PowerShell class under SMA and as the compiled IL. All 196 calls agreed on
+the x86_64 emulator, the arm64 physical device and the arm32 device
+(AGENTS.md, "Proven on a device or the emulator"). Adopting it in
+`setup.ps1` and loading assemblies before `Profile.ps1` are still to do.
 
 ## Defect found: early returns emit invalid IL
 

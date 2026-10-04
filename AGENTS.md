@@ -398,13 +398,29 @@ only when that group's evidence exists. Name the source for every new fact.
   memory has an empty `Location`.
 - The arm32 host rejected a store whose version word carried the 64-bit flag;
   emitter and reader had agreed on it (arm32 device).
+- PSLowering output on devices, 2026-10-04, no rebuild beyond `-Debuggable`
+  (`fdf4719`): `tools/Build-LoweringProbe.ps1` compiled the 11 fixture
+  classes of PSLowering `25427b25` on Windows (PowerShell 7.7.0-preview.4,
+  .NET 11.0.0-preview.6), and `scripts/probes/lowering/Profile.ps1`, placed
+  with them through `run-as`, loaded each assembly by path from the app's
+  private files directory and ran PSLowering's 196 oracle vectors twice: as
+  the fixture's PowerShell class under SMA on the device, and as the compiled
+  IL. `LOWERING calls 196 divergences 0` on the x86_64 emulator, the arm64
+  physical device and the onn 4K Plus (arm32), each on .NET
+  11.0.0-rc.1.26425.128, alive 20 seconds later with an empty crash buffer.
+  This proves Windows-compiled PSLowering IL runs with PowerShell's meaning
+  on all three backends when loaded in a running process; it does not prove
+  loading before `Profile.ps1`, hash admission, or persistence across a
+  restart (ROADMAP: private-storage assembly load).
 
 ### Other repositories (their READMEs)
 
 - RyuJitDetach lifts leaf-only RyuJIT bodies into AMD64 Windows PE files; its
   shim owns every call. It does not produce ARM64 or Android code.
-- PSPersistence persists selected SMA expression trees as reloadable
-  assemblies. It does not produce native code.
+- PSLowering (formerly PSPersistence) compiles methods of typed PowerShell
+  classes to IL assemblies with its own PowerShell-authored emitter; its
+  output references only `System.Private.CoreLib`. It does not produce native
+  code.
 ## Rules for specific changes
 
 - `scripts/CellCanvas.ps1` is frozen (SHA-256
