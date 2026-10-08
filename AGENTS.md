@@ -99,6 +99,13 @@ Pwsh's performance comes from lowering, not from interpreting faster.
   installed state. A tool may be fetched ephemerally only if it is pinned, and
   only to verify output, never to produce it. The pinned runtime's own JIT is
   the one admitted producer outside `setup.ps1`, under the capture rule below.
+- `setup.ps1` builds the APK from pinned NuGet downloads and PowerShell alone.
+  Development tools outside the build may be used to author source, such as
+  Roslyn from the pinned PowerShell's `$PSHOME` to translate C# to PowerShell
+  in a separate repository. Their output enters this repository only as
+  reviewed PowerShell that names the source repository and commit, verified by
+  comparing its behavior with the original. No development tool becomes a
+  build input or ships.
 - Every capability claim names a gate and passes it on hardware. Unproven work
   is described as planned, not as done.
 - New code must not depend on .NET for Android (Xamarin) types. Android is
@@ -156,6 +163,15 @@ only when that group's evidence exists. Name the source for every new fact.
   of v11.0.0-rc.1.26425.128. The contract's layout is `host_runtime_contract.h`.
 - A 32-bit assembly store carries no 64-bit flag in its version word
   (`xamarin-app.hh` lines 14-19). Store name hashes are 32-bit on every target.
+- `Mono.Android.dll` in the pinned `Microsoft.Android.Runtime.37.android`
+  37.0.0-rc.1.2257 (built from dotnet/android `b65b55d5`, per its `.nuspec`)
+  carries 108,022 `[Register]` attributes: 9,063 Java types and 77,689 members
+  with JNI signatures, about 2.3 MB of member names and signatures. It also
+  records the API level of 84,486 members, 11,243 `IntDefinition` constant
+  mappings and 691 `RequiresPermission` entries. Its binding bodies call
+  `Java.Interop` (`ContextWrapper.get_PackageName` is 38 bytes of IL around
+  `JniPeerMembers.InstanceMethods.InvokeVirtualObjectMethod`), so the data is
+  usable and the IL is not.
 
 ### Implemented (checked by the build on every run)
 
@@ -413,6 +429,17 @@ only when that group's evidence exists. Name the source for every new fact.
   loading before `Profile.ps1`, hash admission, or persistence across a
   restart (ROADMAP: private-storage assembly load).
 
+- ConsoleHost startup, 2026-10-03: release APKs (`-Startup ConsoleHost`, not
+  debuggable) built from `fdf4719` on the x86_64 emulator (API 36), the arm64
+  physical device (API 36) and the onn 4K Plus (API 34) started from the
+  launcher with no `run-as` step, copied the 7 script assets, logged every
+  marker through `CONSOLEHOST START_INVOKE_END` and `RunPowerShell returned
+  0x50575348`, drew the banner and prompt, and evaluated `1+2` typed through
+  `adb shell input` as `3`; each process was alive 40 seconds later with an
+  empty crash buffer and no not-responding event, and the onn drew no frame
+  during 10 idle seconds. Not yet accepted: input from the on-screen keyboard,
+  a shipped command resolving from `PATH`, and a fresh install.
+
 ### Other repositories (their READMEs)
 
 - RyuJitDetach lifts leaf-only RyuJIT bodies into AMD64 Windows PE files; its
@@ -423,27 +450,19 @@ only when that group's evidence exists. Name the source for every new fact.
   code.
 ## Rules for specific changes
 
+- Acceptance workloads are the shipped ConsoleHost console (its acceptance
+  list is in `docs/console-host.md`) and the conformance scripts. No
+  compatibility surface is built to reproduce a removed framework's API.
 - `scripts/CellCanvas.ps1` is frozen (SHA-256
-  `8E96992365A72E81B1A1EEB518AE9052020519EA175EC5465BAC4A989928F3B9`). Xamarin
-  is removable implementation; the frozen script is evidence. Remove
-  dependencies beneath it. Do not edit it, and do not replace it with a new
-  application API as part of removing Xamarin. It was renamed from
-  `CanvasDemo.ps1` without changing its bytes, so its own error text still
-  names the old file.
-- CellCanvas is the product's cell-grid surface, the primitive the ANSI
-  terminal is built on. It presents cells through Android `Canvas` per cell or
-  through one packed AGSL `RuntimeShader`. Its animated fill, 120 fps request
-  and `FPS`/`CELL`/`UP`/`SUBMIT`/`TOTAL`/dropped-frame log line are a stress
-  test and benchmark of those presenters, not a rendering design: they do not
-  establish that the terminal redraws every frame.
-- Leaving Xamarin proceeds by gates, each proved alone: 2a CoreCLR runs one
-  managed log line from `ANativeActivity_onCreate`; 2b the owned host serves
-  assemblies from the existing store; 2c a runspace opens with
-  `UseCurrentThread` and `DefaultRunspace` stays set on the main thread; 2d
-  `Profile.ps1` runs through the same path as today; 2e an owned compatibility
-  assembly satisfies the CellCanvas contract; 2f the frozen bytes run with
-  Mono.Android, Mono.Android.Runtime, Java.Interop, libmonodroid,
-  libxamarin-app, Xamarin DEX and type maps absent.
+  `8E96992365A72E81B1A1EEB518AE9052020519EA175EC5465BAC4A989928F3B9`) as a
+  benchmark of the cell presenters: Android `Canvas` per cell, or one packed
+  AGSL `RuntimeShader`. Do not edit it. Its animated fill, 120 fps request and
+  `FPS`/`CELL`/`UP`/`SUBMIT`/`TOTAL`/dropped-frame log line measure those
+  presenters; they do not establish that the terminal redraws every frame. It
+  was renamed from `CanvasDemo.ps1` without changing its bytes, so its own error
+  text still names the old file. Gates 2a-2d removed Xamarin; the former gates
+  2e and 2f, a Xamarin-shaped compatibility assembly for this script, are
+  retired.
 - Every gate runs on three backends: x86-64 on the emulator finds the next
   boundary; arm64 on a physical device confirms it; arm32 must pass
   before the gate is called portable. Each backend is independent evidence:
@@ -451,39 +470,48 @@ only when that group's evidence exists. Name the source for every new fact.
   does not waive a 64-bit invariant (a misaligned fat method header is fatal
   on 64-bit CoreCLR and passes unchecked on 32-bit). Port each narrow gate to
   arm64 and arm32 as soon as it passes on x86-64, before building the next
-  layer; `Profile.ps1` waits until gate 2c passes on all three.
-- Compatibility is scoped by the frozen workload, not by namespace. Defining
-  `Android.Graphics.Bitmap` obliges exactly the constructors, members, return
-  values, lifetime and interactions the frozen script reaches, taken from its
-  AST resolved against the pinned Mono.Android metadata and from a traced run
-  on the Xamarin baseline. Do not build Java peer tracking, arbitrary Java
-  subclassing, type maps or the Java.Interop object model.
-- In the Xamarin baseline, CellCanvas runs on the Android main thread: the host
-  runs `Profile.ps1` in a `UseCurrentThread` runspace there, and the script's
-  delegates are invoked there. `activity->env` belongs to the main thread; any
-  other thread attaches through `activity->vm`. For CellCanvas, Android's own
-  `Canvas`, `Bitmap`, `Paint` and AGSL `RuntimeShader` stay the implementation,
-  reached through JNI on the `Surface` from `ANativeWindow_toSurface`; its
-  `SetContentView` call binds that surface and never reaches the real one.
+  layer.
+- Android APIs are reached through JNI using a binding table extracted at build
+  time from the `[Register]` attributes of `Mono.Android.dll` in the pinned
+  `Microsoft.Android.Runtime.37.android` package, read as metadata only and
+  cross-checked against AOSP `core/api/current.txt` at a pinned commit. Calls
+  go by name through the table, or through generated typed wrappers lowered to
+  IL where a path is hot. `Mono.Android`, `Java.Interop` and their IL are never
+  loaded, executed or shipped. Do not build Java peer tracking, type maps or
+  the Java.Interop object model.
+- Java classes in the DEX are generated only for manifest components and
+  callback bridges: the `NativeActivity` subclass, services, broadcast
+  receivers, content providers, widget providers, tile services, the
+  `InvocationHandler` behind `java.lang.reflect.Proxy`, and subclasses of
+  abstract callback types a workload uses. Each generated class extends its
+  framework type, and each overridden method is a `native` method registered to
+  a managed callback. Nothing else is written in Java.
+- The runspace runs on the Android main thread (`UseCurrentThread`), and the
+  window and input callbacks arrive there. `activity->env` belongs to the main
+  thread; any other thread attaches through `activity->vm`. Android's own
+  `Canvas`, `Bitmap`, `Paint` and AGSL `RuntimeShader` draw, reached through JNI
+  on the `Surface` from `ANativeWindow_toSurface`.
 - Keep `NativeActivity`'s `NativeContentView` as the content view. Under the
   surface `NativeActivity` takes, `ViewRootImpl` draws no views
   (`ViewRootImpl.java:4838`), input goes to the native queue (`:1450`), and
   `NativeActivity` derives the content rectangle and IME focus from that view
   (`NativeActivity.java:301-335`; frameworks/base `299fe6f5`). Non-drawing
-  views, such as the text-input view, may be added with `addContentView`. The
-  one emitted `NativeActivity` subclass on the roadmap is a fixed class, not
-  arbitrary Java subclassing. Rendering goes through the window surface; the
-  renderer is chosen separately.
+  views, such as the text-input view, may be added with `addContentView`.
+  Rendering goes through the window surface; the renderer is chosen
+  separately.
 - Layering. QuickPS Android mechanisms are literal and policy-free: NDK
   exports, JNI function-table dispatch, looper and input primitives, the
-  choreographer binding. The Pwsh compatibility assembly owns the
-  `[UnmanagedCallersOnly]` callbacks installed in the `NativeActivity`
-  callback table and passed to `AChoreographer`, turns them into the
-  Xamarin-shaped `Touch`, `KeyPress` and `PostOnAnimation`, and invokes the
-  frozen script's delegates where CellCanvas expects them (in the baseline, on
-  the main thread). No hand-written native stub
-  sits between the callback and managed code. Only the compatibility
-  assembly uses `Android.*` and `Java.*` names.
+  choreographer binding. Pwsh owns the `[UnmanagedCallersOnly]` callbacks
+  installed in the `NativeActivity` callback table, passed to `AChoreographer`
+  and registered for generated Java classes, and turns them into events for
+  PowerShell on the main thread. No hand-written native stub sits between the
+  callback and managed code.
+- Code is lowered when it runs per byte, cell, glyph or frame; when it is
+  called on a thread other than its runspace's (host interfaces called from a
+  pipeline thread, native callbacks); when it must work without SMA (the crash
+  guard and Recovery); or when a measurement on the startup path justifies it.
+  Decisions made at event rate stay in PowerShell: the lowered core does the
+  work and hands decisions to the main thread.
 - Before modifying `Read-ElfImage`, the SysV ELF hash implementation, or the
   emitted ELF hash-table structure, add and pass a permanent multi-bucket hash
   self-test that covers successful chained lookups and missing-symbol lookups.
@@ -492,14 +520,19 @@ only when that group's evidence exists. Name the source for every new fact.
 
 Verify each on hardware before relying on it.
 
-- The repository has no separate production `Profile.ps1` payload. The frozen
-  `scripts/CellCanvas.ps1` is the real application workload that occupies that
-  role. Its exact-byte execution through the gate 2d path is therefore proven at
-  gate 2f, after gate 2e provides the required Android compatibility surface.
-- Not yet proven: Activity-dependent startup behavior; the compatibility
-  surface CellCanvas requires; the recovery screen; the animation callback;
-  exact frozen CellCanvas execution without Xamarin; the 40 store assemblies no
-  proven path has requested, served in place.
+- Not yet proven: Activity re-creation (a second `ANativeActivity_onCreate`
+  fails `coreclr_initialize` with 0x80131022 on Google TV); the binding table;
+  generated component classes; pseudo-terminal sessions for native programs;
+  the crash guard and Recovery; the animation callback; the 40 store
+  assemblies no proven path has requested, served in place.
+- The console's command runner invokes input with `&`, a child scope, so
+  variables and functions defined at the prompt do not persist; it renders
+  objects by string conversion rather than the formatting system; and it runs
+  on the main thread without a `PSHost` implementation. Its own host replaces
+  it.
+- A burst of 30 keys injected with `adb shell input text` reached the console
+  as 26 characters on the onn 4K Plus; the same keys sent one at a time all
+  arrived. Not yet traced.
 - Still open for QuickPS: its `CallingConvention.StdCall` attribute was
   harmless for one argument-free call (`GetVersion`) on all three backends;
   calls with arguments through it are untested.
