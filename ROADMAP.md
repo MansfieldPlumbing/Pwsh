@@ -80,6 +80,252 @@ Pwsh takes it at a pinned commit.
    installed, unpinned aapt2 as a diagnostic); regenerate the learn site from a
    pushed SHA per [docs/publishing.md](docs/publishing.md).
 
+## Direction and plan (2026-10-08)
+
+Pwsh makes an Android device a general-purpose computer, a peer of Windows
+and Linux machines (`AGENTS.md`, Purpose). The organizing milestone is remote
+access the way those machines offer it. Every item below names the
+foundations it waits on (F1-F6). Nothing here is proven until it names a gate
+and a receipt.
+
+### Foundations
+
+- [ ] **F1 Binding table.** Extract `[Register]` rows (Java class, member, JNI
+  signature, API level, constants, nullability, permissions, overridable flag)
+  from `Mono.Android.dll` in the pinned `Microsoft.Android.Runtime.37.android`
+  37.0.0-rc.1.2257 (dotnet/android `b65b55d5`) as metadata, at build time.
+  Cross-check against AOSP `core/api/current.txt` at a pinned commit. Drop
+  removed APIs and Java SE packages that .NET covers. Ship the table
+  compressed (about 2.6 MB uncompressed in full). Tiers: call by name through
+  the table; typed wrappers lowered on the device; typed wrappers lowered at
+  build time.
+- [ ] **F2 Component DEX.** Recover the DEX writer from `0804758`
+  (`New-JavaPeerDex`, `Invoke-DexStep`). Generate the `NativeActivity`
+  subclass (Java-side load of the crypto library for TLS and hashing;
+  `onRequestPermissionsResult`, `onActivityResult`), the foreground service,
+  the `InvocationHandler` behind `java.lang.reflect.Proxy` (listener
+  interfaces), and subclasses of abstract callback types a workload uses. Each
+  overridden method is a `native` method registered to a managed callback.
+  Reference for the generator: dotnet/android `b65b55d5` Java callable
+  wrappers (MIT).
+- [ ] **F3 Resources.** Emit `resources.arsc` and compiled XML resources:
+  app shortcuts, the widget provider description and layouts, icons.
+- [ ] **F4 Foreground service.** Keeps the runtime alive with the screen off;
+  needed by the peer link, widgets, downloads and the socket service.
+- [ ] **F5 Lowered console core.** `modules/Console.psm1`: 66 of 70 class
+  methods already avoid pipelines, commands, scriptblocks, hashtables and
+  PowerShell-only operators; fix `ConsoleDiff.Frames`,
+  `ConsoleModel.StreamStyle`, `ConsoleModel.Compose` and
+  `ConsoleFrameRing.AcquireLatest`; type the 164 untyped local assignments;
+  prove parity between script and IL on the 63 conformance vectors.
+- [ ] **F6 PSLowering requirements** (requests to that project): reference
+  SMA and derive from its abstract classes (`PSHost`,
+  `PSHostUserInterface`, `PSHostRawUserInterface`); emit
+  `[UnmanagedCallersOnly]` methods and expose their function pointers; emit
+  `calli`.
+
+### Remote access (milestone)
+
+- [ ] **Device identity.** A P-256 key pair per device, created on the device
+  and never exported (Android Keystore, StrongBox where present). It is the SSH
+  host key and the TLS identity for every remote service below.
+- [ ] **PSRP over SSH.** Stock `pwsh` reaches the device with `Enter-PSSession
+  -HostName` and `Invoke-Command -HostName`. An SSH server written in
+  PowerShell with what .NET provides (ECDH and ECDSA on P-256, AES-GCM),
+  public-key authentication only, on an unprivileged port. Its `powershell`
+  subsystem relays to SMA's own in-process PSRP server: the
+  `RemoteSessionNamedPipeServer` every PowerShell process starts (a Unix domain
+  socket restricted to the same user) served by `NamedPipeProcessMediator`,
+  which does not end the process on error (`OutOfProcServerMediator.cs:510`,
+  `RemoteSessionNamedPipe.cs:296`, PowerShell `149ab5cd`; re-read at the
+  shipped preview). Sessions run inside the app with access to JNI and the
+  binding table. To verify: the listener binds on the device (temp directory,
+  socket path length), and how to serve more than one session (the mediator is
+  a singleton).
+- [ ] **Pairing.** Exchange the device's host key and the client's public key
+  once, by a short code (SPAKE2, shared with ADB wireless pairing) or over a
+  USB cable. `authorized_keys` and `known_hosts` then pin both sides.
+- [ ] **Authorization.** PSRP session configurations restricted per client in
+  the style of JEA; a full session is an explicit grant. Every session and
+  command is logged with client, command and result.
+- [ ] **Projection serving.** HTTP and WebSocket on the device serving views
+  as web pages backed by Pwsh commands, reachable from any browser on the LAN
+  or tailnet, TLS with the device identity.
+- [ ] **RDP host.** The device appears in RDP clients (Windows App) as a
+  computer. The session shows Pwsh's own desktop rendered off-screen for that
+  session, so it needs neither `MediaProjection` nor an accessibility service.
+  Minimal: TLS security, bitmap updates of damaged regions, keyboard and mouse
+  input. Later: NLA, the H.264 graphics pipeline from `MediaCodec`, clipboard
+  and audio. First implementation: FreeRDP's server library as a native
+  extension (license and Android build to verify); a PowerShell server from
+  `MS-RDPBCGR` and `MS-RDPEGFX` later.
+- [ ] **Reachability.** Listen on LAN and tailnet addresses; Android allows one
+  VPN, so Pwsh uses Tailscale rather than its own WireGuard when it runs. A
+  device behind carrier NAT without Tailscale dials out to a peer and serves
+  requests over that connection.
+- [ ] **Server readiness.** Foreground service of type `specialUse`
+  (`dataSync` and `mediaProcessing` are time-limited from Android 15), partial
+  wake lock and Wi-Fi lock while serving, `BOOT_COMPLETED` restart, battery
+  optimization exemption. Acceptance: 24 hours serving with the screen off on
+  battery-protected charging, through one reboot, with uptime, temperature and
+  throughput recorded.
+- [ ] **USB debugging disabled.** Every adb duty replaced: session (PSRP),
+  files (over SSH and a `DocumentsProvider`), installs and updates
+  (`PackageInstaller`; whether self-updates can skip confirmation is to be
+  verified), logs (Pwsh's own log; `READ_LOGS` granted once beforehand),
+  recovery (crash guard, Recovery, overlay and split rollback). adb remains
+  only for a base APK that cannot start.
+- Acceptance: (1) from Windows, `Enter-PSSession -HostName <device>` over the
+  LAN; (2) the same over Tailscale from a remote network, starting a download
+  on the device and reading its progress; (3) all of it with USB debugging
+  off.
+- Waits on F1, F2 (crypto for SSH and TLS), F4, the socket service.
+
+### UI that ships
+
+- [ ] **Console.** Lower the core (F5). Cheap fixes first: run input with `.`
+  instead of `&` (prompt state is lost today), format through `Out-String
+  -Stream`, render every stream. Then an own host: `PSHost`,
+  `PSHostUserInterface`, `PSHostRawUserInterface` over `ConsoleModel`,
+  pipelines on their own thread with Ctrl+C, decisions handed to the main
+  thread. Port progress layout, prompts, choices, secure input, transcription
+  (`Start-Transcript` lives in ConsoleHost, not SMA) and the executor pattern
+  from PowerShell's ConsoleHost source at the shipped preview, verified by
+  comparing rendered output with Microsoft's ConsoleHost.
+- [ ] **Recovery.** Drawn on the window surface with the lowered console core,
+  free of SMA. Actions: copy diagnostics, set the profile aside, retry, import
+  a profile through the document picker (needs F2). The removed generators at
+  `0804758` (`Add-RecoveryScreenMethods`, `Add-RecoveryActionMethods`,
+  `Add-RecoverySupportMethods`, `Add-DocumentImportMethods`) are the reference
+  for the action set.
+- [ ] **Crash guard.** The managed host counts starts in private storage before
+  SMA loads and resets after a stable interval; at 2 consecutive failures skip
+  `Profile.ps1`, at 3 open Recovery and roll back the active IL overlay.
+- [ ] **Settings.** `settings.ps1` reached from a launcher shortcut (static
+  shortcut, `activity-alias`, gear icon; needs F3) and from
+  `ACTION_APPLICATION_PREFERENCES` (manifest only). Visual reference: the
+  Fluent-faithful notepad and settings recreations (layered surfaces, settings
+  cards, section headers, toggles, honest loading and failure states).
+- [ ] **Theme record.** One source of truth for colors, radii and type, read
+  by the console palette and graphical panes. Fonts: Selawik and Cascadia Code
+  (open licenses to verify); icons: Fluent UI System Icons (MIT, to verify).
+
+### Permissions and first run
+
+- [ ] Generate a protection-level table from AOSP
+  `core/res/AndroidManifest.xml` at a pinned commit; declare from it, never by
+  hand.
+- [ ] Declare all normal permissions; request runtime permissions at first
+  use; open special-access screens by deep link; offer development
+  permissions (`READ_LOGS`, `WRITE_SECURE_SETTINGS`, `DUMP`,
+  `PACKAGE_USAGE_STATS`) as an optional one-time grant from a PC.
+- [ ] First-run screen as a status page with one-tap grants, using the
+  consent-record pattern (Grant, Revoke) of the reference settings page.
+- [ ] Flag script calls that need a permission the app does not hold, from the
+  table's `RequiresPermission` rows.
+
+### Terminal sessions for native programs
+
+- [ ] Pseudo-terminal sessions: `posix_openpt`/`grantpt`/`unlockpt`/`ptsname`;
+  spawn with a new session and the slave as controlling terminal (verify
+  `posix_spawn` on bionic; never `fork` in CoreCLR); `TIOCSWINSZ` on resize;
+  exit through `pidfd_open` on the looper.
+- [ ] VT coverage for full-screen programs: alternate screen, cursor-key mode,
+  scroll regions, insert and delete line and character, save and restore
+  cursor, bracketed paste, mouse reports, device attribute and cursor
+  position replies.
+- [ ] Key encoding to VT input sequences; route native commands typed at the
+  prompt to a terminal session.
+- [ ] Executables reach the device only through the installer as `lib*.so`.
+  First program: Edit, built for `aarch64-linux-android` from pinned source in
+  a separate repository (its release ships only a glibc Linux build). Second:
+  Codex (`aarch64-unknown-linux-musl`, 74 MB compressed), delivered separately,
+  with DNS through the local proxy.
+
+### Services on the device
+
+- [ ] `DownloadManager` commands (`Start-Download`, `Get-Download`): the system
+  service does HTTPS, resumes and survives the app; F1 only.
+- [ ] Socket service: authenticated loopback HTTP `CONNECT` proxy (secret per
+  launch), port forward, Wake-on-LAN. Acceptance: reach a home PC's RDP port
+  through the device over Tailscale.
+- [ ] Optional Wi-Fi Direct group with the proxy (the TetherFi model).
+- [ ] Widgets (F2, F3, F4): an `AppWidgetProvider` whose content is a bitmap
+  drawn with the canvas, taps through `PendingIntent` to an alias. Acceptance:
+  pin a script's output to the home screen. Measure update latency when the
+  runtime is not running.
+- [ ] Telemetry without adb: a log file in private storage exportable from
+  Recovery; optional TCP over the tailnet; optional `READ_LOGS`. The emitted
+  `libpsl-native` syslog exports only reach logcat.
+
+### ADB transports
+
+- [ ] Split `UsbAdbClient`'s protocol core (messages, authentication, streams,
+  shell v2, sync) from its WinUSB transport.
+- [ ] Transports: WinUSB (Windows); Android USB host through `UsbManager` and
+  `USBDEVFS_BULK` on the connection's descriptor (device-to-device over OTG);
+  TCP; TCP with TLS and SPAKE2 pairing (wireless debugging, including the
+  device's own adbd). Store the adb key in the Android Keystore. Wireless
+  debugging requires Wi-Fi and turns off on reboot.
+- Acceptance: the arm64 device installs and starts Pwsh on the arm32 device
+  over a USB cable.
+
+### Porting tools
+
+- [ ] cs2ps, in its own repository: Roslyn from the pinned PowerShell's
+  `$PSHOME` parses C# and, with its semantic model, emits typed PowerShell;
+  Xamarin calls become JNI calls through F1. Inputs: PowerShell ConsoleHost
+  (progress first), subsystem's Android drivers and cmdlets, dotnet/android's
+  wrapper generator. Output enters Pwsh only as reviewed PowerShell naming its
+  source repository and commit, verified by comparing behavior.
+
+### Ownership
+
+- Pwsh: the Android integrations and a general native-call mechanism that
+  loads third-party `.so` files and binds their exports.
+- Kokoro-Hexagon: LiteRT-LM bindings and any assistant, on GPU or CPU, keeping
+  the DSP for its own pipeline.
+- QuickPS: native bindings and the Windows appliance composer (typed
+  PowerShell lowered to a CoreLib floor, packed with CoreCLR and RyuJIT into one
+  executable; size target to be measured before it is promised).
+- PSLowering: the compiler, including the CoreLib-only floor check.
+
+### Deferred
+
+- Re-pin `System.Security.Cryptography.Pkcs` (11.0.0-preview.6) to
+  11.0.0-rc.1.26425.128 and SMA (7.7.0-preview.4) to 7.7.0-preview.5 when
+  ready.
+
+### Sidecar work
+
+- [ ] A canvas contract: the 18 `GpuCanvas2D` members the conformance Desktop
+  reaches (`BeginFrame`, `EndFrame`, `Pump`, `Dispose`, `SetCursor`,
+  `FillRect`, `DrawRect`, `DrawLine`, `DrawText`, `MeasureText`, `DrawShadow`,
+  `DrawWireIcon`, `SetOpacity`, `Scale`, `PushClip`, `PopClip`,
+  `PushTransform`, `PopTransform`), implemented over Android `Canvas` and over
+  QuickPS's Direct2D, replacing the Windows-only C++/CLI
+  `DirectPort.PowerShell.dll`.
+- [ ] Desktop: on that contract; make `Pump` block without a timeout and wake
+  on explicit requests (clock, animation frames) instead of 100 ms and 1 ms
+  timeouts. Drawing is already gated on `RenderRequested`.
+- [ ] Start: rebuild from the live-tile contract (QuickPS `7023082`
+  `docs/TILES-CONTRACT.md`, removed from QuickPS in `f1b1c90`) with `Start.tsx`
+  as the visual reference: layout only on reflow, per-frame work limited to the
+  closed animation catalogue.
+- [ ] Rubiks, Tetris, CanvasDemo: later, each checked against its `.tsx` twin.
+- [ ] Remote desktop client with Desktop as the shell and FreeRDP's C library
+  as a native extension (license and release to verify).
+- [ ] ASP.NET Core on the device: start a bare Kestrel endpoint in Pwsh and
+  reach it over Tailscale. If it runs, a .NET server application such as
+  Jellyfin becomes a packaging question (its native ffmpeg and SQLite builds
+  aside).
+- [ ] Task manager over Android process and service data, from the task manager
+  recreation (navigation rail, command bar, columns with live totals, details
+  pane, startup list).
+- [ ] AOA as a pipe for pairing, updates from a paired PC and recovery without
+  a network; a PC-side PowerShell module plus Wintun only if a full network
+  adapter is ever needed (an app cannot present a USB network function).
+
 ## Completed build-unblocking work
 
 - [x] Byte-identical APK proof of the 2026-09-26 refactor (package pins,

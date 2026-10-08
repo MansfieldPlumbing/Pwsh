@@ -3,8 +3,20 @@
 > A bespoke SDK in one PowerShell script, bringing in-process PowerShell
 > runspaces to Android—because “every system” should mean every system.
 
-**Status: 1.0-preview.** The build and Android hosting substrate are working;
-the integrated terminal and general application surface remain gated work.
+## Purpose
+
+Pwsh makes an Android device a general-purpose computer: a peer of Windows
+and Linux machines, with a scriptable CoreCLR runtime and PowerShell as its
+shell. The measure is whether a Windows or Linux machine has the equivalent:
+remote PowerShell sessions over PSRP and SSH, a desktop reachable over RDP,
+services that run as a server's would, and operation with USB debugging
+disabled. The console is one front end of the runtime, not the product.
+
+**Status: 1.0-preview.** The build and Android hosting substrate are working.
+The shipped console (`-Startup ConsoleHost`) starts from the launcher on the
+x86-64 emulator, an arm64 phone and an arm32 Google TV device and evaluates
+input; its host, terminal sessions for native programs and the general
+application surface remain gated work.
 
 One PowerShell script. No .NET SDK, no Android SDK, no JDK, no NuGet client, no
 MSBuild, no Roslyn, no `aapt2`, no `javac`, no `d8`, no `apksigner`, no

@@ -2,6 +2,16 @@
 
 Keep this repository narrow and evidence-led.
 
+## Purpose
+
+Pwsh makes an Android device a general-purpose computer: a peer of Windows and
+Linux machines, with a scriptable CoreCLR runtime and PowerShell as its shell.
+Features are judged by whether a Windows or Linux machine has the equivalent:
+remote sessions through PSRP over SSH, a desktop reachable through RDP,
+services that run as a server's would, and operation with USB debugging
+disabled. The console is one front end of the runtime, not the product. Work
+that does not move a device toward that is sidecar work.
+
 ## Stance: the rules govern evidence, not technique
 
 These rules exist to keep every claim true. They do not rank techniques.
