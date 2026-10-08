@@ -112,17 +112,22 @@ and a receipt.
   app shortcuts, the widget provider description and layouts, icons.
 - [ ] **F4 Foreground service.** Keeps the runtime alive with the screen off;
   needed by the peer link, widgets, downloads and the socket service.
-- [ ] **F5 Lowered console core.** `modules/Console.psm1`: 66 of 70 class
-  methods already avoid pipelines, commands, scriptblocks, hashtables and
-  PowerShell-only operators; fix `ConsoleDiff.Frames`,
-  `ConsoleModel.StreamStyle`, `ConsoleModel.Compose` and
-  `ConsoleFrameRing.AcquireLatest`; type the 164 untyped local assignments;
-  prove parity between script and IL on the 63 conformance vectors.
-- [ ] **F6 PSLowering requirements** (requests to that project): reference
-  SMA and derive from its abstract classes (`PSHost`,
-  `PSHostUserInterface`, `PSHostRawUserInterface`); emit
-  `[UnmanagedCallersOnly]` methods and expose their function pointers; emit
-  `calli`.
+- [ ] **F5 Lowered console core.** `modules/Console.psm1`: PSLowering's
+  admission check compiles 39 of its 70 class methods at `1afabe05`; the rest
+  wait on PSLowering item 1.4 (`List` indexing and `foreach` over collections,
+  mixed numeric promotion, `if` as a value, conversions without a CLR
+  operator). On the Pwsh side, rewrite the remaining scriptblock, hashtable and
+  expandable-string uses (`ConsoleDiff.Frames`, `ConsoleModel.StreamStyle`,
+  `ConsoleModel.Compose`, `ConsoleFrameRing.AcquireLatest`). Prove parity
+  between script and IL on the 63 conformance vectors.
+- [ ] **F6 PSLowering requirements** (requests to that project). CoreLib is
+  the floor, not the ceiling: (1) declared references above the floor, with a
+  check that an assembly declared CoreLib-only stays so; first use, SMA, to
+  derive from `PSHost`, `PSHostUserInterface` and `PSHostRawUserInterface`;
+  (2) `[UnmanagedCallersOnly]` methods with their function pointers and (3)
+  unmanaged `calli`, both PSLowering item 1.2 and in progress; (4) the console
+  core gaps of its item 1.4 (39 of 70 `Console.psm1` class methods lower at
+  `1afabe05`).
 
 ### Remote access (milestone)
 

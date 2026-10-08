@@ -455,9 +455,13 @@ only when that group's evidence exists. Name the source for every new fact.
 - RyuJitDetach lifts leaf-only RyuJIT bodies into AMD64 Windows PE files; its
   shim owns every call. It does not produce ARM64 or Android code.
 - PSLowering (formerly PSPersistence) compiles methods of typed PowerShell
-  classes to IL assemblies with its own PowerShell-authored emitter; its
-  output references only `System.Private.CoreLib`. It does not produce native
-  code.
+  classes to IL assemblies with its own PowerShell-authored emitter, keeping
+  PowerShell's meaning. `System.Private.CoreLib` is its floor, not its
+  ceiling: an assembly can be held to CoreLib alone (the command processor,
+  Recovery, code started before SMA), and references further assemblies a
+  consumer declares, such as SMA for a `PSHost` implementation. Its output at
+  `1afabe05` references CoreLib only; declared references are a request (see
+  the roadmap, F6). It does not produce native code.
 ## Rules for specific changes
 
 - Acceptance workloads are the shipped ConsoleHost console (its acceptance
