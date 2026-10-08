@@ -290,10 +290,12 @@ and a receipt.
   loads third-party `.so` files and binds their exports.
 - Kokoro-Hexagon: LiteRT-LM bindings and any assistant, on GPU or CPU, keeping
   the DSP for its own pipeline.
-- QuickPS: native bindings and the Windows appliance composer (typed
-  PowerShell lowered to a CoreLib floor, packed with CoreCLR and RyuJIT into one
-  executable; size target to be measured before it is promised).
-- PSLowering: the compiler, including the CoreLib-only floor check.
+- QuickPS: native bindings and applications built on them (SoundRecorder,
+  Calculator, the gallery).
+- PSLowering: the compiler, and the Windows counterpart of Pwsh's APK: EXE and
+  DLL files made to order, a chassis of CoreCLR and RyuJIT in one executable
+  with a deflate-compressed, in-memory assembly store (CoreLib plus the app,
+  about 9.2 MB estimated, to be measured).
 
 ### Deferred
 
