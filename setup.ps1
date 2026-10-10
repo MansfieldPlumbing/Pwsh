@@ -622,7 +622,7 @@ $script:KeepPackageCache = -not $DeletePackages -and $Packages -eq 'Folder'
 # any of them fails verification before a single byte is parsed.
 $script:RepositoryLibBaseUrl = 'https://raw.githubusercontent.com/MansfieldPlumbing/Pwsh/fea685e5769999ef969a988bb63686cd1fd73d81/lib/'
 $script:LibRootManifestPath = 'manifest.json'
-$script:LibRootManifestSha256 = '04E0B859FB6569884749E9E4FCC1057EB106FB220361C1BF722D0F7F634B5913'
+$script:LibRootManifestSha256 = '49EA6FBFF35E4CD447A8C870E837E7B3EEA2AB17672F11961874BB891C1A619D'
 $script:LibSourceManifest = $null
 
 function Get-LibFileBytes {
@@ -4629,7 +4629,7 @@ function New-PslNativeLibrary {
     # Native_*Log exports during startup; they forward to bionic, which routes
     # syslog to logcat. The remaining exports exist so every P/Invoke resolves;
     # they report failure until they are implemented. Export list: SMA
-    # v7.7.0-preview.4 CorePsPlatform.cs, SysLogProvider.cs and
+    # v7.7.0-preview.5 CorePsPlatform.cs, SysLogProvider.cs and
     # RunspaceConnectionInfo.cs.
     param([int] $PageSize = 16384)
 
