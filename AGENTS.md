@@ -503,6 +503,11 @@ only when that group's evidence exists. Name the source for every new fact.
   list is in `docs/console-host.md`), the conformance scripts and unchanged
   parity profiles compared against the Xamarin-based build at `0804758`.
   Parity preserves what PowerShell scripts see, not Xamarin's internals.
+  Removing Xamarin must preserve unchanged PowerShell scripting against its
+  public Android.* and Java.* API: names, member shapes, inheritance,
+  $Activity, callbacks and exception behavior. Reproducing that script-visible
+  API with our own implementation is required, not prohibited. Restore the
+  profile runtime, recovery and document import along with it.
 - `scripts/CellCanvas.ps1` is frozen (SHA-256
   `8E96992365A72E81B1A1EEB518AE9052020519EA175EC5465BAC4A989928F3B9`) as a
   benchmark of the cell presenters: Android `Canvas` per cell, or one packed
@@ -510,9 +515,9 @@ only when that group's evidence exists. Name the source for every new fact.
   `FPS`/`CELL`/`UP`/`SUBMIT`/`TOTAL`/dropped-frame log line measure those
   presenters; they do not establish that the terminal redraws every frame. It
   was renamed from `CanvasDemo.ps1` without changing its bytes, so its own error
-  text still names the old file. Gates 2a-2d removed Xamarin; the former gates
-  2e and 2f, a Xamarin-shaped compatibility assembly for this script, are
-  retired.
+  text still names the old file. Gates 2a-2d proved the Xamarin-free startup
+  substrate; they did not prove script-visible API parity. The restoration
+  and unchanged-profile comparisons establish that parity separately.
 - Every gate runs on three backends: x86-64 on the emulator finds the next
   boundary; arm64 on a physical device confirms it; arm32 must pass
   before the gate is called portable. Each backend is independent evidence:
