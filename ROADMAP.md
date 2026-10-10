@@ -380,7 +380,7 @@ and a receipt.
   recreation (navigation rail, command bar, columns with live totals, details
   pane, startup list).
 - [ ] AOA as a pipe for pairing, updates from a paired PC and recovery without
-  a network; a PC-side PowerShell module plus Wintun only if a full network
+  a network; the single-file PC-side `scripts/usbaoa.ps1`, plus Wintun only if a full network
   adapter is ever needed (an app cannot present a USB network function).
 
 ## Completed build-unblocking work
@@ -639,9 +639,20 @@ These are separate capability gates; the initial operational PowerShell console 
   dispatcher that answers within Android's deadlines.
 
 - [ ] Paired-PC transport candidate: USB accessory mode (AOA). Kokoro-Hexagon
-  proved only the `GET_PROTOCOL` handshake (version 2) with an S23
-  (`docs/receipts/aoa-protocol-20260924.md`); no re-enumeration or round
-  trip yet. Receiving accessories needs a `USB_ACCESSORY_ATTACHED` filter
+  originally proved only the `GET_PROTOCOL` handshake (version 2) with an S23
+  (`docs/receipts/aoa-protocol-20260924.md`). On 2026-10-10, the single-file
+  `scripts/usbaoa.ps1`, ported from `c7f93c3d` with the full source pin and
+  SHA-256 in its header, returned protocol 2, `StartAccepted=True`,
+  `StartError=0`, `AccessoryObserved=True` on the arm64 S23 under hash-verified
+  PowerShell preview.5. Windows observed `18D1:2D01` on the selected physical
+  USB port after the old handle closed. Re-enumeration waits on Configuration
+  Manager notifications; the native callback runs emitted IL without entering
+  SMA. Its accessory bulk interface opened as `AoaBulkStream`/`System.IO.Stream`
+  (`CanRead=True`, `CanWrite=True`, `CanSeek=False`) and disposed successfully.
+  ADB remained usable in `accessory,adb` mode and returned the arm64 ABI and
+  shell exit 7. No accessory data round trip, Android accessory receiver,
+  Android-host transport or other-device AOA acceptance is claimed. No setup
+  or APK change. Receiving accessories needs a `USB_ACCESSORY_ATTACHED` filter
   and an XML resource, and `New-ResourceTable` emits only the launcher icon.
   Decide at the manifest freeze whether to declare it.
 
