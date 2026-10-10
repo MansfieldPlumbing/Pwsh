@@ -188,8 +188,9 @@ OPTIONS
                               8  Assemble the unsigned APK archive
                               9  Sign the APK with Signature Scheme v2
   -OutputDirectory <path>   Where emitted artifacts are written.
-  -SigningKeyPath <path>    The APK signing identity (.pfx). Reused across
-                            builds; created there if missing.
+  -SigningKeyPath <path>    Existing APK signing identity (.pfx). Defaults to
+                            PWSH_SIGNING_KEY; its certificate must match the
+                            pinned identity. A missing key is never created.
   -CacheDirectory <path>    Package and lib-source cache, used with
                             -Packages Folder.
   -AcceptWritePlan          Accept the write plan without a prompt.
@@ -205,8 +206,10 @@ OPTIONS
   to and asks for confirmation. Locations left empty are filled with
   suggestions and shown, not used silently: the signed APK and the
   intermediates (only with -KeepIntermediates) in build\ under this
-  repository, which git ignores; the signing key and cache in per-user data
+  repository, which git ignores; the cache in per-user data
   (LocalApplicationData\Pwsh on Windows, the XDG directories elsewhere).
+  The signing key is a read-only input chosen with -SigningKeyPath or
+  PWSH_SIGNING_KEY, outside the repository.
   Nothing else inside this repository is written, and the signing key and
   cache never are. Unattended runs stop unless every location is
   given or -AcceptWritePlan is set. -WhatIf prints the plan and writes
@@ -418,6 +421,7 @@ $script:LibDirectory = Join-Path $PSScriptRoot 'lib'
 $script:RepositoryRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
 # The one place inside the repository this script writes. .gitignore excludes it.
 $script:BuildDirectory = Join-Path $script:RepositoryRoot 'build'
+$script:SigningCertificateSha256 = '53F8B8B387CCDCB696A666625018CEF0554836D133E2FF0B5D356EA74D70E42C'
 $script:ApprovedWriteRoots = [System.Collections.Generic.List[string]]::new()
 $script:WrittenFiles = [System.Collections.Generic.List[object]]::new()
 $script:LibRestoreDirectory = $null
@@ -466,12 +470,16 @@ function Resolve-WritePlan {
         $script:OutputDirectory = $script:BuildDirectory
     }
     if ([string]::IsNullOrWhiteSpace($SigningKeyPath)) {
-        # Earlier builds kept the key directly under the data directory. Reuse
-        # it when present: a new key would block upgrades of installed builds.
-        $dataRoot = Get-SuggestedUserDirectory -Kind Data
-        $existingKey = Join-Path $dataRoot 'pwsh-signing.pfx'
-        $script:SigningKeyPath = if (Test-Path -LiteralPath $existingKey -PathType Leaf) { $existingKey }
-                                 else { Join-Path (Join-Path $dataRoot 'Keys') 'pwsh-signing.pfx' }
+        # AppData can be virtualized per packaged application. The signing
+        # identity is an explicit input, never a per-app default or a new key.
+        $script:SigningKeyPath = [Environment]::GetEnvironmentVariable('PWSH_SIGNING_KEY', 'Process')
+        if ($IsWindows -and [string]::IsNullOrWhiteSpace($script:SigningKeyPath)) {
+            # A running desktop application may predate the user-variable edit.
+            $script:SigningKeyPath = [Environment]::GetEnvironmentVariable('PWSH_SIGNING_KEY', 'User')
+        }
+        if ([string]::IsNullOrWhiteSpace($script:SigningKeyPath)) {
+            throw 'An existing signing key is required. Pass -SigningKeyPath or set PWSH_SIGNING_KEY. A new key is never created.'
+        }
     }
     if ([string]::IsNullOrWhiteSpace($CacheDirectory)) {
         $script:CacheDirectory = Get-SuggestedUserDirectory -Kind Cache
@@ -508,6 +516,12 @@ function Resolve-WritePlan {
         throw "The signing key '$script:SigningKeyPath' must not be inside the build output '$script:OutputDirectory'."
     }
 
+    # Reject a missing or different identity before any build writes. Step 9
+    # checks it again when opening the key for the actual signature.
+    $certificate = Get-SigningCertificate -Path $script:SigningKeyPath
+    try { Write-Host "[PASS] Signing certificate SHA-256 $script:SigningCertificateSha256" }
+    finally { $certificate.Dispose() }
+
     [pscustomobject]@{ Plan = $plan; Explicit = $explicit }
 }
 
@@ -525,7 +539,6 @@ function Show-WritePlan {
 function Enable-WritePlan {
     $script:ApprovedWriteRoots.Clear()
     if ($KeepIntermediates) { $script:ApprovedWriteRoots.Add($script:OutputDirectory) }
-    $script:ApprovedWriteRoots.Add([System.IO.Path]::GetDirectoryName($script:SigningKeyPath))
     $script:ApprovedWriteRoots.Add([System.IO.Path]::GetDirectoryName($script:ApkPath))
     if ($Packages -eq 'Folder') {
         $script:ApprovedWriteRoots.Add($script:CacheDirectory)
@@ -6603,38 +6616,25 @@ function Get-LengthPrefixed {
 }
 
 function Get-SigningCertificate {
-    # A signing identity, created in process. No keytool, no keystore utility.
-    # It is persisted so that rebuilds keep the same identity: Android refuses
-    # to upgrade an installed app whose signer changed.
+    # Read the pinned existing identity. Android refuses an upgrade whose
+    # signer changed; creating a replacement is never a build operation.
     param([Parameter(Mandatory)][string] $Path)
 
-    if (Test-Path -LiteralPath $Path -PathType Leaf) {
-        $existing = [System.Security.Cryptography.X509Certificates.X509CertificateLoader]::LoadPkcs12(
-            [System.IO.File]::ReadAllBytes($Path),
-            'android',
-            [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable)
-        return $existing
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Signing key '$Path' does not exist. Pass -SigningKeyPath or set PWSH_SIGNING_KEY to the existing key. A new key is never created."
     }
-
-    $key = [System.Security.Cryptography.RSA]::Create(2048)
-    $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
-        'CN=Pwsh, O=MansfieldPlumbing, C=US',
-        $key,
-        [System.Security.Cryptography.HashAlgorithmName]::SHA256,
-        [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
-    $request.CertificateExtensions.Add(
-        [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($false, $false, 0, $true))
-
-    # Android requires the certificate to outlive the app.
-    $notBefore = [DateTimeOffset]::new([DateTime]::new(2020, 1, 1, 0, 0, 0, [DateTimeKind]::Utc))
-    $notAfter = [DateTimeOffset]::new([DateTime]::new(2070, 1, 1, 0, 0, 0, [DateTimeKind]::Utc))
-    $certificate = $request.CreateSelfSigned($notBefore, $notAfter)
-
-    $exported = $certificate.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Pkcs12, 'android')
-    Write-BuildFile -Path $Path -Bytes $exported
-    if (-not $IsWindows) {
-        # Owner-only access to the private key (SC-12).
-        [System.IO.File]::SetUnixFileMode($Path, [System.IO.UnixFileMode]'UserRead, UserWrite')
+    $certificate = [System.Security.Cryptography.X509Certificates.X509CertificateLoader]::LoadPkcs12(
+        [System.IO.File]::ReadAllBytes($Path),
+        'android',
+        [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet)
+    $digest = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($certificate.RawData))
+    if ($digest -cne $script:SigningCertificateSha256) {
+        $certificate.Dispose()
+        throw "Signing certificate SHA-256 $digest does not match the pinned identity $script:SigningCertificateSha256. Use the existing signing key through -SigningKeyPath or PWSH_SIGNING_KEY."
+    }
+    if (-not $certificate.HasPrivateKey) {
+        $certificate.Dispose()
+        throw "Signing key '$Path' contains no private key."
     }
     return $certificate
 }
@@ -6853,8 +6853,8 @@ function Invoke-SignStep {
 
     $outputDirectory = Join-Path $OutputDirectory $script:Target.Abi
     # The signing identity outlives any build folder: Android refuses to upgrade
-    # an installed app whose signer changed, so the key remains in private
-    # local application data rather than beside disposable output.
+    # an installed app whose signer changed. Its explicit path is independent
+    # of per-app AppData virtualization and disposable build output.
     $certificate = Get-SigningCertificate -Path $SigningKeyPath
 
     $signed = New-SignedApk -Apk ([byte[]]$script:BuildContext.UnsignedApk.Bytes) -Certificate $certificate
