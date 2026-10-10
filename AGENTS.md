@@ -1,6 +1,9 @@
 # Pwsh repository contract
 
-Keep this repository narrow and evidence-led.
+Follow [the shared agent rules](../Pwsh-Development/AGENTS.md). This file holds local project requirements and entrypoints.
+
+Keep changes focused on the priorities below and evidence-led; preserve the
+general-purpose host.
 
 ## Purpose
 
@@ -12,6 +15,34 @@ services that run as a server's would, and operation with USB debugging
 disabled. The console is one front end of the runtime, not the product. Work
 that does not move a device toward that is sidecar work.
 
+**Pwsh has a private app environment, and the user environment pre-empts it.**
+The app environment is what the APK ships (scripts in `PWSH_APP_SCRIPTS`, DLLs
+in the store); the user environment is the user's own (scripts in
+`PWSH_USER_SCRIPTS` ahead on `PATH`, DLLs in the admitted overlay). A user file
+of the same name wins. Tools are scripts and DLLs found through those variables
+and called by name: PowerShell is a dynamic runtime that resolves commands,
+types and members when they are used, so `& script` or `[Type]::Member` is the
+whole interface. Do not add registries, catalogs, wrappers, helpers or
+frameworks to find, wire or call them.
+
+## Current priorities (2026-10-10)
+
+The most important spikes are a real console host, usable bindings, PSRP with
+application lifetime, musl support, and a usable way to run `pwsh.so`.
+`ROADMAP.md` owns their status and acceptance. They are priorities, not claims
+that these capabilities already work. Earlier dated queues do not override them.
+
+Pwsh is upstream: it provides the general host, native bindings and application
+lifecycle. Downstream model and assistant choices do not belong in its roadmap
+or become prerequisites for shipping it. A projection server can be an ordinary
+PowerShell application using this host; recovering or reconstructing Subsystem
+is optional reference work, not a prerequisite or the product's purpose.
+
+Make recurring build operations and checks part of `setup.ps1`, using its shared
+state and build-step declarations. One-time audit work stays temporary. Reduce
+manual steps and places to edit; do not create a parallel family of scripts,
+harnesses, baselines or reports to satisfy agent procedure.
+
 ## Stance: the rules govern evidence, not technique
 
 These rules exist to keep every claim true. They do not rank techniques.
@@ -20,13 +51,14 @@ runtime component, and racing a production compiler are all admissible when
 the work is:
 
 1. derived from a pinned specification or source at an exact revision;
-2. checked by an independent implementation used only as an oracle, never as
+2. checked by an independent implementation used only for comparison, never as
    a producer;
 3. proven on hardware with a receipt for the same artifact, on every backend
    it claims; and
 4. stated with its claim boundary: what it proves and what it does not.
 
-Compilers and runtimes are competitors and oracles, not authorities.
+Compilers and runtimes provide performance and correctness comparisons;
+their output does not define our product requirements.
 Kokoro-Hexagon's receipts at commit `250e10dc` record a PowerShell-lowered
 kernel running 2.21–2.30x faster in DSP ticks than Hexagon Clang 19.0.04
 output, bit exact, on SM8550 and SM8635.
@@ -256,7 +288,7 @@ only when that group's evidence exists. Name the source for every new fact.
 - The T32 encoder's forms (35 cases, branch targets and PC-relative sequences
   included) match the bytes LLVM 23.1.1's integrated assembler emits for the same
   instructions. `dumpbin` no longer supports ARM32, so `clang` is the diagnostic
-  oracle here, kept out of tree and never used to produce output.
+  reference here, kept out of tree and never used to produce output.
 - Until the .NET for Android path was removed (2026-09-26), `-Debug` compared
   the emitted type-map name and `classes.dex` against a .NET SDK reference
   build.
@@ -429,7 +461,7 @@ only when that group's evidence exists. Name the source for every new fact.
   classes of PSLowering `25427b25` on Windows (PowerShell 7.7.0-preview.4,
   .NET 11.0.0-preview.6), and `scripts/probes/lowering/Profile.ps1`, placed
   with them through `run-as`, loaded each assembly by path from the app's
-  private files directory and ran PSLowering's 196 oracle vectors twice: as
+  private files directory and ran PSLowering's 196 comparison vectors twice: as
   the fixture's PowerShell class under SMA on the device, and as the compiled
   IL. `LOWERING calls 196 divergences 0` on the x86_64 emulator, the arm64
   physical device and the onn 4K Plus (arm32), each on .NET

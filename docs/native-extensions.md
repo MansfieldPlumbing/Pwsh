@@ -90,6 +90,26 @@ container and without PowerShell on any per-syscall path.
   (same seccomp filter, same SELinux domain), so a binary gets only what the
   app could do.
 
+### The shim is emitted, like the rest of the native layer
+
+Pwsh sits between Android and the programs it runs, so it can supply what
+Android lacks at the libc boundary. The shim is not a new mechanism: it is one
+more library from the emitter `setup.ps1` already uses for its own native code
+(`New-ElfCodeLibrary` and the A64 encoder, checked by `Test-ElfCodeLibrary`,
+`Test-A64Step` and `Test-A64CallAbi`, with x64 and A32 variants). The emitted
+`libpsl-native` (`New-PslNativeLibrary`) is the existing example: exports that
+forward to bionic. The shim's exports (`open`, `openat`, `stat`, `access`,
+`execve`, `readlink` and their relatives) look up a declared table of path
+prefixes, rewrite, and jump to the real bionic function. A new mapping is a
+table record, not new machine code.
+
+What it can catch, in dynamically linked bionic programs: Linux paths (`/bin/sh`,
+`/usr`, `/tmp`, a Termux prefix), files Android lacks (`/etc/resolv.conf`,
+`/etc/hosts`, `/etc/passwd` answered for the app's user), `#!` interpreters, and
+calls the seccomp filter blocks, by handling `SIGSYS` and emulating with allowed
+calls. Statically linked programs cannot be interposed; they get the broker or
+a wrapper. glibc programs run through their bundled loader.
+
 proot traces every syscall of the child and rewrites it transparently, which
 is general but stops the process on each call. The broker needs the binary's
 cooperation (the shim or the protocol) and in return costs nothing on the data

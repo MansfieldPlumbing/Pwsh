@@ -8,15 +8,66 @@ their evidence classes live in `AGENTS.md` (Established facts) and
 The [implementation plan](docs/implementation-plan.md) sequences the work;
 the roadmap owns status, and the separate audit retains source observations.
 
+## Current priorities (2026-10-10)
+
+This is the current queue, superseding earlier dated priority lists. Deliver
+useful slices independently; a complete foundation framework is not a shipping
+prerequisite. These spikes remain open until exercised on their claimed targets.
+
+1. [ ] **Real console host.** Own `PSHost`, `PSHostUserInterface` and raw UI;
+   preserve session state, PowerShell formatting and streams, prompt/input,
+   cancellation and on-screen keyboard behavior through the application's host.
+2. [ ] **Bindings.** Make native and Android APIs callable from PowerShell for
+   real consumers, with argument/return contracts, callback ownership and lifetime.
+   Metadata inventories alone do not constitute working bindings.
+3. [ ] **PSRP with application lifetime.** Host authenticated remoting in the
+   resident application, with session state, cancellation and orderly shutdown.
+   Activity recreation or closing the console must not accidentally terminate
+   the server; implement the required foreground/background platform lifecycle.
+   SMA already provides the endpoint through public API:
+   `RemoteSessionNamedPipeServer.CreateCustomNamedPipeServer(name)` serves full PSRP over a
+   Unix socket (the `pwsh -CustomPipeName` server path), and
+   `RunspaceFactory.CreateRunspace([NamedPipeConnectionInfo]::new(name, timeoutMs))` connects
+   to it. SSH transport and authentication sit in front of that.
+4. [ ] **musl support.** Establish a runnable musl target, naming its ABI,
+   runtime and dependency closure; verify the host and the capabilities claimed
+   for that target. Android bionic receipts do not prove musl support.
+5. [ ] **Run `pwsh.so`.** Provide an actual invocation/hosting path: the caller,
+   entrypoint, payload/dependencies and startup/shutdown ownership. An emitted
+   shared library alone is not a runnable-host result.
+
+Pwsh is the upstream general-purpose host. Downstream model or assistant work
+does not belong in this queue. A projection server can be authored directly in
+PowerShell; archived Subsystem code is optional reference material, not a
+dependency or a prerequisite reconstruction project.
+
+- [ ] Rename `setup.ps1`'s `$script:StepGraph` to `$script:BuildSteps`: it is the
+  table of build steps, dependencies, labels and actions used by execution and
+  the interface. Keep the shared declarations and dependency validation.
+  This directive sweep records the rename; it does not change application code.
+
 ## Product boundary
 
-Pwsh turns a PowerShell script into an Android app and owns every byte in
-between. `setup.ps1` emits the IL, manifest, ELF libraries, machine code and
-signed APK from pinned, hash-verified inputs. The current preview deliberately
-contains no DEX; the fixed Java subclasses planned below will be emitted when
-their gates are ready. On the device an owned native host starts CoreCLR and
-runs PowerShell; Android is reached through its C APIs or JNI bound from pinned
-headers. Applications are PowerShell scripts.
+Pwsh brings a resident PowerShell/.NET environment to Android. `setup.ps1` is
+the build application for that environment: it verifies its pinned inputs,
+acquires and checks runtime packages, selects the managed assemblies for the
+target, and emits the project's managed host and native libraries. It packs the
+assemblies into a store, emits the Android manifest, assembles the APK and signs
+it. CoreCLR and PowerShell are reused from verified packages; the project emits
+the hosting and packaging code that connects them to Android.
+
+At launch, Android's `NativeActivity` loads `libpwsh-host.so`. The native host
+starts CoreCLR, resolves managed assemblies from the packaged store and enters
+the managed host, which opens an in-process PowerShell runspace. The selected
+startup path runs `Profile.ps1` directly or starts the console, which then runs
+the profile. Application scripts execute inside that runtime; native and JNI
+bindings connect them to Android APIs. This build-and-host path does not imply
+that every application script is compiled to native code.
+
+The current preview contains no DEX. The fixed Java subclasses planned below
+are additional Android integration work, gated separately from the existing
+native startup path. Console hosting, bindings, remoting and application
+lifetime remain subject to the explicit gates in this roadmap.
 
 The current build inputs pin PowerShell 7.7.0-preview.4 and .NET
 11.0.0-rc.1.26425.128.
@@ -52,7 +103,8 @@ The current build inputs pin PowerShell 7.7.0-preview.4 and .NET
 
 ## Next work, in order (as of 2026-10-04)
 
-The queue for whoever picks this up. Each item links to its full entry.
+Historical queue; the 2026-10-10 priorities above take precedence. Each item
+links to its full entry.
 Compiler work happens in [PSLowering](https://github.com/MansfieldPlumbing/PSLowering)
 (its own [ROADMAP.md](https://github.com/MansfieldPlumbing/PSLowering/blob/main/ROADMAP.md));
 Pwsh takes it at a pinned commit.
@@ -288,8 +340,6 @@ and a receipt.
 
 - Pwsh: the Android integrations and a general native-call mechanism that
   loads third-party `.so` files and binds their exports.
-- Kokoro-Hexagon: LiteRT-LM bindings and any assistant, on GPU or CPU, keeping
-  the DSP for its own pipeline.
 - QuickPS: native bindings and applications built on them (SoundRecorder,
   Calculator, the gallery).
 - PSLowering: the compiler, and the Windows counterpart of Pwsh's APK: EXE and
@@ -420,7 +470,7 @@ and a receipt.
 
 ## Emitted native code: racing RyuJIT
 
-Compilers are competitors and oracles, not authorities. The model is
+Compilers provide performance and correctness comparisons. The model is
 Kokoro-Hexagon's receipts at commit `250e10dc`: its PowerShell-lowered R0Sub0
 kernel ran 2.21–2.30x faster in DSP ticks than Hexagon Clang 19.0.04 output, bit
 exact, on SM8550 and SM8635 (`r0sub0-lowered-vs-llvm-20260924.md`,
@@ -475,9 +525,9 @@ The payload review and cut order are in [the implementation plan, step 2](docs/i
 - [ ] 2.2 The session exposes exactly the declared command manifest, preserving parameter attributes, aliases, providers, module identity and required initialization. Utility's import needs MarkdownRender until 2.8 (`ConvertFromMarkdownCommand` holds a MarkdownRender enum field).
 - [ ] 2.3 Metadata retarget in the IL-only re-emit, proven first on placeholder types: Data.Common, Transactions.Local and Microsoft.Management.Infrastructure leave the payload. The build reads every patched image back.
 - [ ] 2.4 ApplicationInsights retargeted to inert implementations.
-- [ ] 2.5 JSON core in PowerShell, lowered; `ConvertFrom-Json`, `ConvertTo-Json`, `Test-Json` checked against Microsoft's cmdlets as oracle. The System.Text.Json group leaves unless the web cmdlets are admitted.
+- [ ] 2.5 JSON core in PowerShell, lowered; `ConvertFrom-Json`, `ConvertTo-Json`, `Test-Json` checked against Microsoft's cmdlets as the reference implementation. The System.Text.Json group leaves unless the web cmdlets are admitted.
 - [ ] 2.6 SMA configuration retargeted to the project's JSON assembly; Newtonsoft leaves the payload.
-- [ ] 2.7 Microsoft.CSharp: the eight binder members implemented on `System.Dynamic` and retargeted, with oracle vectors for every `dynamic` site.
+- [ ] 2.7 Microsoft.CSharp: the eight binder members implemented on `System.Dynamic` and retargeted, with comparison vectors for every `dynamic` site.
 - [ ] 2.8 Markdown commands rendering to VT for a declared subset; MarkdownRender and Markdig leave the payload.
 - [ ] 2.9 Scope decisions, each with its own receipt: legacy code pages, Mail (`[mailaddress]` and CliXml depend on `MailAddress`), Ping, web cmdlets.
 - [ ] Record compressed APK and store deltas, dependency inventory/SBOM, absent compiler/analyzer payloads, command regressions, startup and liveness/crash receipts for the same artifact on every claimed backend.
@@ -547,7 +597,7 @@ Microsoft guidance defines VT behavior, retained scene semantics and Terminal/Fl
 These are separate capability gates; the initial operational PowerShell console does not claim complete terminal emulation.
 
 - [ ] **Addressed terminal screen:** implement primary/alternate buffers, cursor/save state, wrapping, scroll margins, erase/insert/delete, declared modes and application input ownership. Keep addressed screens separate from transcript reflow.
-- [ ] **TUI protocols:** encode keys/modifiers, mouse and bracketed paste; answer declared cursor/capability/color queries. Publish a supported protocol matrix derived from Microsoft VT guidance and the pinned application workload; add an independent oracle and application receipts.
+- [ ] **TUI protocols:** encode keys/modifiers, mouse and bracketed paste; answer declared cursor/capability/color queries. Publish a supported protocol matrix derived from Microsoft VT guidance and the pinned application workload; add an independent implementation comparison and application receipts.
 - [ ] **Native session contract:** versioned C ABI and host-service table for create/run/input/output/resize/cancel/destroy; document buffers, callbacks, thread affinity, process-global effects and error/exit behavior. Route blocking execution off the UI thread and restore console state after session completion. Retain loaded code while any thread or callback can reference it.
 - [ ] **Optional Edit .so investigation:** adapt Microsoft Edit at `c470ca59af44c176ea39c672d09b32061c274896` to an Android shared library with explicit session entrypoints. Trace Bionic/ABI, ICU/dependencies, terminal I/O and global state; establish a reproducible build in its own project. Determine required producer/admission policy before adding native logic to Pwsh. No Edit code enters the base APK through this planning item.
 - [ ] **Optional installed-code delivery:** define matching-signature split installation and library admission for an in-process experiment; prove library discovery/load/export invocation and lifecycle on all three backends. A copied executable or SO in writable app storage is not the native delivery path. Loading native code shares Pwsh's crash fate; a separate-process/PTY adapter is an independent optional alternative.
@@ -646,7 +696,7 @@ Design in [docs/native-extensions.md](docs/native-extensions.md). Each item is i
 PSLowering compiles typed PowerShell classes to IL with its own emitter and
 checks every compiled method against PowerShell itself. It replaces the
 hand-built expression trees in `setup.ps1` and is the means for R3 and R6.
-Its output matched PowerShell on all three backends for every oracle call of
+Its output matched PowerShell on all three backends for every comparison call of
 `25427b2` (AGENTS.md, PSLowering output on devices). Take it from GitHub at a
 pinned commit and digest into `build/cache`, never from a local checkout.
 
@@ -713,7 +763,7 @@ Assemblies taken from .NET libraries (for example AI/ML packages) are pinned by
 version and digest like every input; a scheduled job may track their channel
 and propose new pins, promoted only when the suite and the device gates pass.
 Managed wrappers over large native runtimes (ONNX Runtime, TorchSharp) are PC
-tools and oracles unless their native code passes the same review as any native
+tools and reference implementations unless their native code passes the same review as any native
 code. Nothing third-party enters the parts that must run without SMA unless
 audited.
 
@@ -725,7 +775,7 @@ Follow [the device signals work order](docs/work-device-signals.md). These capab
 - [ ] M1: direct JNI flashlight control and real-device ON/OFF/error/lifecycle receipt.
 - [ ] M2: corrected Morse conversion/pulse timing and cancellable torch transmission.
 - [ ] M3: event-driven NDK light receive with incremental managed decoding and measured sensor/link limits.
-- [ ] V0: PowerShell-authored, managed-IL V.21 DSP with correct rate/timing and independent signal/byte oracle.
+- [ ] V0: PowerShell-authored, managed-IL V.21 DSP with correct rate/timing and independent signal/byte comparisons.
 - [ ] V1: complete lossless AAudio output/input, runtime recording admission, cancellation and stream cleanup.
 - [ ] V2: measured peer byte transfer; separately framed acknowledgements only after one-way operation is proved.
 - [ ] Optional retained controls and explicit module packaging using shared session events; record size and permission costs.

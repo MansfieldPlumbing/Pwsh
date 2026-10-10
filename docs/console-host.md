@@ -15,6 +15,21 @@ A program that implements `PSHost` and runs an interactive console is a
 host is the PowerShell console module running in the app. The setup option
 keeps its name; only what stands behind it changes.
 
+## The console is not SMA
+
+The console core (rendering, input, buffer) and its command launcher are a
+lowered assembly that references only CoreLib, built from
+`scripts/ConsoleHost.ps1` (see [implementation-plan.md](implementation-plan.md)).
+SMA is one session the console launches, not the console itself, so a failing
+SMA never takes the console down. The launcher starts:
+
+- PowerShell sessions: SMA in worker runspaces, with the `PSHost` implementation;
+- Recovery: its fixed verbs, with no SMA (below);
+- programs over a pseudo-terminal: bionic binaries, a separately callable
+  `pwsh.so` (ROADMAP "Run `pwsh.so`"), and command-line tools such as coding
+  agents, with the native shim and the broker of
+  [native-extensions.md](native-extensions.md) supplying what Android lacks.
+
 ## Startup modes
 
 `setup.ps1 -Startup Profile | ConsoleHost` (also in the setup UI).
@@ -29,6 +44,11 @@ Shipped scripts reach the device as described in
 APK into `PWSH_APP_SCRIPTS` when the installed version changes, with
 `PWSH_USER_SCRIPTS` ahead of it on `PATH` so a user script of the same name
 wins.
+
+This is the whole discovery model: a private app environment that the user
+environment pre-empts ([AGENTS.md](../AGENTS.md#purpose)). Each script or
+lowered DLL found there is an API called by name; adding a tool means putting a
+file where the environment points.
 
 ## Failure paths
 
