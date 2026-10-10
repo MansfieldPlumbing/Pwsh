@@ -508,6 +508,12 @@ only when that group's evidence exists. Name the source for every new fact.
   $Activity, callbacks and exception behavior. Reproducing that script-visible
   API with our own implementation is required, not prohibited. Restore the
   profile runtime, recovery and document import along with it.
+  PowerShell is the consumer: make these APIs quick, easy and efficient to use
+  from scripts, including script-block callbacks and ordinary command and type
+  resolution. Preserving script-visible names and behavior does not require
+  C# source compatibility, C# tooling conventions or Xamarin's internal wiring.
+  Choose implementation and lowering around PowerShell's semantics and actual
+  workloads; do not add machinery solely to accommodate C# consumers.
 - `scripts/CellCanvas.ps1` is frozen (SHA-256
   `8E96992365A72E81B1A1EEB518AE9052020519EA175EC5465BAC4A989928F3B9`) as a
   benchmark of the cell presenters: Android `Canvas` per cell, or one packed
