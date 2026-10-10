@@ -150,8 +150,11 @@ Pwsh's performance comes from lowering, not from interpreting faster.
   build input or ships.
 - Every capability claim names a gate and passes it on hardware. Unproven work
   is described as planned, not as done.
-- New code must not depend on .NET for Android (Xamarin) types. Android is
-  reached through its C APIs or JNI.
+- Android is reached through its C APIs or JNI. Generated bindings preserve
+  Mono.Android's managed names, signatures and inheritance so existing
+  PowerShell scripts can run unchanged. These are our own emitted types;
+  Mono.Android.dll is a pinned metadata input only. Mono.Android, Java.Interop
+  and Xamarin's native runtime are never loaded, executed or shipped.
 - No tick or polling loops. Work is driven by blocking waits on events.
 - Native code starts the runtime. Any other native logic enters only through a
   `ROADMAP.md` gate (Emitted native code: N1–N3): emitted by PowerShell,
@@ -497,8 +500,9 @@ only when that group's evidence exists. Name the source for every new fact.
 ## Rules for specific changes
 
 - Acceptance workloads are the shipped ConsoleHost console (its acceptance
-  list is in `docs/console-host.md`) and the conformance scripts. No
-  compatibility surface is built to reproduce a removed framework's API.
+  list is in `docs/console-host.md`), the conformance scripts and unchanged
+  parity profiles compared against the Xamarin-based build at `0804758`.
+  Parity preserves what PowerShell scripts see, not Xamarin's internals.
 - `scripts/CellCanvas.ps1` is frozen (SHA-256
   `8E96992365A72E81B1A1EEB518AE9052020519EA175EC5465BAC4A989928F3B9`) as a
   benchmark of the cell presenters: Android `Canvas` per cell, or one packed
@@ -522,9 +526,13 @@ only when that group's evidence exists. Name the source for every new fact.
   `Microsoft.Android.Runtime.37.android` package, read as metadata only and
   cross-checked against AOSP `core/api/current.txt` at a pinned commit. Calls
   go by name through the table, or through generated typed wrappers lowered to
-  IL where a path is hot. `Mono.Android`, `Java.Interop` and their IL are never
-  loaded, executed or shipped. Do not build Java peer tracking, type maps or
-  the Java.Interop object model.
+  IL where a path is hot. Generated bindings retain Mono.Android's managed
+  names and shapes. `Mono.Android`, `Java.Interop`, their IL and Xamarin's
+  native runtime are never loaded, executed or shipped. Owned peer
+  registration maps generated Java peer classes to managed handlers; retained
+  objects use owned JNI global references. This runtime peer registration is
+  distinct from tool discovery, which remains command and type resolution.
+  Do not copy Xamarin's type maps or Java.Interop runtime.
 - Java classes in the DEX are generated only for manifest components and
   callback bridges: the `NativeActivity` subclass, services, broadcast
   receivers, content providers, widget providers, tile services, the
