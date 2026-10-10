@@ -15,10 +15,63 @@
 .NOTES
     Ported into Pwsh on 2026-10-03 from the owner's ADB working folder, which is not a
     repository; source file SHA-256 8ACF898C3E575E0F2B03FB3E00F9CA0A815CA9B2E713D54776F3BF1EC44A04B2.
-    Unchanged except Select-UsbAdbDevice, added at the end from that folder's adb.ps1.
+    Consolidated from Pwsh scripts/commands/Adb at aa4f72d. Classes and protocol
+    implementation stay inline for source execution and future IL compilation.
 #>
 
+[CmdletBinding()]
+param(
+    [Parameter(Position = 0)]
+    [ValidateSet('help', 'devices', 'shell', 'push', 'pull', 'install', 'pubkey', 'version', 'start-server', 'kill-server', 'exec-out', 'stream', 'derive-pairing-key')]
+    [string] $Command = 'help',
+    [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
+    [string[]] $CommandArgs = @(),
+    [Alias('s')]
+    [string] $Device = '',
+    [switch] $Api,
+    [switch] $Foreground,
+    [byte[]] $KeyMaterial
+)
+
 $ErrorActionPreference = 'Stop'
+
+# Pairing source: C:/Dev/Adb/Spake2.cs, SHA-256
+# 1B2FC8EB93684D3B8F439C75005925188206CD5694A3F6352B923D8EECEC8DEE.
+# This is the existing HKDF call, not the SPAKE25519 exchange. The byte[]
+# overload is directly callable in PowerShell; no C# is shipped or compiled.
+class AdbPairingKey {
+    static [byte[]] DeriveAesKey([byte[]] $material) {
+        $info = [Text.Encoding]::UTF8.GetBytes('adb pairing_auth aes-128-gcm key')
+        return [Security.Cryptography.HKDF]::DeriveKey(
+            [Security.Cryptography.HashAlgorithmName]::SHA256, $material, 16, [byte[]]::new(0), $info)
+    }
+}
+
+# Pending: wireless/loopback pairing and Android phone-to-phone transport,
+# including the Kokoro-Hexagon consumer. Keep their implementation in this file.
+# Pending consumer integration (Kokoro-Hexagon; separate repository work): pin
+# the Pwsh commit providing this script, replace adb.exe calls and hard-coded
+# executable paths, and rebuild its APK on the current Pwsh pin with a startup
+# profile that uses the current host rather than removed Xamarin types. Keep
+# that build debuggable while jobs depend on run-as. Stop the adb.exe server
+# before this Windows WinUSB client takes ownership of the device.
+# The next job path is a loopback listener in the app's resident runspace,
+# reached through this script's device-service Stream API (tcp:<port> or
+# localabstract:<name>). That replaces per-job run-as, Start.ps1 overwrites and
+# force-stop. Binary job results already have exec-out; listener lifetime and
+# consumer migration remain pending, not claims established by this script.
+# CS2PS 70667abdf3926027a2a1c1eeffefe672ec3a09e1, 2026-10-10:
+# - C:/Dev/Adb/Spake2.cs: one runtime-invocation diagnostic at the HKDF call;
+#   the direct array-overload port above is independently compared with C#.
+# - Spake25519Client.cs, SHA-256
+#   2FBEA0DE94D4B182B04F9C34F7ACA800FE031012EF081569DDC9B77EFEA6CC56:
+#   73 diagnostics (readonly fields, static initializers and further constructs).
+# - AdbPairingClient.cs depends on Xamarin Java/Android bindings and surrounding
+#   source. Reuse its TLS-exporter/SPAKE2/peer-info protocol through direct JNI;
+#   do not ship those framework bindings. AdbConnection.cs already separates
+#   wire protocol from IAdbTransport, but async/lifetime/source closure needs
+#   conversion. Its source-member check retains type-initialization boundaries.
+# No pair/connect or Android transport is claimed until its execution receipt.
 
 # =============================================================================
 # 1. Native WinUSB & Kernel32 P/Invoke Projection (Zero Add-Type / Zero C#)
@@ -196,12 +249,12 @@ class UsbAdbDeviceInfo {
     [string]$AccessError
     [string]$OwningProcessNotice
 
-    UsbAdbDeviceInfo([int]$index, [string]$name, [string]$inst, [string]$door) {
-        $this.Index = $index
+    UsbAdbDeviceInfo([int]$deviceIndex, [string]$name, [string]$inst, [string]$deviceDoor) {
+        $this.Index = $deviceIndex
         $this.FriendlyName = $name
         $this.InstanceId = $inst
         $this.RedactedInstanceId = [UsbAdbCrypto]::RedactSerial($inst)
-        $this.Door = $door
+        $this.Door = $deviceDoor
         $this.IsAccessible = $true
         $this.AccessError = $null
         $this.OwningProcessNotice = $null
@@ -363,16 +416,16 @@ class UsbAdbClient : IDisposable {
     [System.Collections.Generic.HashSet[uint32]]$_openStreams = [System.Collections.Generic.HashSet[uint32]]::new()
     [hashtable]$_pending = @{}
 
-    UsbAdbClient([UsbAdbDeviceInfo]$device) {
-        $this.Init($device, [UsbAdbCrypto]::LoadOrCreateKey())
+    UsbAdbClient([UsbAdbDeviceInfo]$selectedDevice) {
+        $this.Init($selectedDevice, [UsbAdbCrypto]::LoadOrCreateKey())
     }
 
-    UsbAdbClient([UsbAdbDeviceInfo]$device, [System.Security.Cryptography.RSA]$rsa) {
-        $this.Init($device, $rsa)
+    UsbAdbClient([UsbAdbDeviceInfo]$selectedDevice, [System.Security.Cryptography.RSA]$rsa) {
+        $this.Init($selectedDevice, $rsa)
     }
 
-    [void] Init([UsbAdbDeviceInfo]$device, [System.Security.Cryptography.RSA]$rsa) {
-        $this.Device = $device
+    [void] Init([UsbAdbDeviceInfo]$selectedDevice, [System.Security.Cryptography.RSA]$rsa) {
+        $this.Device = $selectedDevice
         $this._rsa = $rsa
         $this._native = [UsbAdbNative]::GetNativeType()
 
@@ -384,7 +437,7 @@ class UsbAdbClient : IDisposable {
         while ($attempts -lt 10) {
             try {
                 $this._devHandle = [System.IO.File]::OpenHandle(
-                    $device.Door,
+                    $selectedDevice.Door,
                     [System.IO.FileMode]::Open,
                     [System.IO.FileAccess]::ReadWrite,
                     [System.IO.FileShare]::ReadWrite,
@@ -414,7 +467,7 @@ class UsbAdbClient : IDisposable {
                 } else {
                     "USB interface is locked exclusively by another process."
                 }
-                throw [System.InvalidOperationException]::new("Access denied to device '$($device.FriendlyName)' [$($device.RedactedInstanceId)]. $notice")
+                throw [System.InvalidOperationException]::new("Access denied to device '$($selectedDevice.FriendlyName)' [$($selectedDevice.RedactedInstanceId)]. $notice")
             } catch {
                 if ($null -ne $this._devHandle) {
                     $this._devHandle.Dispose()
@@ -422,14 +475,14 @@ class UsbAdbClient : IDisposable {
                 }
                 $attempts++
                 if ($attempts -ge 10) {
-                    throw [System.InvalidOperationException]::new("Failed to open device handle for '$($device.FriendlyName)' [$($device.RedactedInstanceId)]: $($_.Message)")
+                    throw [System.InvalidOperationException]::new("Failed to open device handle for '$($selectedDevice.FriendlyName)' [$($selectedDevice.RedactedInstanceId)]: $($_.Message)")
                 }
                 [System.Threading.Thread]::Sleep(200)
             }
         }
 
         if ($this._usbHandle -eq [IntPtr]::Zero) {
-            throw [System.InvalidOperationException]::new("WinUsb_Initialize failed after retries for device '$($device.FriendlyName)'.")
+            throw [System.InvalidOperationException]::new("WinUsb_Initialize failed after retries for device '$($selectedDevice.FriendlyName)'.")
         }
 
         # Query pipes and endpoint descriptors
@@ -1039,7 +1092,150 @@ class UsbAdbClient : IDisposable {
 
 
 # =============================================================================
-# Device selection (Pwsh): one selection rule for every command script.
+# ADB service stream. Wire semantics: aosp-adb
+# 1cf2f017d312f73b3dc53bda85ef2610e35a80e9, docs/dev/protocol.md.
+# Synchronous calls use the connection holder's owning runspace. Dispose closes
+# the service, not the shared device connection. Seeking is not supported.
+# =============================================================================
+
+class AdbStream : System.IO.Stream {
+    [UsbAdbClient] $_client
+    [uint32] $_localId
+    [uint32] $_remoteId
+    [string] $_token
+    [bool] $_closed
+    [bool] $_disposed
+    [System.Collections.Generic.Queue[byte[]]] $_received = [System.Collections.Generic.Queue[byte[]]]::new()
+    [byte[]] $_buffer = [byte[]]::new(0)
+    [int] $_offset
+
+    AdbStream([UsbAdbClient] $client, [string] $service) {
+        if ([string]::IsNullOrWhiteSpace($service) -or $service.Contains([char]0)) {
+            throw [ArgumentException]::new('A service must be nonempty and contain no NUL.')
+        }
+        $this._client = $client
+        $this._localId = $client.OpenStream($service)
+        try {
+            $message = $client.ReadStreamMessage($this._localId)
+            if ($message.Command -ne [UsbAdbClient]::A_OKAY -or $message.Arg0 -eq 0) {
+                throw [IO.IOException]::new('The device rejected the service.')
+            }
+            $this._remoteId = $message.Arg0
+        }
+        catch { $client.CloseStream($this._localId, $this._remoteId); throw }
+    }
+
+    AdbStream([string] $token) { $this._token = $token }
+
+    static [hashtable] Request([hashtable] $request) {
+        $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', "pwsh-adb-$([Environment]::UserName)", [IO.Pipes.PipeDirection]::InOut)
+        try {
+            $pipe.Connect(15000)
+            $writer = [IO.StreamWriter]::new($pipe, [Text.UTF8Encoding]::new($false), 4096, $true)
+            $reader = [IO.StreamReader]::new($pipe, [Text.UTF8Encoding]::new($false), $false, 4096, $true)
+            $writer.WriteLine(($request | ConvertTo-Json -Compress -Depth 5))
+            $writer.Flush()
+            $line = $reader.ReadLine()
+            if ($null -eq $line) { throw [IO.IOException]::new('The ADB connection holder disconnected.') }
+            $response = $line | ConvertFrom-Json -AsHashtable
+            if ($response.Error) { throw [IO.IOException]::new([string]$response.Error) }
+            return $response
+        }
+        finally { $pipe.Dispose() }
+    }
+
+    [bool] get_CanRead() { return -not $this._disposed }
+    [bool] get_CanWrite() { return -not ($this._disposed -or $this._closed) }
+    [bool] get_CanSeek() { return $false }
+    [long] get_Length() { throw [NotSupportedException]::new() }
+    [long] get_Position() { throw [NotSupportedException]::new() }
+    [void] set_Position([long] $value) { throw [NotSupportedException]::new() }
+    [long] Seek([long] $offset, [IO.SeekOrigin] $origin) { throw [NotSupportedException]::new() }
+    [void] SetLength([long] $value) { throw [NotSupportedException]::new() }
+    [void] Flush() {
+        if ($this._disposed) { throw [ObjectDisposedException]::new('AdbStream') }
+    }
+
+    [void] ValidateBuffer([byte[]] $buffer, [int] $offset, [int] $count) {
+        if ($this._disposed) { throw [ObjectDisposedException]::new('AdbStream') }
+        if ($null -eq $buffer) { throw [ArgumentNullException]::new('buffer') }
+        if ($offset -lt 0 -or $count -lt 0 -or $offset -gt $buffer.Length - $count) {
+            throw [ArgumentOutOfRangeException]::new('offset/count')
+        }
+    }
+
+    [void] Receive([UsbAdbWireMessage] $message) {
+        if ($message.Command -eq [UsbAdbClient]::A_WRTE) {
+            $this._client.SendWireMessage([UsbAdbClient]::A_OKAY, $this._localId, $this._remoteId, $null)
+            if ($message.Data.Length -gt 0) { $this._received.Enqueue($message.Data) }
+        }
+        elseif ($message.Command -eq [UsbAdbClient]::A_CLSE) {
+            $this._closed = $true
+            $this._client.CloseStream($this._localId, $this._remoteId)
+        }
+    }
+
+    [int] Read([byte[]] $buffer, [int] $offset, [int] $count) {
+        $this.ValidateBuffer($buffer, $offset, $count)
+        if ($count -eq 0) { return 0 }
+        if ($this._token) {
+            $response = [AdbStream]::Request(@{ Op = 'stream-read'; Token = $this._token; Count = [Math]::Min($count, 65536) })
+            $bytes = [Convert]::FromBase64String([string]$response.Data)
+            if ($bytes.Length -gt $count) { throw [IO.InvalidDataException]::new('Stream response exceeds requested length.') }
+            [Buffer]::BlockCopy($bytes, 0, $buffer, $offset, $bytes.Length)
+            return $bytes.Length
+        }
+        while ($this._offset -eq $this._buffer.Length) {
+            if ($this._received.Count -gt 0) {
+                $this._buffer = $this._received.Dequeue()
+                $this._offset = 0
+                break
+            }
+            if ($this._closed) { return 0 }
+            $this.Receive($this._client.ReadStreamMessage($this._localId))
+        }
+        $take = [Math]::Min($count, $this._buffer.Length - $this._offset)
+        [Buffer]::BlockCopy($this._buffer, $this._offset, $buffer, $offset, $take)
+        $this._offset += $take
+        return $take
+    }
+
+    [void] Write([byte[]] $buffer, [int] $offset, [int] $count) {
+        $this.ValidateBuffer($buffer, $offset, $count)
+        if ($this._closed) { throw [IO.IOException]::new('The device closed the service.') }
+        while ($count -gt 0) {
+            $limit = if ($this._token) { 65536 } else { [int]$this._client._maxPayload }
+            $take = [Math]::Min($count, $limit)
+            $bytes = [byte[]]::new($take)
+            [Buffer]::BlockCopy($buffer, $offset, $bytes, 0, $take)
+            if ($this._token) {
+                [void][AdbStream]::Request(@{ Op = 'stream-write'; Token = $this._token; Data = [Convert]::ToBase64String($bytes) })
+            }
+            else {
+                $this._client.SendWireMessage([UsbAdbClient]::A_WRTE, $this._localId, $this._remoteId, $bytes)
+                do {
+                    $message = $this._client.ReadStreamMessage($this._localId)
+                    $this.Receive($message)
+                    if ($this._closed) { throw [IO.IOException]::new('The device closed the service during a write.') }
+                } while ($message.Command -ne [UsbAdbClient]::A_OKAY)
+            }
+            $offset += $take
+            $count -= $take
+        }
+    }
+
+    [void] Dispose([bool] $disposing) {
+        if ($this._disposed) { return }
+        try {
+            if ($this._token) { [void][AdbStream]::Request(@{ Op = 'stream-close'; Token = $this._token }) }
+            elseif (-not $this._closed) { $this._client.CloseStream($this._localId, $this._remoteId) }
+        }
+        finally { $this._disposed = $true; $this._closed = $true }
+    }
+}
+
+# =============================================================================
+# Device selection: the same rule for command and API calls.
 # =============================================================================
 
 function Select-UsbAdbDevice {
@@ -1081,8 +1277,22 @@ $script:AdbPipeName = "pwsh-adb-$([Environment]::UserName)"
 
 function Invoke-AdbClientOperation {
     # Runs one operation on an already connected client.
-    param([Parameter(Mandatory)] $Client, [Parameter(Mandatory)] [hashtable] $Request)
+    param([Parameter(Mandatory)] $Client, [Parameter(Mandatory)] [hashtable] $Request, [hashtable] $Streams)
     switch ($Request.Op) {
+        'stream-open' {
+            $token = [Guid]::NewGuid().ToString('N')
+            $Streams[$token] = [AdbStream]::new($Client, [string]$Request.Service)
+            return @{ Token = $token; ExitCode = 0 }
+        }
+        'exec-out' {
+            $stream = [AdbStream]::new($Client, "exec:$($Request.Command)")
+            $memory = [IO.MemoryStream]::new()
+            try {
+                $stream.CopyTo($memory)
+                return @{ Data = [Convert]::ToBase64String($memory.ToArray()); ExitCode = 0 }
+            }
+            finally { $stream.Dispose(); $memory.Dispose() }
+        }
         'shell' {
             $r = $Client.ExecuteShell([string]$Request.Command)
             return @{ Stdout = [string]$r.Stdout; Stderr = [string]$r.Stderr; ExitCode = [int]$r.ExitCode }
@@ -1115,9 +1325,8 @@ function Start-AdbServer {
     param([switch] $Foreground)
     if (-not $Foreground) {
         if (Test-AdbServer) { return }
-        $self = Join-Path $PSScriptRoot 'UsbAdb.psm1'
-        $command = "Import-Module '$($self.Replace("'", "''"))'; Start-AdbServer -Foreground"
-        Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', $command) -WindowStyle Hidden | Out-Null
+        $self = Join-Path $PSScriptRoot 'adb.ps1'
+        Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList @('-NoProfile', '-NonInteractive', '-File', "`"$self`"", 'start-server', '-Foreground') -WindowStyle Hidden | Out-Null
         $probe = [System.IO.Pipes.NamedPipeClientStream]::new('.', $script:AdbPipeName, [System.IO.Pipes.PipeDirection]::InOut)
         try { $probe.Connect(15000) } finally { $probe.Dispose() }
         return
@@ -1126,6 +1335,7 @@ function Start-AdbServer {
     $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
     $security.AddAccessRule([System.IO.Pipes.PipeAccessRule]::new($user, [System.IO.Pipes.PipeAccessRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow))
     $clients = @{}
+    $streams = @{}
     $running = $true
     while ($running) {
         $pipe = [System.IO.Pipes.NamedPipeServerStreamAcl]::Create($script:AdbPipeName, [System.IO.Pipes.PipeDirection]::InOut, 1,
@@ -1146,6 +1356,30 @@ function Start-AdbServer {
                             @{ Index = $_.Index; FriendlyName = $_.FriendlyName; RedactedInstanceId = $_.RedactedInstanceId
                                IsAccessible = $_.IsAccessible; AccessError = $_.AccessError; Connected = $clients.ContainsKey($_.InstanceId) } }) }
                     }
+                    { $_ -in 'stream-read', 'stream-write', 'stream-close' } {
+                        $serviceStream = $streams[[string]$request.Token]
+                        if ($null -eq $serviceStream) { throw 'Unknown or closed service stream.' }
+                        switch ($request.Op) {
+                            'stream-read' {
+                                $count = [int]$request.Count
+                                if ($count -lt 0 -or $count -gt 65536) { throw 'Stream read length is outside 0..65536.' }
+                                $bytes = [byte[]]::new($count)
+                                $read = $serviceStream.Read($bytes, 0, $count)
+                                $response = @{ Data = [Convert]::ToBase64String($bytes, 0, $read); ExitCode = 0 }
+                            }
+                            'stream-write' {
+                                $bytes = [Convert]::FromBase64String([string]$request.Data)
+                                if ($bytes.Length -gt 65536) { throw 'Stream write length exceeds 65536.' }
+                                $serviceStream.Write($bytes, 0, $bytes.Length)
+                                $response = @{ ExitCode = 0 }
+                            }
+                            'stream-close' {
+                                try { $serviceStream.Dispose() }
+                                finally { $streams.Remove([string]$request.Token) }
+                                $response = @{ ExitCode = 0 }
+                            }
+                        }
+                    }
                     default {
                         $device = Select-UsbAdbDevice -Selector ([string]$request.Device)
                         $client = $clients[$device.InstanceId]
@@ -1154,7 +1388,7 @@ function Start-AdbServer {
                             try { $client.Connect() } catch { $client.Dispose(); throw }
                             $clients[$device.InstanceId] = $client
                         }
-                        try { $response = Invoke-AdbClientOperation -Client $client -Request $request }
+                        try { $response = Invoke-AdbClientOperation -Client $client -Request $request -Streams $streams }
                         catch {
                             # The connection's state is unknown after a failure: drop it, so
                             # the next request reconnects (after a replug, if the device needs one).
@@ -1169,6 +1403,7 @@ function Start-AdbServer {
         catch [System.IO.IOException] { }   # the requester went away; wait for the next one
         finally { $pipe.Dispose() }
     }
+    foreach ($s in $streams.Values) { try { $s.Dispose() } catch { } }
     foreach ($c in $clients.Values) { $c.Dispose() }
 }
 
@@ -1182,17 +1417,7 @@ function Invoke-AdbRequest {
     # Sends one request to the connection holder, starting it if needed.
     param([Parameter(Mandatory)] [hashtable] $Request)
     if (-not (Test-AdbServer)) { Start-AdbServer }
-    $pipe = [System.IO.Pipes.NamedPipeClientStream]::new('.', $script:AdbPipeName, [System.IO.Pipes.PipeDirection]::InOut)
-    try {
-        $pipe.Connect(15000)
-        $writer = [System.IO.StreamWriter]::new($pipe, [System.Text.UTF8Encoding]::new($false), 4096, $true)
-        $reader = [System.IO.StreamReader]::new($pipe, [System.Text.UTF8Encoding]::new($false), $false, 4096, $true)
-        $writer.WriteLine(($Request | ConvertTo-Json -Compress -Depth 5)); $writer.Flush()
-        $response = $reader.ReadLine() | ConvertFrom-Json -AsHashtable
-    }
-    finally { $pipe.Dispose() }
-    if ($response.Error) { throw $response.Error }
-    $response
+    [AdbStream]::Request($Request)
 }
 
 function Stop-AdbServer {
@@ -1200,45 +1425,104 @@ function Stop-AdbServer {
     if (Test-AdbServer) { [void](Invoke-AdbRequest @{ Op = 'kill' }) }
 }
 
-function Get-AdbDevice {
-    <# .SYNOPSIS Lists ADB USB devices; serials are redacted. #>
-    (Invoke-AdbRequest @{ Op = 'devices' }).Devices | ForEach-Object { [pscustomobject]$_ }
+# Command and API invocation use the same operations. -Api returns objects;
+# exec-out returns one byte[]; stream always returns an owned .NET Stream.
+$rest = [Collections.Generic.List[string]]::new()
+for ($i = 0; $i -lt $CommandArgs.Count; $i++) {
+    if ($CommandArgs[$i] -ceq '-s') {
+        if (++$i -ge $CommandArgs.Count) { throw '-s requires a device index or name.' }
+        $Device = $CommandArgs[$i]
+    }
+    else { $rest.Add($CommandArgs[$i]) }
 }
-
-function Invoke-AdbShell {
-    <#
-    .SYNOPSIS
-        Runs a shell command on an ADB device and returns Stdout, Stderr and ExitCode.
-    .EXAMPLE
-        (Invoke-AdbShell -Command 'getprop ro.build.version.sdk').Stdout
-    #>
-    [CmdletBinding()]
-    param([Parameter(Mandatory, Position = 0)][string] $Command, [string] $Device)
-    $r = Invoke-AdbRequest @{ Op = 'shell'; Device = $Device; Command = $Command }
-    [pscustomobject]@{ Stdout = [string]$r.Stdout; Stderr = [string]$r.Stderr; ExitCode = [int]$r.ExitCode }
-}
-
-function Send-AdbFile {
-    <# .SYNOPSIS Pushes a local file to a path on an ADB device. #>
-    [CmdletBinding()]
-    param([Parameter(Mandatory, Position = 0)][string] $Path, [Parameter(Mandatory, Position = 1)][string] $Destination, [string] $Device)
-    [void](Invoke-AdbRequest @{ Op = 'push'; Device = $Device; Path = (Resolve-Path -LiteralPath $Path).Path; Destination = $Destination })
-}
-
-function Receive-AdbFile {
-    <# .SYNOPSIS Pulls a file from an ADB device to a local path. #>
-    [CmdletBinding()]
-    param([Parameter(Mandatory, Position = 0)][string] $Source, [Parameter(Mandatory, Position = 1)][string] $Destination, [string] $Device)
-    [void](Invoke-AdbRequest @{ Op = 'pull'; Device = $Device; Source = $Source; Destination = [IO.Path]::GetFullPath($Destination) })
-}
-
-function Install-AdbPackage {
-    <#
-    .SYNOPSIS
-        Installs an APK on an ADB device: push to /data/local/tmp, pm install, remove the copy.
-    #>
-    [CmdletBinding()]
-    param([Parameter(Mandatory, Position = 0)][string] $Path, [string] $Device, [switch] $Replace)
-    $r = Invoke-AdbRequest @{ Op = 'install'; Device = $Device; Path = (Resolve-Path -LiteralPath $Path).Path; Replace = [bool]$Replace }
-    [pscustomobject]@{ Path = $Path; Output = [string]$r.Stdout }
+$global:LASTEXITCODE = 0
+switch ($Command) {
+    'derive-pairing-key' {
+        if (-not $Api -or $null -eq $KeyMaterial) { throw 'Use -Api -KeyMaterial <byte[]> for pairing key derivation.' }
+        return ,([AdbPairingKey]::DeriveAesKey($KeyMaterial))
+    }
+    'start-server' {
+        Start-AdbServer -Foreground:$Foreground
+        if ($Api) { [pscustomobject]@{ Running = $true } }
+        else { 'connection holder running' }
+    }
+    'kill-server' {
+        Stop-AdbServer
+        if ($Api) { [pscustomobject]@{ Running = $false } }
+    }
+    'devices' {
+        $devices = (Invoke-AdbRequest @{ Op = 'devices' }).Devices
+        if ($Api) { $devices | ForEach-Object { [pscustomobject]$_ } }
+        else {
+            'List of devices attached'
+            foreach ($d in $devices) {
+                $state = if ($d.IsAccessible -or $d.Connected) { 'device' } else { 'unavailable' }
+                "[{0}] {1}`t{2}" -f $d.Index, $d.FriendlyName, $state
+            }
+        }
+    }
+    'shell' {
+        if ($rest.Count -eq 0) { throw 'Usage: adb.ps1 shell [-s <device>] <command>' }
+        $result = Invoke-AdbRequest @{ Op = 'shell'; Device = $Device; Command = $rest -join ' ' }
+        $global:LASTEXITCODE = [int]$result.ExitCode
+        if ($Api) { [pscustomobject]$result }
+        else {
+            [Console]::Out.Write([string]$result.Stdout)
+            [Console]::Error.Write([string]$result.Stderr)
+            exit $result.ExitCode
+        }
+    }
+    'exec-out' {
+        if ($rest.Count -eq 0) { throw 'Usage: adb.ps1 exec-out [-s <device>] <command>' }
+        $result = Invoke-AdbRequest @{ Op = 'exec-out'; Device = $Device; Command = $rest -join ' ' }
+        $bytes = [Convert]::FromBase64String([string]$result.Data)
+        if ($Api) { return ,$bytes }
+        [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length)
+    }
+    'stream' {
+        if ($rest.Count -ne 1) { throw 'Usage: & adb.ps1 stream -Device <device> tcp:<port>|localabstract:<name>' }
+        $result = Invoke-AdbRequest @{ Op = 'stream-open'; Device = $Device; Service = $rest[0] }
+        return [AdbStream]::new([string]$result.Token)
+    }
+    'push' {
+        if ($rest.Count -ne 2) { throw 'Usage: adb.ps1 push [-s <device>] <local> <remote>' }
+        $path = (Resolve-Path -LiteralPath $rest[0]).Path
+        $result = Invoke-AdbRequest @{ Op = 'push'; Device = $Device; Path = $path; Destination = $rest[1] }
+        if ($Api) { [pscustomobject]$result }
+        else { '{0}: 1 file pushed. {1} bytes' -f $rest[0], ([IO.FileInfo]$path).Length }
+    }
+    'pull' {
+        if ($rest.Count -ne 2) { throw 'Usage: adb.ps1 pull [-s <device>] <remote> <local>' }
+        $path = [IO.Path]::GetFullPath($rest[1])
+        $result = Invoke-AdbRequest @{ Op = 'pull'; Device = $Device; Source = $rest[0]; Destination = $path }
+        if ($Api) { [pscustomobject]$result }
+        else { '{0}: 1 file pulled. {1} bytes' -f $rest[0], ([IO.FileInfo]$path).Length }
+    }
+    'install' {
+        $paths = @($rest | Where-Object { $_ -notlike '-*' })
+        if ($paths.Count -ne 1) { throw 'Usage: adb.ps1 install [-s <device>] [-r] <apk>' }
+        $result = Invoke-AdbRequest @{ Op = 'install'; Device = $Device; Path = (Resolve-Path -LiteralPath $paths[0]).Path; Replace = $rest.Contains('-r') }
+        if ($Api) { [pscustomobject]$result }
+        else { $result.Stdout }
+    }
+    'pubkey' { [UsbAdbCrypto]::GetPublicKeyString() }
+    'version' {
+        $version = [pscustomobject]@{ Name = 'Android Debug Bridge in PowerShell'; Protocol = '0x01000001'; Transport = 'WinUSB' }
+        if ($Api) { $version } else { "$($version.Name) ($($version.Transport)), protocol $($version.Protocol)" }
+    }
+    'help' {
+        @'
+Android Debug Bridge in PowerShell; all implementation is in this file.
+  adb.ps1 devices [-l]
+  adb.ps1 start-server | kill-server
+  adb.ps1 shell|exec-out [-s <device>] <command>
+  adb.ps1 push|pull [-s <device>] <source> <destination>
+  adb.ps1 install [-s <device>] [-r] <apk>
+  adb.ps1 pubkey | version
+  & adb.ps1 <command> -Api -Device <index|name> ...  # objects; exec-out: byte[]
+  & adb.ps1 stream -Device <index|name> <service>   # System.IO.Stream; Dispose when done
+  & adb.ps1 derive-pairing-key -Api -KeyMaterial <byte[]>  # HKDF only; pairing pending
+Synchronous stream operations share the connection holder; do not call concurrently.
+'@
+    }
 }
