@@ -217,7 +217,7 @@ OPTIONS
   -Architecture <arm64|x64|arm32>
                             Target. arm64 for phones, x64 for the x86_64
                             emulator. arm32 for 32-bit ARMv7 devices.
-  -ValidateManifest         Check the manifest and adaptive-icon emitters in
+  -ValidateManifest         Check the manifest and launcher drawable emitters in
                             seconds: binary XML through the production reader
                             and resource-id check, plus malformed-document
                             controls for the manifest.
@@ -6553,16 +6553,19 @@ function Invoke-AssembleStep {
     }
 
     & $add 'AndroidManifest.xml' ([byte[]]$script:BuildContext.AndroidManifest.Bytes) $false 0
-    $adaptiveIcon = New-AdaptiveIconAxml -ForegroundResourceId 0x7f010001 -BackgroundResourceId 0x7f020000
+    $adaptiveIcon = New-LauncherDrawableAxml -ForegroundResourceId 0x7f010001 -BackgroundResourceId 0x7f020000
     $adaptiveReport = Test-BinaryAxml -Document $adaptiveIcon
     $adaptiveAttributeIds = Assert-ManifestAttributeIds -Report $adaptiveReport
     if ($adaptiveAttributeIds -ne 2) { throw "The adaptive icon has $adaptiveAttributeIds checked android: attributes; expected 2." }
+    $tvBanner = New-LauncherDrawableAxml -Kind TvBanner -ForegroundResourceId 0x7f010001 -BackgroundResourceId 0x7f020000
     & $add 'resources.arsc' (New-ResourceTable `
         -PackageName $script:PackageName `
         -IconPath 'res/mipmap-anydpi-v26/ic_launcher.xml' `
         -ForegroundPath 'res/mipmap-nodpi-v4/ic_launcher_foreground.png' `
+        -BannerPath 'res/mipmap-anydpi-v26/ic_tv_banner.xml' `
         -BackgroundColor ([uint32]4278926638)) $true 4
     & $add 'res/mipmap-anydpi-v26/ic_launcher.xml' $adaptiveIcon $false 0
+    & $add 'res/mipmap-anydpi-v26/ic_tv_banner.xml' $tvBanner $false 0
     & $add 'res/mipmap-nodpi-v4/ic_launcher_foreground.png' (Import-LibSourceBytes -Path 'ic_launcher.png') $true 4
     & $add "lib/$abi/libpwsh-host.so" ([byte[]]$script:BuildContext.NativeHost.Bytes) $false 0
     & $add "lib/$abi/libassembly-store.so" ([byte[]]$script:BuildContext.StoreLibrary.Bytes) $false 0
@@ -6923,9 +6926,10 @@ function New-ResStringPool {
 function New-ResourceTable {
     <#
         A resources.arsc holding one package (0x7f) with two types. The mipmap
-        type has two configurations: mipmap/ic_launcher is an anydpi-v26 adaptive-icon XML
+        type has three configurations: mipmap/ic_launcher is an anydpi-v26 adaptive-icon XML
         at resource id 0x7f010000; mipmap/ic_launcher_foreground is its nodpi
-        bitmap artwork at 0x7f010001. color/ic_launcher_background is the
+        bitmap artwork at 0x7f010001; mipmap/ic_tv_banner at 0x7f010002
+        composes that same artwork on a rectangular background. color/ic_launcher_background is the
         adaptive background at 0x7f020000. Layouts follow
         lib/ResourceTypes.h: ResTable_header,
         ResTable_package, ResTable_typeSpec, ResTable_type with a 64-byte
@@ -6935,19 +6939,20 @@ function New-ResourceTable {
         [Parameter(Mandatory)][string] $PackageName,
         [Parameter(Mandatory)][string] $IconPath,
         [Parameter(Mandatory)][string] $ForegroundPath,
+        [Parameter(Mandatory)][string] $BannerPath,
         [Parameter(Mandatory)][uint32] $BackgroundColor
     )
 
-    $valueStrings = New-ResStringPool -Strings @($IconPath, $ForegroundPath)
+    $valueStrings = New-ResStringPool -Strings @($IconPath, $ForegroundPath, $BannerPath)
     $typeStrings  = New-ResStringPool -Strings @('mipmap', 'color')
-    $keyStrings   = New-ResStringPool -Strings @('ic_launcher', 'ic_launcher_foreground', 'ic_launcher_background')
+    $keyStrings   = New-ResStringPool -Strings @('ic_launcher', 'ic_launcher_foreground', 'ic_tv_banner', 'ic_launcher_background')
 
-    # ResTable_typeSpec: id 1, two entries, no configuration flags.
+    # ResTable_typeSpec: id 1, three entries, no configuration flags.
     $spec = [System.IO.MemoryStream]::new()
     $w = [System.IO.BinaryWriter]::new($spec)
-    $w.Write([uint16]0x0202); $w.Write([uint16]16); $w.Write([uint32](16 + 8))
-    $w.Write([byte]1); $w.Write([byte]0); $w.Write([uint16]0); $w.Write([uint32]2)
-    $w.Write([uint32]0); $w.Write([uint32]0)
+    $w.Write([uint16]0x0202); $w.Write([uint16]16); $w.Write([uint32](16 + 12))
+    $w.Write([byte]1); $w.Write([byte]0); $w.Write([uint16]0); $w.Write([uint32]3)
+    $w.Write([uint32]0); $w.Write([uint32]0); $w.Write([uint32]0)
     $w.Flush()
 
     # ResTable_typeSpec: id 2, one color entry.
@@ -6960,25 +6965,25 @@ function New-ResourceTable {
 
     function New-IconTypeChunk {
         param(
-            [Parameter(Mandatory)][ValidateRange(0, 1)][int] $EntryIndex,
+            [Parameter(Mandatory)][ValidateRange(0, 2)][int] $EntryIndex,
             [Parameter(Mandatory)][uint16] $Density,
             [Parameter(Mandatory)][uint16] $SdkVersion
         )
 
         $configSize = 64
         $headerSize = 20 + $configSize
-        $entriesStart = $headerSize + 8
+        $entriesStart = $headerSize + 12
         $type = [System.IO.MemoryStream]::new()
         $tw = [System.IO.BinaryWriter]::new($type)
         $tw.Write([uint16]0x0201); $tw.Write([uint16]$headerSize); $tw.Write([uint32]($entriesStart + 16))
         $tw.Write([byte]1); $tw.Write([byte]0); $tw.Write([uint16]0)
-        $tw.Write([uint32]2); $tw.Write([uint32]$entriesStart)
+        $tw.Write([uint32]3); $tw.Write([uint32]$entriesStart)
         $config = [byte[]]::new($configSize)
         [BitConverter]::GetBytes([uint32]$configSize).CopyTo($config, 0)
         [BitConverter]::GetBytes($Density).CopyTo($config, 14)
         [BitConverter]::GetBytes($SdkVersion).CopyTo($config, 24)
         $tw.Write($config)
-        for ($i = 0; $i -lt 2; $i++) {
+        for ($i = 0; $i -lt 3; $i++) {
             $tw.Write([uint32]$(if ($i -eq $EntryIndex) { 0 } else { [uint32]::MaxValue }))
         }
         $tw.Write([uint16]8); $tw.Write([uint16]0); $tw.Write([uint32]$EntryIndex)
@@ -6992,6 +6997,7 @@ function New-ResourceTable {
     # the bitmap foreground remains nodpi so its source pixels are not scaled.
     $iconType = New-IconTypeChunk -EntryIndex 0 -Density ([uint16]0xFFFE) -SdkVersion 26
     $foregroundType = New-IconTypeChunk -EntryIndex 1 -Density ([uint16]0xFFFF) -SdkVersion 0
+    $bannerType = New-IconTypeChunk -EntryIndex 2 -Density ([uint16]0xFFFE) -SdkVersion 26
 
     # The adaptive-icon inflater requires a resource reference for its
     # background. A color resource is drawable through Resources.getDrawable.
@@ -7007,7 +7013,7 @@ function New-ResourceTable {
     [BitConverter]::GetBytes([uint32]$configSize).CopyTo($config, 0)
     $w.Write($config)
     $w.Write([uint32]0)
-    $w.Write([uint16]8); $w.Write([uint16]0); $w.Write([uint32]2)
+    $w.Write([uint16]8); $w.Write([uint16]0); $w.Write([uint32]3)
     $w.Write([uint16]8); $w.Write([byte]0); $w.Write([byte]0x1c) # TYPE_INT_COLOR_ARGB8
     $w.Write($BackgroundColor)
     $w.Flush()
@@ -7016,7 +7022,7 @@ function New-ResourceTable {
     $packageHeaderSize = 288
     $typeStringsOffset = $packageHeaderSize
     $keyStringsOffset = $typeStringsOffset + $typeStrings.Length
-    $packageSize = $keyStringsOffset + $keyStrings.Length + $spec.Length + $iconType.Length + $foregroundType.Length + $colorSpec.Length + $colorType.Length
+    $packageSize = $keyStringsOffset + $keyStrings.Length + $spec.Length + $iconType.Length + $foregroundType.Length + $bannerType.Length + $colorSpec.Length + $colorType.Length
     $package = [System.IO.MemoryStream]::new()
     $w = [System.IO.BinaryWriter]::new($package)
     $w.Write([uint16]0x0200); $w.Write([uint16]$packageHeaderSize); $w.Write([uint32]$packageSize)
@@ -7027,10 +7033,10 @@ function New-ResourceTable {
     $nameBytes.CopyTo($name, 0)
     $w.Write($name)
     $w.Write([uint32]$typeStringsOffset); $w.Write([uint32]2)
-    $w.Write([uint32]$keyStringsOffset); $w.Write([uint32]3)
+    $w.Write([uint32]$keyStringsOffset); $w.Write([uint32]4)
     $w.Write([uint32]0)                                              # typeIdOffset
     $w.Write($typeStrings); $w.Write($keyStrings)
-    $w.Write($spec.ToArray()); $w.Write($iconType); $w.Write($foregroundType)
+    $w.Write($spec.ToArray()); $w.Write($iconType); $w.Write($foregroundType); $w.Write($bannerType)
     $w.Write($colorSpec.ToArray()); $w.Write($colorType.ToArray())
     $w.Flush()
 
@@ -7045,24 +7051,34 @@ function New-ResourceTable {
     return , $table.ToArray()
 }
 
-function New-AdaptiveIconAxml {
+function New-LauncherDrawableAxml {
     <#
-        Binary form of Android's adaptive-icon resource. The drawable
-        attribute id is taken from the pinned public-final.xml, and the chunk
-        structures follow the pinned ResourceTypes.h.
+        Adaptive icon or TV layer-list, sharing the pinned foreground bitmap.
+        LayerDrawable.java at frameworks/base d67e90e8 defines item dimensions,
+        gravity and drawable references; ids and chunks follow the pinned
+        public-final.xml and ResourceTypes.h. The TV banner is 16:9.
     #>
     param(
         [Parameter(Mandatory)][uint32] $ForegroundResourceId,
-        [Parameter(Mandatory)][uint32] $BackgroundResourceId
+        [Parameter(Mandatory)][uint32] $BackgroundResourceId,
+        [ValidateSet('AdaptiveIcon', 'TvBanner')][string] $Kind = 'AdaptiveIcon'
     )
 
-    $allStrings = @(
-        'drawable',
+    $attributeIds = [ordered]@{ drawable = [uint32]0x01010199 }
+    if ($Kind -eq 'TvBanner') {
+        $attributeIds = [ordered]@{
+            gravity = [uint32]0x010100af; height = [uint32]0x01010155
+            width = [uint32]0x01010159; drawable = [uint32]0x01010199
+        }
+    }
+    $allStrings = @($attributeIds.Keys) + @(
         'adaptive-icon',
         'background',
         'foreground',
         'android',
-        'http://schemas.android.com/apk/res/android'
+        'http://schemas.android.com/apk/res/android',
+        'layer-list',
+        'item'
     )
     $strMap = @{}
     for ($i = 0; $i -lt $allStrings.Count; $i++) { $strMap[$allStrings[$i]] = $i }
@@ -7071,8 +7087,8 @@ function New-AdaptiveIconAxml {
     $stringPoolChunk = New-ResStringPool -Strings $allStrings
     $rm = [System.IO.MemoryStream]::new()
     $w = [System.IO.BinaryWriter]::new($rm)
-    $w.Write([uint16]0x0180); $w.Write([uint16]8); $w.Write([uint32]12)
-    $w.Write([uint32]0x01010199) # android:drawable, pinned public-final.xml
+    $w.Write([uint16]0x0180); $w.Write([uint16]8); $w.Write([uint32](8 + 4 * $attributeIds.Count))
+    foreach ($id in $attributeIds.Values) { $w.Write([uint32]$id) }
     $resourceMapChunk = $rm.ToArray()
     $w.Dispose(); $rm.Dispose()
 
@@ -7094,7 +7110,7 @@ function New-AdaptiveIconAxml {
         $w.Write([uint16]0); $w.Write([uint16]0); $w.Write([uint16]0)
         foreach ($attribute in $Attributes) {
             $w.Write([int32](S 'http://schemas.android.com/apk/res/android'))
-            $w.Write([int32](S 'drawable'))
+            $w.Write([int32](S $attribute.Name))
             $w.Write([int32]-1)
             $w.Write([uint16]8); $w.Write([byte]0); $w.Write([byte]$attribute.Type)
             $w.Write([uint32]$attribute.Data)
@@ -7107,12 +7123,33 @@ function New-AdaptiveIconAxml {
     }
 
     Write-IconNamespace 0x0100
-    Write-IconStartElement 'adaptive-icon' @() 2
-    Write-IconStartElement 'background' @([pscustomobject]@{ Type = 0x01; Data = $BackgroundResourceId }) 3
-    Write-IconEndElement 'background' 3
-    Write-IconStartElement 'foreground' @([pscustomobject]@{ Type = 0x01; Data = $ForegroundResourceId }) 4
-    Write-IconEndElement 'foreground' 4
-    Write-IconEndElement 'adaptive-icon' 2
+    if ($Kind -eq 'TvBanner') {
+        # TYPE_DIMENSION, DIP, RADIX_23p0: integer mantissa << 8 | 1
+        # (ResourceTypes.h). Gravity.CENTER is 0x11 in Android's Gravity.java.
+        Write-IconStartElement 'layer-list' @() 2
+        Write-IconStartElement 'item' @(
+            [pscustomobject]@{ Name = 'height'; Type = 0x05; Data = (180 -shl 8) -bor 1 }
+            [pscustomobject]@{ Name = 'width'; Type = 0x05; Data = (320 -shl 8) -bor 1 }
+            [pscustomobject]@{ Name = 'drawable'; Type = 0x01; Data = $BackgroundResourceId }
+        ) 3
+        Write-IconEndElement 'item' 3
+        Write-IconStartElement 'item' @(
+            [pscustomobject]@{ Name = 'gravity'; Type = 0x10; Data = 0x11 }
+            [pscustomobject]@{ Name = 'height'; Type = 0x05; Data = (144 -shl 8) -bor 1 }
+            [pscustomobject]@{ Name = 'width'; Type = 0x05; Data = (144 -shl 8) -bor 1 }
+            [pscustomobject]@{ Name = 'drawable'; Type = 0x01; Data = $ForegroundResourceId }
+        ) 4
+        Write-IconEndElement 'item' 4
+        Write-IconEndElement 'layer-list' 2
+    }
+    else {
+        Write-IconStartElement 'adaptive-icon' @() 2
+        Write-IconStartElement 'background' @([pscustomobject]@{ Name = 'drawable'; Type = 0x01; Data = $BackgroundResourceId }) 3
+        Write-IconEndElement 'background' 3
+        Write-IconStartElement 'foreground' @([pscustomobject]@{ Name = 'drawable'; Type = 0x01; Data = $ForegroundResourceId }) 4
+        Write-IconEndElement 'foreground' 4
+        Write-IconEndElement 'adaptive-icon' 2
+    }
     Write-IconNamespace 0x0101
 
     $treeBytes = $tree.ToArray()
@@ -7126,6 +7163,20 @@ function New-AdaptiveIconAxml {
     $w.Flush()
     $bytes = $document.ToArray()
     $w.Dispose(); $document.Dispose()
+    $report = Test-BinaryAxml -Document $bytes
+    $checkedIds = Assert-ManifestAttributeIds -Report $report
+    if ($Kind -eq 'TvBanner') {
+        if ($checkedIds -ne 7 -or (@($report.Elements | ForEach-Object Name) -join '/') -cne 'layer-list/item/item') {
+            throw 'The TV banner must contain two layers and seven Android attributes.'
+        }
+        $backdrop = $report.Elements[1].Attributes
+        $artwork = $report.Elements[2].Attributes
+        if ($backdrop['drawable'] -ne $BackgroundResourceId -or $artwork['drawable'] -ne $ForegroundResourceId -or
+            $backdrop['width'] -ne ((320 -shl 8) -bor 1) -or $backdrop['height'] -ne ((180 -shl 8) -bor 1) -or
+            $artwork['width'] -ne ((144 -shl 8) -bor 1) -or $artwork['height'] -ne ((144 -shl 8) -bor 1) -or $artwork['gravity'] -ne 0x11) {
+            throw 'The TV banner must center the pinned artwork on a 320 by 180 dp background.'
+        }
+    }
     return ,$bytes
 }
 
@@ -7428,13 +7479,14 @@ function New-BinaryAxmlManifest {
         (Attr-Ref 'icon' 0x7f010000),
         (Attr-String 'name' 'android.app.Application'),
         (Attr-Bool 'allowBackup' $true),
+        (Attr-Ref 'banner' 0x7f010002),
         (Attr-Bool 'extractNativeLibs' $true)
     )
     # Attributes are written in resource-id order; hasCode (0x0101000C)
     # follows name (0x01010003).
     # debuggable (0x0101000F) follows hasCode.
     $flags = @((Attr-Bool 'hasCode' $false)) + @(if ($Debuggable) { (Attr-Bool 'debuggable' $true) })
-    $appAttrs = @($appAttrs[0..2]) + $flags + @($appAttrs[3..4])
+    $appAttrs = @($appAttrs[0..2]) + $flags + @($appAttrs[3..5])
     Write-StartElem 'application' $appAttrs 12
 
     $activityAttrs = @(
@@ -7443,7 +7495,8 @@ function New-BinaryAxmlManifest {
         (Attr-Ref 'icon' 0x7f010000),
         (Attr-String 'name' $activityFullName),
         (Attr-Bool 'exported' $true),
-        (Attr-IntDec 'launchMode' 1)
+        (Attr-IntDec 'launchMode' 1),
+        (Attr-Ref 'banner' 0x7f010002)
     )
     Write-StartElem 'activity' $activityAttrs 13
 
@@ -7759,9 +7812,10 @@ function Invoke-ManifestValidation {
     try {
         [void](Test-AndroidAttributeIds)
         $native = New-BinaryAxmlManifest -PackageName $script:PackageName -ActivityClassName $script:ActivityClassName -ActivityLabel $script:ApplicationLabel
-        $count = Assert-ManifestAttributeIds -Report (Test-BinaryAxml -Document $native)
+        $nativeReport = Test-BinaryAxml -Document $native
+        $count = Assert-ManifestAttributeIds -Report $nativeReport
         $controls = Test-ManifestNegativeControls -Document $native
-        $adaptive = New-AdaptiveIconAxml -ForegroundResourceId 0x7f010001 -BackgroundResourceId 0x7f020000
+        $adaptive = New-LauncherDrawableAxml -ForegroundResourceId 0x7f010001 -BackgroundResourceId 0x7f020000
         $adaptiveReport = Test-BinaryAxml -Document $adaptive
         $adaptiveIds = Assert-ManifestAttributeIds -Report $adaptiveReport
         $adaptiveNames = @($adaptiveReport.Elements | ForEach-Object Name)
@@ -7775,9 +7829,14 @@ function Invoke-ManifestValidation {
         if ($adaptiveReport.Elements[2].Attributes['drawable'] -ne [uint32]0x7f010001) {
             throw 'The adaptive icon foreground reference did not round-trip.'
         }
+        $banner = New-LauncherDrawableAxml -Kind TvBanner -ForegroundResourceId 0x7f010001 -BackgroundResourceId 0x7f020000
+        $bannerIds = Assert-ManifestAttributeIds -Report (Test-BinaryAxml -Document $banner)
+        foreach ($element in @($nativeReport.Elements | Where-Object Name -in @('application', 'activity'))) {
+            if ($element.Attributes['banner'] -ne [uint32]0x7f010002) { throw "The $($element.Name) TV banner reference did not round-trip." }
+        }
         if ($Aapt2Path) { Invoke-Aapt2ManifestCheck -Document $native -Label 'NativeActivity' }
-        Write-Host ('[PASS] Binary XML validation: the manifest and adaptive icon pass the reader with {0} and {1} android: attributes matched to public-final.xml ids; {2} malformed-document controls rejected for the expected reason{3}.' -f
-            $count, $adaptiveIds, $controls, $(if ($Aapt2Path) { '; aapt2 parses the manifest' } else { '' })) -ForegroundColor Green
+        Write-Host ('[PASS] Binary XML validation: the manifest, adaptive icon and TV banner pass the reader with {0}, {1} and {4} android: attributes matched to public-final.xml ids; {2} malformed-document controls rejected for the expected reason{3}.' -f
+            $count, $adaptiveIds, $controls, $(if ($Aapt2Path) { '; aapt2 parses the manifest' } else { '' }), $bannerIds) -ForegroundColor Green
         return 0
     }
     catch {
