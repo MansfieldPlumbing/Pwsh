@@ -72,6 +72,154 @@ lifetime remain subject to the explicit gates in this roadmap.
 The current build inputs pin PowerShell 7.7.0-preview.5 and .NET
 11.0.0-rc.1.26425.128.
 
+## Xamarin-free scripting parity restoration (2026-10-10)
+
+The contract is unchanged PowerShell scripting against Android.* and Java.*,
+including member shapes, inheritance, $Activity, callbacks and Java exceptions.
+PowerShell is the consumer; C# source compatibility is not a requirement.
+Mono.Android is read as pinned metadata only. Mono.Android, Java.Interop and
+Xamarin's native runtime never load, execute or ship. The .NET SDK and dotnet
+CLI are not build tools; the pinned .NET runtime libraries remain dependencies.
+
+- [ ] **Phase A: restore product behavior from 0804758.** Owned DEX peers,
+  native registration and managed receivers, the crypto library load, profile
+  runtime, recovery and document import. Work in progress, not accepted.
+  The owned activity peer emits 1,060 bytes with six defined methods, no
+  Xamarin references, valid integrity fields and a rejected corruption control.
+  The pinned runtime's crypto DEX is 5,608 bytes and three classes on every
+  backend, SHA-256
+  `7C1AECCC89E10EF4FD1F732F7E2126765A40916D969E401E1A8E11478A053786`.
+  Windows x64, PowerShell 7.7.0-preview.5: the isolated emitted peer-registration
+  assembly is 4,608 bytes, references CoreLib only, and has two native receivers.
+  Synthetic JNI output: `Registrations=2 DeletedLocals=2 Callback=1001,-1,9320
+  RegisterFailureRejected=True`. This proves the Windows registration/callback
+  path and failed-registration cleanup, not Android callback delivery.
+  Manifest validation: 43 manifest, two adaptive-icon and seven banner
+  attributes; eight malformed-document controls rejected.
+  The preflight arm64 release APK remains byte-identical: 17,743,383 bytes,
+  SHA-256 `AC4187BFD552465E657584106BB31F1676AB98C64229A809E43AD55742D91207`.
+  Candidate debug ConsoleHost APKs: x86-64, 17,966,643 bytes, SHA-256
+  `8E40E1B63E46A3650DA35E3B86BAE6CAA05C92F7338D37C1BA55FC5E9245509C`;
+  arm64, 17,789,823 bytes, SHA-256
+  `F406D31D8D4B8E1F30B531EDF9F741B69E9406DBC0F9D8F5C6962406BEAC4600`.
+  Arm32, 16,963,231 bytes, SHA-256
+  `B6D2C7101C8679CE52BB1A7978EEDB93380431FA19706D6F5C3C0C4C81E12C42`;
+  growth against the accepted TV-banner debug APK is 4,950 bytes.
+  Against the earlier debug ConsoleHost APKs, growth is 5,651 bytes on x86-64
+  and 5,700 bytes on arm64; those comparisons also include the already accepted
+  TV banner. The x86-64 archive comparison attributes 598 compressed bytes to
+  the owned peer, 3,107 to runtime crypto DEX and 1,029 to the updated assembly
+  store. TV resources add 585 compressed bytes, manifest and native-host
+  changes subtract ten, and packaging accounts for the remaining 342 bytes.
+  Existing runtime DLLs and native runtime libraries are unchanged.
+  These candidates add the owned peer, runtime crypto DEX and managed receivers;
+  they do not yet restore recovery or document import. The x86-64 emulator
+  logged `GATE2A Admit returned 0x50575348`, `PEERS REGISTERED 2` and
+  `GATE2B RunPowerShell returned 0x50575348`. Its preceding APK was reinstalled
+  successfully afterward; original profile SHA-256 remained
+  `73A0491A423EE98F2C977CA8D91826BA005C3F26D3C89A48545DFD28437A432B`.
+  Device slice, all three backends, using those candidate APKs:
+  `PEERS REGISTERED 2`; `RESTOREA ACTIVITY_RESULT 47373,-1,0`;
+  `RESTOREA PERMISSIONS_RESULT 47374,0,0`;
+  `RESTOREA HASH BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD`;
+  `RESTOREA TLS HTTPS 200`; `RESTOREA SLICE PASS`;
+  `CONSOLEHOST START_INVOKE_END`; `GATE2B RunPowerShell returned 0x50575348`.
+  Each process stayed alive for another 40 seconds with zero crash-buffer
+  lines. Arm32's activity-manager launch wait timed out; the application then
+  completed the same markers. Both existing profiles and the TV's original
+  no-profile state were restored, along with the preceding installed APKs.
+  The arm64 profile's restored SHA-256 is
+  `F08FBD494DC1D01B93A1EF11A5A2E9A115F697D2A70B832F6BE457F2EC420276`.
+  The earlier rejected stdin transfers were replaced with an explicit staged
+  fixture copy after preserving and checking the original profiles.
+  These results prove callback delivery and crypto initialization, not recovery
+  or document-picker operation. No Phase A acceptance commit has been made.
+  The recurring synthetic checks now run inside the build: two native callbacks,
+  handler exception contained, registration failure rejected, pending Java
+  exception cleared and three local references released. The restored CoreLib
+  document-copy methods pass eight invalid-name controls, an 8,193-byte binary
+  copy, existing profile spelling, overwrite, read/close failure cleanup and
+  stream disposal. Both streams close before the destination is replaced.
+  The synthetic assembly uses separate check type names so it does not publish
+  the product's NativeHost type into the build's PowerShell process.
+  Updated debug ConsoleHost candidates, including those document-copy methods:
+  x86-64, 17,967,170 bytes, SHA-256
+  `D29BBA63474FB1844ADB2AAB77D2654E352543A246F194CD951BD5DABB3B64FC`;
+  arm64, 17,790,372 bytes, SHA-256
+  `EF33C5D7151B68B5C112AD24AAB042AE4FA5B3C6ECB038516AB4BE089DDA16E0`;
+  arm32, 16,963,778 bytes, SHA-256
+  `B7938D1C03D213A5030AADA460BD52B204C8FFCA9BD4A3477EDD6EF8CE643F1A`.
+  The document-copy implementation adds 512 uncompressed host-assembly bytes;
+  signed APK growth over the peer-only candidates is 527, 549 and 547 bytes
+  respectively. No runtime library was added or changed.
+  All three updated APKs logged
+  `RESTOREA DOCUMENT_COPY 8193 BYTES CASE_PRESERVED STREAM_CLOSED FAILURE_ATOMIC`,
+  followed by the same callback, SHA-256, HTTPS, startup and success markers
+  above. Each process remained alive another 40 seconds with zero crash-buffer
+  lines. The preceding APK and original profile state were restored on each
+  backend, with temporary device files removed. The temporary marker reader
+  initially included logcat's buffer header; after correcting that reader,
+  the complete checks were rerun successfully. Activity-manager waits timed
+  out on x86-64 and arm32; application markers and liveness checks passed.
+  A second arm64 headless build produced the identical SHA-256 above, including
+  after isolating the self-test type names. Parse and pending-change checks
+  passed with no findings. Recovery UI, picker launch, provider-stream reading
+  and retry integration remain pending; this is a component receipt, not Phase A
+  acceptance.
+
+  Accounting for all 31 function definitions removed by `fea685e`, compared
+  with its parent (behavior, rather than restoration of obsolete names):
+
+  | Removed function | Current behavior or remaining work | Evidence / boundary |
+  |---|---|---|
+  | `Invoke-ReferenceCrossCheck` | Not needed for its former comparison: Xamarin CRC64 peer naming and whole Xamarin DEX. `New-JavaPeerDex`, `Test-JavaPeerDex`, `Add-NativePeerMethods` replace those outputs with an explicitly named owned peer. | Drop the obsolete SDK comparison: it cannot validate owned peer registration. DEX integrity/corruption checks and both callback receipts above validate the replacement; no claim of whole-API parity. |
+  | `Get-ManagedAssemblyName` | `New-ManagedHostAssemblyBytes` uses the declared managed namespace directly; no admission-mode identity switch. | Generated assembly and CoreCLR delegate resolution pass gates 2a–2c on all three backends. |
+  | `New-EmptyManagedAssemblyBytes` | Not needed: generated placeholder resource/Probe assemblies were Xamarin packaging inputs, not product logic. `Add-GeneratedAssemblyCandidates` supplies the real managed host. | Native-admission APK checks exclude the removed framework payload; gates 2a–2d run without those placeholders. |
+  | `Get-AndroidType` | Not needed as a runtime-binding resolver: `Add-NativePeerMethods` resolves JNI declarations from the pinned header instead of loading Mono.Android. Script-visible binding types remain Phase C. | Owned callbacks pass on all three backends without Mono.Android or Java.Interop in the store. |
+  | `New-HomePath` | Pending: recovery's displayed `HOME/<name>` paths. | Depends on restored recovery diagnostics. |
+  | `Add-AndroidHostDeclarations` | `New-ManagedHostAssemblyBytes` and `Add-NativePeerMethods` declare NativeHost and owned peer receivers; remaining recovery declarations pending. | Host and two receivers run on all three backends; recovery is not yet accepted. |
+  | `Add-RecoveryScreenMethods` | Pending: recovery UI independent of SMA. | Must retain NativeActivity's surface and prove visible, actionable recovery. |
+  | `Add-RecoverySupportMethods` | `New-FindProfileMethod` and NativeLog restore lookup and logging; toast/recovery support pending. | Case-insensitive profile lookup passes gate 2d; recovery feedback is not yet accepted. |
+  | `Add-ProfileRuntimeMethods` | Pending: owned resident runtime, animation entrypoints, reset and recovery after failure. Existing `New-ManagedHostAssemblyBytes` restores successful profile execution only. | Gate 2d proves discovery, invocation, state and HadErrors, not the missing runtime behaviors. |
+  | `Add-ActivityAdmissionMethod` | `New-ManagedHostAssemblyBytes` and `New-NativeHostLibrary` admit CoreCLR, set the application base and initialize SMA. | Gates 2a–2d on all three backends; libpsl-native is packaged and resolved directly. |
+  | `Add-DocumentImportMethods` | `Add-DocumentImportMethods` restores checked names and atomic stream copy; provider integration pending. | Eight invalid names, 8,193 binary bytes, case preservation, overwrite, source disposal and read/close failure controls pass; device copy passes on all three backends. |
+  | `Add-RecoveryActionMethods` | Pending: clipboard diagnostics, picker, activity-result import and retry. | Native activity-result delivery is proven; dispatch into product import/retry is not. |
+  | `Complete-AndroidHostTypes` | `New-ManagedHostAssemblyBytes`, `New-JavaPeerDex` and `Add-NativePeerMethods` finish managed types and Java callback overrides. | Both result overrides reach PowerShell on all three backends; recovery dispatch remains pending. |
+  | `New-AndroidHostTypes` | `New-ManagedHostAssemblyBytes` owns the generated host; recovery/profile restoration pending. | Managed admission and startup pass; this does not close recovery acceptance. |
+  | `New-PwshActivityAssemblyBytes` | `New-ManagedHostAssemblyBytes` emits the owned host without loading Xamarin assemblies. | Build dependency check and gates 2a–2d; the Java activity is emitted separately. |
+  | `New-ElfDataLibrary` | Not needed for its former output, the writable Xamarin application-configuration library. `New-ElfPayloadLibrary` and `New-NativeHostLibrary` supply the owned store and host. | Existing ELF readers/ABI checks and all three backend startup receipts prove the replacement; no Xamarin data-library consumer remains. |
+  | `Test-XamarinAppLibrary` | Not needed: its subject no longer ships. `Assert-NativeAdmissionApk` and native-host/store checks validate the replacement artifacts. | APK excludes libxamarin-app and libmonodroid; owned host and callbacks run on all three backends. |
+  | `Skip-ForNativeAdmission` | Not needed: there is one owned admission path; `Invoke-DexStep` now produces owned peers. | Step graph and APK checks exercise the actual output instead of skipping the former Xamarin steps. |
+  | `Get-Crc64JonesTable` | Not needed: CRC64 existed to derive Xamarin ACW package names. `New-JavaPeerDex` uses the explicit product activity name. | Manifest launches that exact class and both callbacks resolve on all three backends. |
+  | `Get-JavaPeerPackage` | Not needed: explicit Java names replace Xamarin-derived CRC64 packages. | Same manifest/class/callback receipts; no generated CRC64 identity is consumed. |
+  | `Test-JavaPeerNaming` | `Test-JavaPeerDex` checks the explicit class and NativeActivity base rather than a Xamarin ACW-map sample. | DEX shape, integrity and corruption controls pass; Android resolves the peer on all three backends. |
+  | `New-JavaPeerDex` | `New-JavaPeerDex`: owned NativeActivity subclass, crypto load and result forwarding. | Six defined methods; device crypto, TLS and both callback receipts above. |
+  | `Test-JavaPeerDex` | `Test-JavaPeerDex`: current owned DEX structure and integrity checks. | Valid image accepted; corrupted image rejected by the build. |
+  | `Invoke-DexStep` | `Invoke-DexStep`: owned peer plus pinned runtime crypto helper DEX in the APK. | Two DEX images checked; Java-side crypto initialization, SHA-256 and HTTPS pass on all three backends. |
+  | `Get-RegisteredJavaTypes` | Not needed for Phase A's explicit owned peers: `Add-NativePeerMethods` declares their native names, descriptors and receiver pointers. Metadata-selected bindings remain Phase C. | Both native receivers resolve on all three backends; this does not claim arbitrary binding projection. |
+  | `Get-TypeMapModules` | Not needed for these peers: `Add-NativePeerMethods` emits the registration data directly. No Xamarin MVID/token type-map reader runs. | `PEERS REGISTERED 2` and both callbacks on all three backends; failure/exception cleanup controls in the build. |
+  | `Get-ReturnStubBytes` | Not needed: the return-only `xamarin_app_init` stub served the removed Xamarin data library. Owned native host entrypoints do real admission. | Per-ISA decoder/ABI checks and gates 2a–2d validate those entrypoints. |
+  | `New-XamarinAppLibrary` | `New-NativeHostLibrary`, `New-ElfPayloadLibrary` and `Add-NativePeerMethods` provide the runtime contract, store and explicit peer registration. | All three backend admission, crypto and callback receipts; no libxamarin-app or Xamarin runtime shipped. |
+  | `Get-JniEnvInitTokens` | Not needed: those were Mono.Android JNIEnvInit method tokens for the Xamarin host. `Add-NativePeerMethods` calls JNI RegisterNatives with owned UCO receiver addresses. | Both callbacks reach PowerShell on all three backends without the token-bearing assembly. |
+  | `Get-EmittedActivityIdentity` | Not needed: Xamarin's MVID/type-token lookup is replaced by explicit DEX identity and direct native receiver registration. | Manifest/DEX checks and both callback receipts validate the actual identities used. |
+  | `Invoke-AppDataStep` | Owned host/store build steps plus `Invoke-DexStep` and `Add-NativePeerMethods`; Xamarin application_config, caches and type maps have no consumer. | APK exclusion checks and all three backend admission/crypto/callback receipts prove the replacement for the peers generated today. |
+
+- [ ] **Phase B: owned JNI bridge.** Typed PowerShell authoring, per-thread
+  JNIEnv, typed calls and jvalue marshaling, reference ownership, UTF-16,
+  arrays and checked Java exceptions. Reuse the working JNI implementation;
+  existing IL machinery is permitted until compiler support lands. Acceptance
+  includes the existing JNI probes and a forced exception with process liveness.
+- [ ] **Phase C: generated Android bindings.** Emit the selected Mono.Android
+  names and shapes into Dev.MansfieldPlumbing.Pwsh.Android, depending only on
+  CoreLib and the owned host bridge. Include Java object identity/disposal,
+  casting and script-block callback peers. Measure the full 9,063-type,
+  77,689-member projection before choosing final scope. Keep projection in one
+  build step for its later move to the compiler.
+- [ ] **Phase D: unchanged-profile comparisons.** Compare one profile per
+  contract item with the Xamarin-based 0804758 build and the restored host,
+  independently on x86-64, arm64 and arm32. No parity claim until those outputs
+  agree. Commit each accepted phase; do not push.
+
 ## Verified checkpoints
 
 - [x] Cleanup acceptance, 2026-10-10: `c893491`'s single-file `adb.ps1`

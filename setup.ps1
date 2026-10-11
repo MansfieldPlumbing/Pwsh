@@ -2091,6 +2091,535 @@ function New-FindProfileMethod {
     [pscustomobject]@{ Method = $findProfileMethod; GetFiles = $getFiles; GetFileName = $getFileName }
 }
 
+function Add-NativePeerMethods {
+    # Owned JNI registration, using the admitted jni.h function table. No
+    # Mono.Android, Java.Interop, type maps or generated registration strings.
+    param(
+        [Parameter(Mandatory)][Reflection.Emit.ModuleBuilder] $Module,
+        [Parameter(Mandatory)][Reflection.Emit.TypeBuilder] $Owner,
+        [Parameter(Mandatory)][Reflection.MethodInfo] $LogWrite,
+        [Parameter(Mandatory)][int] $ErrorPriority,
+        [string] $TypePrefix = 'Dev.MansfieldPlumbing.Pwsh'
+    )
+    $publicStatic = [Reflection.MethodAttributes]'Public,Static,HideBySig'
+    $privateStatic = [Reflection.MethodAttributes]'Private,Static,HideBySig'
+    $jniType = $Module.DefineType(($TypePrefix + '.JavaPeers'),
+        [Reflection.TypeAttributes]'NotPublic,Abstract,Sealed,BeforeFieldInit')
+    $readPointer = [Runtime.InteropServices.Marshal].GetMethod('ReadIntPtr', [type[]]@([IntPtr], [int]))
+    $pointerSize = [IntPtr].GetProperty('Size').GetMethod
+    # These signatures are the literal JNI declarations in pinned jni.h.
+    $signatures = @(
+        @{ Name = 'GetObjectClass'; Return = [IntPtr]; Parameters = [type[]]@([IntPtr], [IntPtr]) },
+        @{ Name = 'RegisterNatives'; Return = [int]; Parameters = [type[]]@([IntPtr], [IntPtr], [IntPtr], [int]) },
+        @{ Name = 'DeleteLocalRef'; Return = [void]; Parameters = [type[]]@([IntPtr], [IntPtr]) },
+        @{ Name = 'ExceptionCheck'; Return = [byte]; Parameters = [type[]]@([IntPtr]) },
+        @{ Name = 'ExceptionClear'; Return = [void]; Parameters = [type[]]@([IntPtr]) }
+    )
+    $jniMethods = @{}
+    foreach ($signature in $signatures) {
+        if (-not $script:JniFunctionTable.Contains($signature.Name)) { throw "JNI header lacks $($signature.Name)." }
+        $method = $jniType.DefineMethod($signature.Name, $privateStatic, $signature.Return, $signature.Parameters)
+        $il = $method.GetILGenerator()
+        for ($index = 0; $index -lt $signature.Parameters.Count; $index++) { $il.Emit([Reflection.Emit.OpCodes]::Ldarg, [int16]$index) }
+        $il.Emit([Reflection.Emit.OpCodes]::Ldarg_0)
+        $il.Emit([Reflection.Emit.OpCodes]::Ldc_I4_0)
+        $il.Emit([Reflection.Emit.OpCodes]::Call, $readPointer)
+        $il.Emit([Reflection.Emit.OpCodes]::Ldc_I4, [int]$script:JniFunctionTable[$signature.Name])
+        $il.Emit([Reflection.Emit.OpCodes]::Call, $pointerSize)
+        $il.Emit([Reflection.Emit.OpCodes]::Mul)
+        $il.Emit([Reflection.Emit.OpCodes]::Call, $readPointer)
+        $il.EmitCalli([Reflection.Emit.OpCodes]::Calli, [Runtime.InteropServices.CallingConvention]::Cdecl,
+            $signature.Return, $signature.Parameters)
+        $il.Emit([Reflection.Emit.OpCodes]::Ret)
+        $jniMethods[$signature.Name] = $method
+    }
+    $check = $jniType.DefineMethod('Check', $privateStatic, [void], [type[]]@([IntPtr]))
+    $il = $check.GetILGenerator()
+    $okay = $il.DefineLabel()
+    $il.Emit([Reflection.Emit.OpCodes]::Ldarg_0)
+    $il.Emit([Reflection.Emit.OpCodes]::Call, $jniMethods.ExceptionCheck)
+    $il.Emit([Reflection.Emit.OpCodes]::Brfalse, $okay)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldarg_0)
+    $il.Emit([Reflection.Emit.OpCodes]::Call, $jniMethods.ExceptionClear)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldstr, 'Java exception during owned peer registration.')
+    $il.Emit([Reflection.Emit.OpCodes]::Newobj, [InvalidOperationException].GetConstructor([type[]]@([string])))
+    $il.Emit([Reflection.Emit.OpCodes]::Throw)
+    $il.MarkLabel($okay)
+    $il.Emit([Reflection.Emit.OpCodes]::Ret)
+
+    $callbacks = @(
+        @{ Name = 'OnActivityResult'; JavaName = 'n_onActivityResult'; Descriptor = '(IILandroid/content/Intent;)V'
+           Delegate = [Action[int,int,IntPtr]]; Parameters = [type[]]@([int], [int], [IntPtr]) },
+        @{ Name = 'OnRequestPermissionsResult'; JavaName = 'n_onRequestPermissionsResult'; Descriptor = '(I[Ljava/lang/String;[I)V'
+           Delegate = [Action[int,IntPtr,IntPtr]]; Parameters = [type[]]@([int], [IntPtr], [IntPtr]) }
+    )
+    foreach ($callback in $callbacks) {
+        $field = $Owner.DefineField(($callback.Name + 'Handler'), $callback.Delegate, [Reflection.FieldAttributes]'Public,Static')
+        $parameters = @([Linq.Expressions.Expression]::Parameter([IntPtr], 'env'),
+            [Linq.Expressions.Expression]::Parameter([IntPtr], 'peer'))
+        for ($index = 0; $index -lt $callback.Parameters.Count; $index++) {
+            $parameters += [Linq.Expressions.Expression]::Parameter($callback.Parameters[$index], "argument$index")
+        }
+        $handler = [Linq.Expressions.Expression]::Field($null, $field)
+        $body = [Linq.Expressions.Expression]::TryCatch(
+            [Linq.Expressions.Expression]::IfThen(
+                [Linq.Expressions.Expression]::NotEqual($handler, [Linq.Expressions.Expression]::Constant($null, $callback.Delegate)),
+                (New-ClrCall $handler ($callback.Delegate.GetMethod('Invoke')) $parameters[2..4])),
+            [Linq.Expressions.Expression]::Catch([Exception],
+                [Linq.Expressions.Expression]::TryCatch((New-ClrBlock @() @(
+                    (New-StaticCall $LogWrite @(
+                        (New-ClrConstant $ErrorPriority ([int])),
+                        (New-ClrConstant 'Pwsh' ([string])),
+                        (New-ClrConstant ($callback.Name + ' PowerShell handler failed.') ([string])))),
+                    [Linq.Expressions.Expression]::Empty())),
+                    [Linq.Expressions.Expression]::Catch([Exception], [Linq.Expressions.Expression]::Empty()))))
+        $parameterTypes = [type[]](@([IntPtr], [IntPtr]) + $callback.Parameters)
+        $actionType = [Action``5].MakeGenericType($parameterTypes)
+        $receiver = Add-PersistedMethod $Owner ($callback.Name + 'Receiver') $publicStatic ([void]) $parameterTypes `
+            $actionType $parameters $body
+        $attribute = [Runtime.InteropServices.UnmanagedCallersOnlyAttribute]
+        $receiver.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new(
+            $attribute.GetConstructor([type[]]@()), [object[]]@(),
+            [Reflection.FieldInfo[]]@($attribute.GetField('CallConvs')),
+            [object[]]@(,[type[]]@([Runtime.CompilerServices.CallConvCdecl]))))
+        $callback.Receiver = $receiver
+    }
+    $bind = $jniType.DefineMethod('Bind', $publicStatic, [void], [type[]]@([IntPtr]))
+    $il = $bind.GetILGenerator()
+    $envLocal = $il.DeclareLocal([IntPtr])
+    $classLocal = $il.DeclareLocal([IntPtr])
+    $methodsLocal = $il.DeclareLocal([IntPtr])
+    $nameLocals = @(); $descriptorLocals = @()
+    foreach ($callback in $callbacks) {
+        $nameLocals += $il.DeclareLocal([IntPtr]); $descriptorLocals += $il.DeclareLocal([IntPtr])
+    }
+    $allocate = [Runtime.InteropServices.Marshal].GetMethod('AllocHGlobal', [type[]]@([int]))
+    $free = [Runtime.InteropServices.Marshal].GetMethod('FreeHGlobal', [type[]]@([IntPtr]))
+    $encode = [Runtime.InteropServices.Marshal].GetMethod('StringToCoTaskMemUTF8', [type[]]@([string]))
+    $freeString = [Runtime.InteropServices.Marshal].GetMethod('FreeCoTaskMem', [type[]]@([IntPtr]))
+    $writePointer = [Runtime.InteropServices.Marshal].GetMethod('WriteIntPtr', [type[]]@([IntPtr], [int], [IntPtr]))
+    $hasActivity = $il.DefineLabel()
+    $il.Emit([Reflection.Emit.OpCodes]::Ldarg_0)
+    $il.Emit([Reflection.Emit.OpCodes]::Brtrue, $hasActivity)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldstr, 'nativeActivity')
+    $il.Emit([Reflection.Emit.OpCodes]::Newobj, [ArgumentNullException].GetConstructor([type[]]@([string])))
+    $il.Emit([Reflection.Emit.OpCodes]::Throw)
+    $il.MarkLabel($hasActivity)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldarg_0)
+    $il.Emit([Reflection.Emit.OpCodes]::Call, $pointerSize)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldc_I4_2)
+    $il.Emit([Reflection.Emit.OpCodes]::Mul)
+    $il.Emit([Reflection.Emit.OpCodes]::Call, $readPointer)
+    $il.Emit([Reflection.Emit.OpCodes]::Stloc, $envLocal)
+    [void]$il.BeginExceptionBlock()
+    $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $envLocal)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldarg_0)
+    $il.Emit([Reflection.Emit.OpCodes]::Call, $pointerSize)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldc_I4_3)
+    $il.Emit([Reflection.Emit.OpCodes]::Mul)
+    $il.Emit([Reflection.Emit.OpCodes]::Call, $readPointer)
+    $il.Emit([Reflection.Emit.OpCodes]::Call, $jniMethods.GetObjectClass)
+    $il.Emit([Reflection.Emit.OpCodes]::Stloc, $classLocal)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $envLocal)
+    $il.Emit([Reflection.Emit.OpCodes]::Call, $check)
+    $il.Emit([Reflection.Emit.OpCodes]::Call, $pointerSize)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldc_I4_6)
+    $il.Emit([Reflection.Emit.OpCodes]::Mul)
+    $il.Emit([Reflection.Emit.OpCodes]::Call, $allocate)
+    $il.Emit([Reflection.Emit.OpCodes]::Stloc, $methodsLocal)
+    for ($index = 0; $index -lt $callbacks.Count; $index++) {
+        $callback = $callbacks[$index]
+        foreach ($entry in @(
+            @{ Text = $callback.JavaName; Local = $nameLocals[$index] },
+            @{ Text = $callback.Descriptor; Local = $descriptorLocals[$index] })) {
+            $il.Emit([Reflection.Emit.OpCodes]::Ldstr, $entry.Text)
+            $il.Emit([Reflection.Emit.OpCodes]::Call, $encode)
+            $il.Emit([Reflection.Emit.OpCodes]::Stloc, $entry.Local)
+        }
+        for ($part = 0; $part -lt 3; $part++) {
+            $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $methodsLocal)
+            $il.Emit([Reflection.Emit.OpCodes]::Call, $pointerSize)
+            $il.Emit([Reflection.Emit.OpCodes]::Ldc_I4, [int](3 * $index + $part))
+            $il.Emit([Reflection.Emit.OpCodes]::Mul)
+            switch ($part) {
+                0 { $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $nameLocals[$index]) }
+                1 { $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $descriptorLocals[$index]) }
+                2 { $il.Emit([Reflection.Emit.OpCodes]::Ldftn, $callback.Receiver) }
+            }
+            $il.Emit([Reflection.Emit.OpCodes]::Call, $writePointer)
+        }
+    }
+    $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $envLocal)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $classLocal)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $methodsLocal)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldc_I4_2)
+    $il.Emit([Reflection.Emit.OpCodes]::Call, $jniMethods.RegisterNatives)
+    $registrationResult = $il.DeclareLocal([int])
+    $il.Emit([Reflection.Emit.OpCodes]::Stloc, $registrationResult)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $envLocal)
+    $il.Emit([Reflection.Emit.OpCodes]::Call, $check)
+    $registered = $il.DefineLabel()
+    $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $registrationResult)
+    $il.Emit([Reflection.Emit.OpCodes]::Brfalse, $registered)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldstr, 'RegisterNatives rejected the owned activity peer.')
+    $il.Emit([Reflection.Emit.OpCodes]::Newobj, [InvalidOperationException].GetConstructor([type[]]@([string])))
+    $il.Emit([Reflection.Emit.OpCodes]::Throw)
+    $il.MarkLabel($registered)
+    $il.BeginFinallyBlock()
+    foreach ($local in @($nameLocals) + @($descriptorLocals)) {
+        $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $local)
+        $il.Emit([Reflection.Emit.OpCodes]::Call, $freeString)
+    }
+    $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $methodsLocal)
+    $il.Emit([Reflection.Emit.OpCodes]::Call, $free)
+    $noClass = $il.DefineLabel()
+    $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $classLocal)
+    $il.Emit([Reflection.Emit.OpCodes]::Brfalse, $noClass)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $envLocal)
+    $il.Emit([Reflection.Emit.OpCodes]::Ldloc, $classLocal)
+    $il.Emit([Reflection.Emit.OpCodes]::Call, $jniMethods.DeleteLocalRef)
+    $il.MarkLabel($noClass)
+    $il.EndExceptionBlock()
+    $il.Emit([Reflection.Emit.OpCodes]::Ret)
+    [void]$jniType.CreateType()
+    $bind
+}
+
+function Add-DocumentImportMethods {
+    # Restoration source: 0804758 Add-DocumentImportMethods. The managed
+    # copy/commit path owns no Java or Xamarin types; the picker receiver
+    # supplies the provider's stream and display name.
+    param(
+        [Parameter(Mandatory)][Reflection.Emit.TypeBuilder] $Owner,
+        [Parameter(Mandatory)][Reflection.MethodInfo] $FindProfile
+    )
+    $publicStatic = [Reflection.MethodAttributes]'Public,Static,HideBySig'
+    $name = [Linq.Expressions.Expression]::Parameter([string], 'displayName')
+    $invalidName = [Linq.Expressions.Expression]::OrElse(
+        (New-StaticCall (Get-ExactMethod ([string]) 'IsNullOrWhiteSpace' @([string])) @($name)),
+        [Linq.Expressions.Expression]::OrElse(
+            [Linq.Expressions.Expression]::OrElse(
+                [Linq.Expressions.Expression]::Equal($name, (New-ClrConstant '.' ([string]))),
+                [Linq.Expressions.Expression]::Equal($name, (New-ClrConstant '..' ([string])))),
+            [Linq.Expressions.Expression]::OrElse(
+                (New-ClrCall $name (Get-ExactMethod ([string]) 'Contains' @([char])) @((New-ClrConstant ([char]'/') ([char])))),
+                (New-ClrCall $name (Get-ExactMethod ([string]) 'Contains' @([char])) @((New-ClrConstant ([char]'\') ([char])))))))
+    $normalize = Add-PersistedMethod $Owner 'NormalizeDocumentName' $publicStatic ([string]) @([string]) `
+        ([Func[string,string]]) @($name) (New-ClrBlock @() @(
+            [Linq.Expressions.Expression]::IfThen($invalidName,
+                [Linq.Expressions.Expression]::Throw((New-ClrNew ([IO.IOException].GetConstructor([type[]]@([string]))) @(
+                    (New-ClrConstant 'The selected document name is invalid.' ([string])))))),
+            [Linq.Expressions.Expression]::Condition(
+                (New-StaticCall (Get-ExactMethod ([string]) 'Equals' @([string], [string], [StringComparison])) @(
+                    $name, (New-ClrConstant 'Profile.ps1' ([string])),
+                    (New-ClrConstant ([StringComparison]::OrdinalIgnoreCase) ([StringComparison])))),
+                (New-ClrConstant 'Profile.ps1' ([string])), $name)))
+    $root = [Linq.Expressions.Expression]::Parameter([string], 'privateRoot')
+    $source = [Linq.Expressions.Expression]::Parameter([IO.Stream], 'source')
+    $destination = [Linq.Expressions.Expression]::Variable([string], 'destination')
+    $temporary = [Linq.Expressions.Expression]::Variable([string], 'temporary')
+    $output = [Linq.Expressions.Expression]::Variable([IO.FileStream], 'output')
+    $length = [Linq.Expressions.Expression]::Variable([long], 'length')
+    $sourceClosed = [Linq.Expressions.Expression]::Variable([bool], 'sourceClosed')
+    $guid = [Linq.Expressions.Expression]::Variable([Guid], 'id')
+    $combine = Get-ExactMethod ([IO.Path]) 'Combine' @([string], [string])
+    $dispose = Get-ExactMethod ([IO.Stream]) 'Dispose' @()
+    $copy = New-ClrBlock @() @(
+        (New-ClrAssign $destination (New-StaticCall $combine @($root, (New-StaticCall $normalize @($name))))),
+        [Linq.Expressions.Expression]::IfThen(
+            (New-StaticCall (Get-ExactMethod ([string]) 'Equals' @([string], [string], [StringComparison])) @(
+                $name, (New-ClrConstant 'Profile.ps1' ([string])),
+                (New-ClrConstant ([StringComparison]::OrdinalIgnoreCase) ([StringComparison])))),
+            (New-ClrAssign $destination (New-StaticCall $FindProfile @(
+                (New-StaticCall (Get-ExactMethod ([IO.Directory]) 'GetFiles' @([string])) @($root)),
+                (New-ClrConstant 0 ([int])), $destination)))),
+        (New-ClrAssign $guid (New-StaticCall (Get-ExactMethod ([Guid]) 'NewGuid' @()))),
+        (New-ClrAssign $temporary (New-StaticCall $combine @($root,
+            (New-StaticCall (Get-ExactMethod ([string]) 'Concat' @([string], [string])) @(
+                (New-ClrConstant '.incoming-' ([string])),
+                (New-ClrCall $guid (Get-ExactMethod ([Guid]) 'ToString' @([string])) @((New-ClrConstant 'N' ([string]))))))))),
+        (New-ClrAssign $output (New-ClrNew ([IO.FileStream].GetConstructor([type[]]@([string], [IO.FileMode], [IO.FileAccess], [IO.FileShare]))) @(
+            $temporary, (New-ClrConstant ([IO.FileMode]::CreateNew) ([IO.FileMode])),
+            (New-ClrConstant ([IO.FileAccess]::Write) ([IO.FileAccess])),
+            (New-ClrConstant ([IO.FileShare]::None) ([IO.FileShare]))))),
+        [Linq.Expressions.Expression]::TryFinally(
+            (New-ClrBlock @() @(
+                (New-ClrCall $source (Get-ExactMethod ([IO.Stream]) 'CopyTo' @([IO.Stream])) @($output)),
+                (New-ClrCall $output (Get-ExactMethod ([IO.FileStream]) 'Flush' @([bool])) @((New-ClrConstant $true ([bool])))),
+                (New-ClrAssign $length (New-ClrProperty $output (Get-ExactProperty ([IO.FileStream]) 'Length'))),
+                [Linq.Expressions.Expression]::Empty())),
+            (New-ClrCall $output $dispose @())),
+        # Finish both streams before replacing the destination. A provider
+        # that reports an error on close must leave the original untouched.
+        (New-ClrAssign $sourceClosed (New-ClrConstant $true ([bool]))),
+        (New-ClrCall $source $dispose @()),
+        (New-StaticCall (Get-ExactMethod ([IO.File]) 'Move' @([string], [string], [bool])) @(
+            $temporary, $destination, (New-ClrConstant $true ([bool])))),
+        [Linq.Expressions.Expression]::Empty())
+    $cleanup = New-ClrBlock @() @(
+        [Linq.Expressions.Expression]::TryFinally(
+            [Linq.Expressions.Expression]::IfThen([Linq.Expressions.Expression]::Not($sourceClosed),
+                (New-ClrCall $source $dispose @())),
+            [Linq.Expressions.Expression]::IfThen(
+                (New-StaticCall (Get-ExactMethod ([IO.File]) 'Exists' @([string])) @($temporary)),
+                (New-StaticCall (Get-ExactMethod ([IO.File]) 'Delete' @([string])) @($temporary)))),
+        [Linq.Expressions.Expression]::Empty())
+    $import = Add-PersistedMethod $Owner 'ImportDocument' $publicStatic ([long]) @([string], [string], [IO.Stream]) `
+        ([Func[string,string,IO.Stream,long]]) @($root, $name, $source) `
+        (New-ClrBlock @($destination, $temporary, $output, $length, $guid, $sourceClosed) @(
+            [Linq.Expressions.Expression]::IfThen(
+                [Linq.Expressions.Expression]::Equal($source, [Linq.Expressions.Expression]::Constant($null, [IO.Stream])),
+                [Linq.Expressions.Expression]::Throw((New-ClrNew ([ArgumentNullException].GetConstructor([type[]]@([string]))) @(
+                    (New-ClrConstant 'source' ([string])))))),
+            [Linq.Expressions.Expression]::TryFinally($copy, $cleanup),
+            $length))
+    @{ Normalize = $normalize; Import = $import }
+}
+
+function Test-DocumentImportMethods {
+    param(
+        [Parameter(Mandatory)][type] $Owner,
+        [Parameter(Mandatory)][string] $CheckDirectory
+    )
+    $root = [IO.Path]::GetFullPath([IO.Path]::Combine($CheckDirectory, 'document-check-' + [Guid]::NewGuid().ToString('N')))
+    Assert-ApprovedWritePath -Path $root
+    $normalize = $Owner.GetMethod('NormalizeDocumentName')
+    $import = $Owner.GetMethod('ImportDocument')
+    $rejected = 0
+    foreach ($name in @($null, '', ' ', '.', '..', '../Profile.ps1', 'folder/file', 'folder\file')) {
+        $failed = $false
+        try { $null = $normalize.Invoke($null, [object[]]@(,$name)) }
+        catch { if ($_.Exception.GetBaseException() -isnot [IO.IOException]) { throw }; $failed = $true }
+        if (-not $failed) { throw 'Unsafe document display name was accepted.' }
+        $rejected++
+    }
+    [void][IO.Directory]::CreateDirectory($root)
+    try {
+        $payload = [byte[]]::new(8193)
+        for ($index = 0; $index -lt $payload.Length; $index++) { $payload[$index] = [byte]($index % 251) }
+        # Preserve the spelling of a pre-existing profile on a case-sensitive
+        # filesystem, as the old ResolveProfile path did.
+        $profile = [IO.Path]::Combine($root, 'pRoFiLe.PS1')
+        [IO.File]::WriteAllText($profile, 'original')
+        $source = [IO.MemoryStream]::new($payload, $false)
+        try { $length = $import.Invoke($null, [object[]]@($root, 'PROFILE.ps1', $source)) }
+        finally { $source.Dispose() }
+        if ($length -ne $payload.Length -or $source.CanRead -or
+            [Convert]::ToHexString([IO.File]::ReadAllBytes($profile)) -cne [Convert]::ToHexString($payload) -or
+            [IO.Directory]::GetFiles($root).Length -ne 1) { throw 'Document import did not preserve bytes, profile spelling or stream ownership.' }
+        $replacement = [byte[]]@(0, 255, 1, 128, 10, 13)
+        $source = [IO.MemoryStream]::new($replacement, $false)
+        try { $null = $import.Invoke($null, [object[]]@($root, 'Profile.ps1', $source)) }
+        finally { $source.Dispose() }
+        if ([Convert]::ToHexString([IO.File]::ReadAllBytes($profile)) -cne [Convert]::ToHexString($replacement)) {
+            throw 'Document import overwrite failed.'
+        }
+        $source = [IO.MemoryStream]::new($payload, $false)
+        $source.Dispose()
+        $failed = $false
+        try { $null = $import.Invoke($null, [object[]]@($root, 'Profile.ps1', $source)) }
+        catch { if ($_.Exception.GetBaseException() -isnot [ObjectDisposedException]) { throw }; $failed = $true }
+        if (-not $failed -or [IO.Directory]::GetFiles($root).Length -ne 1 -or
+            [Convert]::ToHexString([IO.File]::ReadAllBytes($profile)) -cne [Convert]::ToHexString($replacement)) {
+            throw 'A failed document copy changed the original or left an incoming file.'
+        }
+        $streamModule = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly(
+            [Reflection.AssemblyName]::new('PwshDocumentCheck'),
+            [Reflection.Emit.AssemblyBuilderAccess]::Run).DefineDynamicModule('PwshDocumentCheck')
+        $streamType = $streamModule.DefineType('PwshDocumentCheck.CloseFailure',
+            [Reflection.TypeAttributes]'Public,Sealed', [IO.MemoryStream])
+        $closeCount = $streamType.DefineField('CloseCount', [int], [Reflection.FieldAttributes]'Public,Static')
+        $constructor = $streamType.DefineConstructor([Reflection.MethodAttributes]::Public,
+            [Reflection.CallingConventions]::Standard, [type[]]@([byte[]]))
+        $il = $constructor.GetILGenerator()
+        $il.Emit([Reflection.Emit.OpCodes]::Ldarg_0)
+        $il.Emit([Reflection.Emit.OpCodes]::Ldarg_1)
+        $il.Emit([Reflection.Emit.OpCodes]::Ldc_I4_0)
+        $il.Emit([Reflection.Emit.OpCodes]::Call, [IO.MemoryStream].GetConstructor([type[]]@([byte[]], [bool])))
+        $il.Emit([Reflection.Emit.OpCodes]::Ret)
+        $close = $streamType.DefineMethod('Dispose',
+            [Reflection.MethodAttributes]'Family,Virtual,HideBySig', [void], [type[]]@([bool]))
+        $il = $close.GetILGenerator()
+        $il.Emit([Reflection.Emit.OpCodes]::Ldsfld, $closeCount)
+        $il.Emit([Reflection.Emit.OpCodes]::Ldc_I4_1)
+        $il.Emit([Reflection.Emit.OpCodes]::Add)
+        $il.Emit([Reflection.Emit.OpCodes]::Stsfld, $closeCount)
+        $il.Emit([Reflection.Emit.OpCodes]::Ldstr, 'Deliberate provider close failure.')
+        $il.Emit([Reflection.Emit.OpCodes]::Newobj, [IO.IOException].GetConstructor([type[]]@([string])))
+        $il.Emit([Reflection.Emit.OpCodes]::Throw)
+        $streamType.DefineMethodOverride($close, [IO.MemoryStream].GetMethod('Dispose',
+            [Reflection.BindingFlags]'NonPublic,Instance', $null, [type[]]@([bool]), $null))
+        $failureType = $streamType.CreateType()
+        $source = $failureType.GetConstructor([type[]]@([byte[]])).Invoke([object[]]@(,$payload))
+        $failed = $false
+        try { $null = $import.Invoke($null, [object[]]@($root, 'Profile.ps1', $source)) }
+        catch { if ($_.Exception.GetBaseException().Message -cne 'Deliberate provider close failure.') { throw }; $failed = $true }
+        if (-not $failed -or $failureType.GetField('CloseCount').GetValue($null) -ne 1 -or
+            [IO.Directory]::GetFiles($root).Length -ne 1 -or
+            [Convert]::ToHexString([IO.File]::ReadAllBytes($profile)) -cne [Convert]::ToHexString($replacement)) {
+            throw 'A provider close failure changed the original, closed twice or left an incoming file.'
+        }
+        Write-Host ('[PASS] Document copy self-test: {0} invalid names rejected; 8193 binary bytes preserved; existing profile spelling retained; overwrite, read/close failure cleanup and stream disposal checked.' -f $rejected) -ForegroundColor Green
+    }
+    finally {
+        # root is the exact new GUID directory admitted above, never a caller's
+        # directory. Delete only the files this test created, then its empty root.
+        foreach ($file in [IO.Directory]::GetFiles($root)) { [IO.File]::Delete($file) }
+        [IO.Directory]::Delete($root, $false)
+    }
+}
+
+function Test-NativePeerMethods {
+    # Exercise the emitted registration and receivers through an independent
+    # synthetic JNI table. Android delivery is a separate device acceptance.
+    param([Parameter(Mandatory)][string] $CheckDirectory)
+    $savedMethods = $script:PersistedMethods
+    $script:PersistedMethods = [Collections.Generic.List[object]]::new()
+    $allocations = [Collections.Generic.List[IntPtr]]::new()
+    $roots = [Collections.Generic.List[Delegate]]::new()
+    $fixture = @{ Registrations = 0; Deleted = 0; Cleared = 0; Pending = $false
+        Fail = $false; Names = @(); Descriptors = @(); Pointers = @(); Callback = ''
+        Permissions = ''; Errors = [Collections.Generic.List[string]]::new() }
+    try {
+        $assembly = [Reflection.Emit.PersistedAssemblyBuilder]::new(
+            [Reflection.AssemblyName]::new('PwshPeerCheck'), [object].Assembly)
+        $module = $assembly.DefineDynamicModule('PwshPeerCheck.dll')
+        $owner = $module.DefineType('PwshPeerCheck.NativeHost',
+            [Reflection.TypeAttributes]'Public,Abstract,Sealed')
+        $logType = $module.DefineType('PwshPeerCheck.Log', [Reflection.TypeAttributes]'Public,Abstract,Sealed')
+        $log = $logType.DefineMethod('Write', [Reflection.MethodAttributes]'Public,Static',
+            [int], [type[]]@([int], [string], [string]))
+        $il = $log.GetILGenerator()
+        $il.Emit([Reflection.Emit.OpCodes]::Ldc_I4_0)
+        $il.Emit([Reflection.Emit.OpCodes]::Ret)
+        [void]$logType.CreateType()
+        $null = Add-NativePeerMethods -Module $module -Owner $owner -LogWrite $log -ErrorPriority 6 -TypePrefix 'PwshPeerCheck'
+        $find = New-FindProfileMethod -Owner $owner -Attributes ([Reflection.MethodAttributes]'Private,Static,HideBySig')
+        $null = Add-DocumentImportMethods -Owner $owner -FindProfile $find.Method
+        [void]$owner.CreateType()
+        $stream = [IO.MemoryStream]::new()
+        try { $assembly.Save($stream); $loaded = [Reflection.Assembly]::Load($stream.ToArray()) }
+        finally { $stream.Dispose() }
+        if (($loaded.GetReferencedAssemblies().Name -join ',') -cne 'System.Private.CoreLib') {
+            throw 'Peer registration must work without SMA or an Android binding assembly.'
+        }
+        $hostType = $loaded.GetType('PwshPeerCheck.NativeHost', $true)
+        $bind = $loaded.GetType('PwshPeerCheck.JavaPeers', $true).GetMethod('Bind')
+        $runtimeModule = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly(
+            [Reflection.AssemblyName]::new('PwshPeerCheckDelegates'),
+            [Reflection.Emit.AssemblyBuilderAccess]::Run).DefineDynamicModule('PwshPeerCheckDelegates')
+        $newDelegate = {
+            param([string] $Name, [type] $Return, [type[]] $Parameters)
+            $type = $runtimeModule.DefineType(('PwshPeerCheck.' + $Name),
+                [Reflection.TypeAttributes]'Public,Sealed', [MulticastDelegate])
+            $constructor = $type.DefineConstructor(
+                [Reflection.MethodAttributes]'Public,HideBySig,RTSpecialName',
+                [Reflection.CallingConventions]::Standard, [type[]]@([object], [IntPtr]))
+            $constructor.SetImplementationFlags([Reflection.MethodImplAttributes]::Runtime)
+            $invoke = $type.DefineMethod('Invoke',
+                [Reflection.MethodAttributes]'Public,HideBySig,NewSlot,Virtual', $Return, $Parameters)
+            $invoke.SetImplementationFlags([Reflection.MethodImplAttributes]::Runtime)
+            $attribute = [Runtime.InteropServices.UnmanagedFunctionPointerAttribute]
+            $type.SetCustomAttribute([Reflection.Emit.CustomAttributeBuilder]::new(
+                $attribute.GetConstructor([type[]]@([Runtime.InteropServices.CallingConvention])),
+                [object[]]@([Runtime.InteropServices.CallingConvention]::Cdecl)))
+            $type.CreateType()
+        }
+        $pointerSize = [IntPtr]::Size
+        $table = [Runtime.InteropServices.Marshal]::AllocHGlobal($script:JniFunctionTable.Count * $pointerSize)
+        $allocations.Add($table)
+        $envPointer = [Runtime.InteropServices.Marshal]::AllocHGlobal($pointerSize)
+        $allocations.Add($envPointer)
+        $activityPointer = [Runtime.InteropServices.Marshal]::AllocHGlobal(8 * $pointerSize)
+        $allocations.Add($activityPointer)
+        for ($index = 0; $index -lt $script:JniFunctionTable.Count; $index++) {
+            [Runtime.InteropServices.Marshal]::WriteIntPtr($table, $index * $pointerSize, [IntPtr]::Zero)
+        }
+        [Runtime.InteropServices.Marshal]::WriteIntPtr($envPointer, 0, $table)
+        [Runtime.InteropServices.Marshal]::WriteIntPtr($activityPointer, 2 * $pointerSize, $envPointer)
+        [Runtime.InteropServices.Marshal]::WriteIntPtr($activityPointer, 3 * $pointerSize, [IntPtr]0x1234)
+        $calls = @(
+            @{ Name = 'GetObjectClass'; Return = [IntPtr]; Parameters = [type[]]@([IntPtr], [IntPtr]); Body = {
+                param($env, $peer)
+                if ($peer -ne [IntPtr]0x1234) { $fixture.Errors.Add('Incorrect activity object.') }
+                [IntPtr]0x5678
+            } },
+            @{ Name = 'RegisterNatives'; Return = [int]; Parameters = [type[]]@([IntPtr], [IntPtr], [IntPtr], [int]); Body = {
+                param($env, $peerClass, $methods, $count)
+                if ($count -ne 2 -or $peerClass -ne [IntPtr]0x5678) { $fixture.Errors.Add('Incorrect native registration.'); return -1 }
+                $fixture.Registrations++
+                for ($index = 0; $index -lt $count; $index++) {
+                    $fixture.Names += [Runtime.InteropServices.Marshal]::PtrToStringUTF8(
+                        [Runtime.InteropServices.Marshal]::ReadIntPtr($methods, 3 * $index * [IntPtr]::Size))
+                    $fixture.Descriptors += [Runtime.InteropServices.Marshal]::PtrToStringUTF8(
+                        [Runtime.InteropServices.Marshal]::ReadIntPtr($methods, (3 * $index + 1) * [IntPtr]::Size))
+                    $fixture.Pointers += [Runtime.InteropServices.Marshal]::ReadIntPtr($methods, (3 * $index + 2) * [IntPtr]::Size)
+                }
+                if ($fixture.Fail) { -1 } else { 0 }
+            } },
+            @{ Name = 'DeleteLocalRef'; Return = [void]; Parameters = [type[]]@([IntPtr], [IntPtr]); Body = {
+                param($env, $reference)
+                if ($reference -ne [IntPtr]0x5678) { $fixture.Errors.Add('Incorrect local reference.') }
+                $fixture.Deleted++
+            } },
+            @{ Name = 'ExceptionCheck'; Return = [byte]; Parameters = [type[]]@([IntPtr]); Body = {
+                param($env) [byte]$fixture.Pending
+            } },
+            @{ Name = 'ExceptionClear'; Return = [void]; Parameters = [type[]]@([IntPtr]); Body = {
+                param($env) $fixture.Pending = $false; $fixture.Cleared++
+            } }
+        )
+        foreach ($call in $calls) {
+            $delegateType = & $newDelegate $call.Name $call.Return $call.Parameters
+            $callback = [Management.Automation.LanguagePrimitives]::ConvertTo($call.Body, $delegateType)
+            $roots.Add($callback)
+            [Runtime.InteropServices.Marshal]::WriteIntPtr($table,
+                $script:JniFunctionTable[$call.Name] * $pointerSize,
+                [Runtime.InteropServices.Marshal]::GetFunctionPointerForDelegate($callback))
+        }
+        $null = $bind.Invoke($null, [object[]]@($activityPointer))
+        if (($fixture.Names -join ',') -cne 'n_onActivityResult,n_onRequestPermissionsResult' -or
+            ($fixture.Descriptors -join ',') -cne '(IILandroid/content/Intent;)V,(I[Ljava/lang/String;[I)V') {
+            throw 'Emitted native registrations disagree with the Java peer.'
+        }
+        $hostType.GetField('OnActivityResultHandler').SetValue($null,
+            [Action[int,int,IntPtr]]{ param($request, $result, $data) $fixture.Callback = "$request,$result,$($data.ToInt64())" })
+        $hostType.GetField('OnRequestPermissionsResultHandler').SetValue($null,
+            [Action[int,IntPtr,IntPtr]]{ param($request, $permissions, $results) $fixture.Permissions = "$request,$($permissions.ToInt64()),$($results.ToInt64())" })
+        $resultType = & $newDelegate 'ActivityResult' ([void]) ([type[]]@([IntPtr], [IntPtr], [int], [int], [IntPtr]))
+        $resultReceiver = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($fixture.Pointers[0], $resultType)
+        $resultReceiver.Invoke($envPointer, [IntPtr]0x1234, 1001, -1, [IntPtr]0x2468)
+        $permissionType = & $newDelegate 'PermissionsResult' ([void]) ([type[]]@([IntPtr], [IntPtr], [int], [IntPtr], [IntPtr]))
+        $permissionReceiver = [Runtime.InteropServices.Marshal]::GetDelegateForFunctionPointer($fixture.Pointers[1], $permissionType)
+        $permissionReceiver.Invoke($envPointer, [IntPtr]0x1234, 1002, [IntPtr]0x1357, [IntPtr]0x2468)
+        if ($fixture.Callback -cne '1001,-1,9320' -or $fixture.Permissions -cne '1002,4951,9320') { throw 'Native receivers did not reach PowerShell.' }
+        # A thrown handler must never unwind across a JNI native boundary.
+        $hostType.GetField('OnActivityResultHandler').SetValue($null,
+            [Action[int,int,IntPtr]]{ throw 'Deliberate peer handler failure.' })
+        $resultReceiver.Invoke($envPointer, [IntPtr]0x1234, 0, 0, [IntPtr]::Zero)
+        $fixture.Fail = $true
+        foreach ($control in @(
+            @{ Pending = $false; Message = 'RegisterNatives rejected the owned activity peer.' },
+            @{ Pending = $true; Message = 'Java exception during owned peer registration.' })) {
+            $fixture.Pending = $control.Pending
+            $rejected = $false
+            try { $null = $bind.Invoke($null, [object[]]@($activityPointer)) }
+            catch { if ($_.Exception.GetBaseException().Message -cne $control.Message) { throw }; $rejected = $true }
+            if (-not $rejected) { throw 'Owned peer failure control was accepted.' }
+        }
+        if ($fixture.Deleted -ne 3 -or $fixture.Cleared -ne 1 -or $fixture.Pending -or $fixture.Errors.Count) {
+            throw "Owned peer cleanup failed: $($fixture.Errors -join '; ')"
+        }
+        Test-DocumentImportMethods -Owner $hostType -CheckDirectory $CheckDirectory
+        Write-Host '[PASS] Owned peer self-test: two native callbacks, handler exception contained, registration failure rejected, Java exception cleared, three local references released; CoreLib only.' -ForegroundColor Green
+    }
+    finally {
+        [GC]::KeepAlive($roots)
+        foreach ($pointer in $allocations) { [Runtime.InteropServices.Marshal]::FreeHGlobal($pointer) }
+        $script:PersistedMethods = $savedMethods
+    }
+}
+
 function New-ManagedHostAssemblyBytes {
     # Dev.MansfieldPlumbing.Pwsh: the managed entries the emitted native host
     # reaches through coreclr_create_delegate. It references SMA and CoreLib
@@ -2100,6 +2629,7 @@ function New-ManagedHostAssemblyBytes {
     $module = $builder.DefineDynamicModule("$($script:ManagedNamespace).dll")
     # The New-Clr* helpers bind the Expression factory overloads through this.
     Initialize-ExpressionKit
+    Test-NativePeerMethods -CheckDirectory ([IO.Path]::GetDirectoryName($script:ApkPath))
 
         # The managed entries the emitted native host reaches through
         # coreclr_create_delegate. They touch no Android type, so Mono.Android
@@ -2146,6 +2676,7 @@ function New-ManagedHostAssemblyBytes {
             (New-ClrProperty $first (Get-ExactProperty ([psobject]) 'BaseObject')), [int])
         $nativeHostType = $module.DefineType('Dev.MansfieldPlumbing.Pwsh.NativeHost',
             [Reflection.TypeAttributes]'Public,Abstract,Sealed,BeforeFieldInit')
+        $bindPeers = Add-NativePeerMethods -Module $module -Owner $nativeHostType -LogWrite $logWrite -ErrorPriority $errorPriority
         $concat = Get-ExactMethod ([string]) 'Concat' @([string], [string])
         $hexText = { param($value) New-ClrCall $value (Get-ExactMethod ([int]) 'ToString' @([string])) @((New-ClrConstant 'x8' ([string]))) }
         # Gate 2d substrate: Profile.ps1 through the product's path, less
@@ -2154,6 +2685,7 @@ function New-ManagedHostAssemblyBytes {
         # base directory the host passes without its trailing separator;
         # FindProfile is the product's case-insensitive lookup.
         $nativeFind = New-FindProfileMethod -Owner $nativeHostType -Attributes ([Reflection.MethodAttributes]'Private,Static,HideBySig')
+        $null = Add-DocumentImportMethods -Owner $nativeHostType -FindProfile $nativeFind.Method
         $sessionState = New-ClrProperty $runspaceVar (Get-ExactProperty $runspaceType 'SessionStateProxy')
         $profileErrors = New-ClrProperty (New-ClrProperty $profileShell (Get-ExactProperty ([powershell]) 'Streams')) (Get-ExactProperty ([Management.Automation.PSDataStreams]) 'Error')
         $errorCollection = (Get-ExactProperty ([Management.Automation.PSDataStreams]) 'Error').PropertyType
@@ -2439,6 +2971,8 @@ function New-ManagedHostAssemblyBytes {
                 (New-StaticCall (Get-ExactMethod ([Environment]) 'SetEnvironmentVariable' @([string], [string])) @(
                     (New-ClrConstant 'POWERSHELL_TELEMETRY_OPTOUT' ([string])),
                     (New-ClrConstant '1' ([string])))),
+                (New-StaticCall $bindPeers @($nativeActivity)),
+                (& $mark 'PEERS REGISTERED 2'),
                 (New-StaticCall $run @($nativeActivity)))), $catch)))
         # Gate 2a, kept as an in-process invariant: the host calls it first
         # and requires 'PWSH' (0x50575348) before it calls RunPowerShell.
@@ -5831,22 +6365,24 @@ function Assert-NativeAdmissionApk {
     param([Parameter(Mandatory)][string[]] $EntryNames)
 
     $abi = $script:Target.Abi
-    $forbidden = @($EntryNames | Where-Object { $_ -like '*.dex' -or $_ -like '*/libmonodroid.so' -or $_ -like '*/libxamarin-app.so' })
-    if ($forbidden.Count) { throw "The NativeActivity APK carries Xamarin or DEX entries: $($forbidden -join ', ')" }
+    $forbidden = @($EntryNames | Where-Object { $_ -like '*/libmonodroid.so' -or $_ -like '*/libxamarin-app.so' })
+    if ($forbidden.Count) { throw "The NativeActivity APK carries Xamarin entries: $($forbidden -join ', ')" }
+    if (@($EntryNames | Where-Object { $_ -like '*.dex' }).Count -ne 2 -or
+        'classes.dex' -notin $EntryNames -or 'classes2.dex' -notin $EntryNames) { throw 'The APK must contain the owned activity peer and pinned runtime crypto DEX only.' }
     if ("lib/$abi/libpwsh-host.so" -notin $EntryNames) { throw "The NativeActivity APK lacks lib/$abi/libpwsh-host.so." }
 
     $manifest = Test-BinaryAxml -Document ([byte[]]$script:BuildContext.AndroidManifest.Bytes)
     if (@($manifest.Elements | Where-Object Name -eq 'provider').Count) { throw 'The NativeActivity manifest declares a provider.' }
     if (@($manifest.Strings | Where-Object { $_ -like '*MonoRuntimeProvider*' }).Count) { throw 'The NativeActivity manifest string pool names MonoRuntimeProvider.' }
     $application = @($manifest.Elements | Where-Object Name -eq 'application')[0]
-    if ($application.Attributes['hasCode'] -ne 0) { throw 'The NativeActivity manifest does not set android:hasCode="false".' }
+    if ($application.Attributes['hasCode'] -eq 0) { throw 'The owned activity manifest must set android:hasCode="true".' }
     # android:debuggable is present exactly when -Debuggable asked for it.
     if ($Debuggable) {
         if (-not $application.Attributes.Contains('debuggable') -or $application.Attributes['debuggable'] -eq 0) { throw 'The -Debuggable manifest does not set android:debuggable="true".' }
     }
     elseif ($application.Attributes.Contains('debuggable') -or @($manifest.Strings) -ccontains 'debuggable') { throw 'The release NativeActivity manifest carries android:debuggable.' }
     $activity = @($manifest.Elements | Where-Object Name -eq 'activity')
-    if ($activity.Count -ne 1 -or $activity[0].Attributes['name'] -cne 'android.app.NativeActivity') { throw 'The manifest activity is not android.app.NativeActivity.' }
+    if ($activity.Count -ne 1 -or $activity[0].Attributes['name'] -cne "$($script:PackageName).$($script:ActivityClassName)") { throw 'The manifest activity is not the owned NativeActivity subclass.' }
     $libName = @($manifest.Elements | Where-Object { $_.Name -eq 'meta-data' -and $_.Attributes['name'] -ceq 'android.app.lib_name' })
     if ($libName.Count -ne 1 -or $libName[0].Attributes['value'] -cne 'pwsh-host') { throw 'The manifest does not name pwsh-host as android.app.lib_name.' }
 
@@ -5860,7 +6396,7 @@ function Assert-NativeAdmissionApk {
         if ($entry -notin $EntryNames) { throw "The NativeActivity APK lacks $entry." }
     }
 
-    Write-Host ('[PASS] NativeActivity admission: {0} entries, none DEX, libmonodroid or libxamarin-app; manifest has no provider, hasCode=false, android.app.NativeActivity with lib_name pwsh-host; libpwsh-host.so needs only libc, liblog, libcoreclr and the store library.' -f
+    Write-Host ('[PASS] NativeActivity admission: {0} entries, owned peer and pinned runtime crypto DEX, no libmonodroid or libxamarin-app; manifest has no provider, hasCode=true, owned NativeActivity with lib_name pwsh-host; libpwsh-host.so needs only libc, liblog, libcoreclr and the store library.' -f
         $EntryNames.Count) -ForegroundColor Green
 }
 
@@ -6090,6 +6626,133 @@ function Get-Adler32 {
     return [uint32](($b -shl 16) -bor $a)
 }
 
+function New-JavaPeerDex {
+    # Restoration source: Pwsh 0804758, New-JavaPeerDex. The owned peer calls
+    # framework methods and registered native receivers, never mono.android.
+    # DEX ordering and code_item layout retain that emitter's established forms.
+    param([Parameter(Mandatory)][string] $ClassDescriptor)
+
+    if ($ClassDescriptor -cnotmatch '^L[a-zA-Z0-9_/$]+;$') {
+        throw "Invalid Java peer descriptor '$ClassDescriptor'."
+    }
+    $baseDescriptor = 'Landroid/app/NativeActivity;'
+    $voidProto = @{ Shorty = 'V'; Return = 'V'; Parameters = @() }
+    $resultProto = @{ Shorty = 'VIIL'; Return = 'V'; Parameters = @('I', 'I', 'Landroid/content/Intent;') }
+    $permissionProto = @{ Shorty = 'VILL'; Return = 'V'; Parameters = @('I', '[Ljava/lang/String;', '[I') }
+    $loadProto = @{ Shorty = 'VL'; Return = 'V'; Parameters = @('Ljava/lang/String;') }
+    $methods = @(
+        @{ Class = $baseDescriptor; Name = '<init>'; Proto = $voidProto },
+        @{ Class = $ClassDescriptor; Name = '<init>'; Proto = $voidProto },
+        @{ Class = $ClassDescriptor; Name = '<clinit>'; Proto = $voidProto },
+        @{ Class = 'Ljava/lang/System;'; Name = 'loadLibrary'; Proto = $loadProto },
+        @{ Class = $baseDescriptor; Name = 'onActivityResult'; Proto = $resultProto },
+        @{ Class = $ClassDescriptor; Name = 'onActivityResult'; Proto = $resultProto },
+        @{ Class = $ClassDescriptor; Name = 'n_onActivityResult'; Proto = $resultProto },
+        @{ Class = $baseDescriptor; Name = 'onRequestPermissionsResult'; Proto = $permissionProto },
+        @{ Class = $ClassDescriptor; Name = 'onRequestPermissionsResult'; Proto = $permissionProto },
+        @{ Class = $ClassDescriptor; Name = 'n_onRequestPermissionsResult'; Proto = $permissionProto }
+    )
+    $typeSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $stringSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($method in $methods) {
+        [void]$typeSet.Add($method.Class)
+        [void]$typeSet.Add($method.Proto.Return)
+        foreach ($parameter in $method.Proto.Parameters) { [void]$typeSet.Add($parameter) }
+        [void]$stringSet.Add($method.Name)
+        [void]$stringSet.Add($method.Proto.Shorty)
+        $method.Return = $method.Proto.Return
+        $method.Parameters = $method.Proto.Parameters
+    }
+    foreach ($descriptor in $typeSet) { [void]$stringSet.Add($descriptor) }
+    $cryptoLibrary = 'System.Security.Cryptography.Native.Android'
+    [void]$stringSet.Add($cryptoLibrary)
+    $sortedStrings = [string[]]@($stringSet)
+    [Array]::Sort($sortedStrings, [StringComparer]::Ordinal)
+    $stringIndex = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+    for ($index = 0; $index -lt $sortedStrings.Length; $index++) { $stringIndex.Add($sortedStrings[$index], $index) }
+    $sortedTypes = [string[]]@($typeSet | Sort-Object { $stringIndex[$_] })
+    $typeIndex = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+    for ($index = 0; $index -lt $sortedTypes.Length; $index++) { $typeIndex.Add($sortedTypes[$index], $index) }
+    $sortedProtos = @(@($voidProto, $resultProto, $permissionProto, $loadProto) | Sort-Object `
+        @{ Expression = { $typeIndex[$_.Return] } },
+        @{ Expression = { ($_.Parameters | ForEach-Object { '{0:D6}' -f $typeIndex[$_] }) -join '' } })
+    $protoKey = { param([string] $Return, [string[]] $Parameters) $Return + '(' + ($Parameters -join ',') + ')' }
+    $protoIndex = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+    for ($index = 0; $index -lt $sortedProtos.Count; $index++) {
+        $protoIndex.Add((& $protoKey $sortedProtos[$index].Return $sortedProtos[$index].Parameters), $index)
+    }
+    $sortedMethods = @($methods | Sort-Object `
+        @{ Expression = { $typeIndex[$_.Class] } },
+        @{ Expression = { $stringIndex[$_.Name] } },
+        @{ Expression = { $protoIndex[(& $protoKey $_.Return $_.Parameters)] } })
+    $methodIndex = [Collections.Generic.Dictionary[string,int]]::new([StringComparer]::Ordinal)
+    for ($index = 0; $index -lt $sortedMethods.Count; $index++) {
+        $method = $sortedMethods[$index]
+        $methodIndex.Add(($method.Class + '->' + $method.Name + (& $protoKey $method.Return $method.Parameters)), $index)
+    }
+    # Dalvik instruction formats 10x, 21c and 35c, as used by 0804758.
+    # Keep the operation names beside the encodings; argument registers are
+    # explicit and every referenced method is resolved from the sorted pools.
+    $emitInvoke = {
+        param([IO.BinaryWriter] $Writer, [byte] $Opcode, [string] $Owner, [string] $Name, $Proto, [int[]] $Registers)
+        if ($Registers.Count -gt 5 -or @($Registers | Where-Object { $_ -lt 0 -or $_ -gt 15 }).Count) {
+            throw 'DEX 35c requires at most five four-bit register arguments.'
+        }
+        $key = $Owner + '->' + $Name + (& $protoKey $Proto.Return $Proto.Parameters)
+        $fifth = if ($Registers.Count -eq 5) { $Registers[4] } else { 0 }
+        $Writer.Write([uint16]([int]$Opcode -bor ($fifth -shl 8) -bor ($Registers.Count -shl 12)))
+        $Writer.Write([uint16]$methodIndex[$key])
+        $packed = 0
+        for ($argument = 0; $argument -lt [Math]::Min(4, $Registers.Count); $argument++) {
+            $packed = $packed -bor ($Registers[$argument] -shl (4 * $argument))
+        }
+        $Writer.Write([uint16]$packed)
+    }
+    $codeBodies = [ordered]@{}
+    foreach ($name in @('<clinit>', '<init>', 'onActivityResult', 'onRequestPermissionsResult')) {
+        $stream = [IO.MemoryStream]::new()
+        $writer = [IO.BinaryWriter]::new($stream)
+        try {
+            $registers = 1; $incoming = 0; $outgoing = 1
+            switch -CaseSensitive ($name) {
+                '<clinit>' {
+                    $writer.Write([uint16]0x001a) # const-string v0
+                    $writer.Write([uint16]$stringIndex[$cryptoLibrary])
+                    & $emitInvoke $writer 0x71 'Ljava/lang/System;' 'loadLibrary' $loadProto @(0)
+                }
+                '<init>' {
+                    $incoming = 1
+                    & $emitInvoke $writer 0x70 $baseDescriptor '<init>' $voidProto @(0)
+                }
+                default {
+                    $registers = 4; $incoming = 4; $outgoing = 4
+                    $proto = if ($name -ceq 'onActivityResult') { $resultProto } else { $permissionProto }
+                    & $emitInvoke $writer 0x6f $baseDescriptor $name $proto @(0, 1, 2, 3) # invoke-super
+                    & $emitInvoke $writer 0x70 $ClassDescriptor ('n_' + $name) $proto @(0, 1, 2, 3) # invoke-direct
+                }
+            }
+            $writer.Write([uint16]0x000e) # return-void
+            $writer.Flush()
+            $codeBodies[$name] = @{ Registers = $registers; Ins = $incoming; Outs = $outgoing; Insns = $stream.ToArray() }
+        }
+        finally { $writer.Dispose(); $stream.Dispose() }
+    }
+    [pscustomobject]@{
+        SelfDescriptor = $ClassDescriptor; BaseDescriptor = $baseDescriptor; Interfaces = @()
+        SortedStrings = $sortedStrings; StringIndex = $stringIndex
+        SortedTypes = $sortedTypes; TypeIndex = $typeIndex
+        SortedProtos = $sortedProtos; ProtoIndex = $protoIndex; ProtoKey = $protoKey
+        SortedFields = @(); FieldIndex = @(); SortedMethods = $sortedMethods; MethodIndex = $methodIndex
+        CodeBodies = $codeBodies
+        DirectMethods = @('<clinit>', '<init>', 'n_onActivityResult', 'n_onRequestPermissionsResult')
+        AccessFlags = @{
+            '<clinit>' = 0x10008; '<init>' = 0x10001
+            'n_onActivityResult' = 0x0102; 'n_onRequestPermissionsResult' = 0x0102
+            'onActivityResult' = 0x0004; 'onRequestPermissionsResult' = 0x0001
+        }
+    }
+}
+
 function ConvertTo-DexImage {
     param([Parameter(Mandatory)][pscustomobject] $Plan)
 
@@ -6132,9 +6795,12 @@ function ConvertTo-DexImage {
         foreach ($parameter in $proto.Parameters) { & $writeU16 $Plan.TypeIndex[$parameter] }
         $typeListOffsets[$key] = $offset
     }
-    $interfacesOffset = & $align 4
-    & $writeU32 1
-    & $writeU16 $Plan.TypeIndex['Lmono/android/IGCUserPeer;']
+    $interfacesOffset = 0
+    if ($Plan.Interfaces.Count -gt 0) {
+        $interfacesOffset = & $align 4
+        & $writeU32 $Plan.Interfaces.Count
+        foreach ($descriptor in $Plan.Interfaces) { & $writeU16 $Plan.TypeIndex[$descriptor] }
+    }
 
     # --- string data ------------------------------------------------------
     $stringDataOffsets = New-Object int[] $stringCount
@@ -6164,22 +6830,13 @@ function ConvertTo-DexImage {
 
     # --- class data -------------------------------------------------------
     $selfMethods = @($Plan.SortedMethods | Where-Object { $_.Class -ceq $Plan.SelfDescriptor })
-    $direct = @('<clinit>', '<init>', 'n_onActivityResult', 'n_onCreate')
+    $direct = $Plan.DirectMethods
     $directMethods = @($selfMethods | Where-Object { $direct -contains $_.Name } |
         Sort-Object { $Plan.MethodIndex[$_.Class + '->' + $_.Name + (& $Plan.ProtoKey $_.Return $_.Parameters)] })
     $virtualMethods = @($selfMethods | Where-Object { $direct -notcontains $_.Name } |
         Sort-Object { $Plan.MethodIndex[$_.Class + '->' + $_.Name + (& $Plan.ProtoKey $_.Return $_.Parameters)] })
 
-    $accessFlags = @{
-        '<clinit>'                 = 0x10008   # static | constructor
-        '<init>'                   = 0x10001   # public | constructor
-        'n_onCreate'               = 0x0102    # private | native
-        'n_onActivityResult'       = 0x0102    # private | native
-        'monodroidAddReference'    = 0x0001
-        'monodroidClearReferences' = 0x0001
-        'onCreate'                 = 0x0001
-        'onActivityResult'         = 0x0001
-    }
+    $accessFlags = $Plan.AccessFlags
 
     $classDataOffset = [int]($dataOff + $data.Position)
     Write-Uleb128 -Stream $data -Value 0                        # static_fields_size
@@ -6216,15 +6873,19 @@ function ConvertTo-DexImage {
         @{ Type = 0x0001; Size = $stringCount; Offset = $stringIdsOff },
         @{ Type = 0x0002; Size = $typeCount;   Offset = $typeIdsOff },
         @{ Type = 0x0003; Size = $protoCount;  Offset = $protoIdsOff },
-        @{ Type = 0x0004; Size = $fieldCount;  Offset = $fieldIdsOff },
         @{ Type = 0x0005; Size = $methodCount; Offset = $methodIdsOff },
         @{ Type = 0x0006; Size = 1;            Offset = $classDefsOff },
-        @{ Type = 0x1001; Size = ($typeListOffsets.Count + 1); Offset = ($typeListOffsets.Values + @($interfacesOffset) | Measure-Object -Minimum).Minimum },
         @{ Type = 0x2002; Size = $stringCount; Offset = $stringDataOffsets[0] },
         @{ Type = 0x2001; Size = $codeOffsets.Count; Offset = ($codeOffsets.Values | Measure-Object -Minimum).Minimum },
         @{ Type = 0x2000; Size = 1;            Offset = $classDataOffset },
         @{ Type = 0x1000; Size = 1;            Offset = $mapOffset }
     )
+    if ($fieldCount -gt 0) { $mapEntries += @{ Type = 0x0004; Size = $fieldCount; Offset = $fieldIdsOff } }
+    $listOffsets = @($typeListOffsets.Values)
+    if ($interfacesOffset -ne 0) { $listOffsets += $interfacesOffset }
+    if ($listOffsets.Count -gt 0) {
+        $mapEntries += @{ Type = 0x1001; Size = $listOffsets.Count; Offset = ($listOffsets | Measure-Object -Minimum).Minimum }
+    }
     $mapEntries = @($mapEntries | Sort-Object { $_.Offset })
     & $writeU32 $mapEntries.Count
     foreach ($entry in $mapEntries) {
@@ -6254,7 +6915,7 @@ function ConvertTo-DexImage {
         $writer.Write([uint32]$stringCount); $writer.Write([uint32]$stringIdsOff)
         $writer.Write([uint32]$typeCount);   $writer.Write([uint32]$typeIdsOff)
         $writer.Write([uint32]$protoCount);  $writer.Write([uint32]$protoIdsOff)
-        $writer.Write([uint32]$fieldCount);  $writer.Write([uint32]$fieldIdsOff)
+        $writer.Write([uint32]$fieldCount);  $writer.Write([uint32]$(if ($fieldCount -eq 0) { 0 } else { $fieldIdsOff }))
         $writer.Write([uint32]$methodCount); $writer.Write([uint32]$methodIdsOff)
         $writer.Write([uint32]1);            $writer.Write([uint32]$classDefsOff)
         $writer.Write([uint32]$dataBytes.Length); $writer.Write([uint32]$dataOff)
@@ -6280,7 +6941,7 @@ function ConvertTo-DexImage {
 
         $writer.Write([uint32]$Plan.TypeIndex[$Plan.SelfDescriptor])
         $writer.Write([uint32]0x0001)                                  # public
-        $writer.Write([uint32]$Plan.TypeIndex['Landroid/app/Activity;'])
+        $writer.Write([uint32]$Plan.TypeIndex[$Plan.BaseDescriptor])
         $writer.Write([uint32]$interfacesOffset)
         $writer.Write($NO_INDEX)                                       # source_file_idx
         $writer.Write([uint32]0)                                       # annotations_off
@@ -6307,6 +6968,96 @@ function ConvertTo-DexImage {
     [System.Array]::Copy([BitConverter]::GetBytes([uint32]$checksum), 0, $image, 8, 4)
 
     return $image
+}
+
+function Test-JavaPeerDex {
+    # Restored from 0804758 and checked against the owned NativeActivity shape.
+    param([Parameter(Mandatory)][byte[]] $Dex, [Parameter(Mandatory)][string] $ExpectedDescriptor)
+    if ($Dex.Length -lt 112 -or [Text.Encoding]::ASCII.GetString($Dex, 0, 8) -cne "dex`n039`0") {
+        throw 'The owned peer requires a DEX 039 header.'
+    }
+    if ([BitConverter]::ToUInt32($Dex, 32) -ne $Dex.Length -or
+        [BitConverter]::ToUInt32($Dex, 36) -ne 112 -or
+        [BitConverter]::ToUInt32($Dex, 40) -ne 0x12345678) { throw 'Invalid DEX header sizes or endian tag.' }
+    $sha1 = [Security.Cryptography.SHA1]::Create()
+    try { $signature = $sha1.ComputeHash($Dex, 32, $Dex.Length - 32) }
+    finally { $sha1.Dispose() }
+    if ([Convert]::ToHexString($signature) -cne [Convert]::ToHexString($Dex, 12, 20)) { throw 'Invalid DEX SHA-1.' }
+    if ([BitConverter]::ToUInt32($Dex, 8) -ne (Get-Adler32 $Dex 12 ($Dex.Length - 12))) { throw 'Invalid DEX Adler-32.' }
+    $readUleb = {
+        param([ref] $Cursor)
+        $value = 0; $shift = 0
+        do {
+            if ($Cursor.Value -ge $Dex.Length -or $shift -ge 35) { throw 'Invalid DEX ULEB128.' }
+            $octet = $Dex[$Cursor.Value]; $Cursor.Value++
+            $value = $value -bor (($octet -band 127) -shl $shift); $shift += 7
+        } while (($octet -band 128) -ne 0)
+        $value
+    }
+    $stringCount = [int][BitConverter]::ToUInt32($Dex, 56)
+    $stringOffset = [int][BitConverter]::ToUInt32($Dex, 60)
+    $strings = [Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt $stringCount; $index++) {
+        $cursor = [int][BitConverter]::ToUInt32($Dex, $stringOffset + 4 * $index)
+        $length = & $readUleb ([ref]$cursor)
+        $start = $cursor
+        while ($cursor -lt $Dex.Length -and $Dex[$cursor] -ne 0) { $cursor++ }
+        if ($cursor -ge $Dex.Length) { throw 'Unterminated DEX string.' }
+        $text = [Text.Encoding]::UTF8.GetString($Dex, $start, $cursor - $start)
+        if ($text.Length -ne $length) { throw 'Incorrect DEX string length.' }
+        if ($index -gt 0 -and [string]::CompareOrdinal($strings[$index - 1], $text) -ge 0) { throw 'Unsorted DEX strings.' }
+        if ($text -cmatch 'mono/android|Java/Interop|monodroid') { throw 'Xamarin reference in owned DEX peer.' }
+        $strings.Add($text)
+    }
+    $typeCount = [int][BitConverter]::ToUInt32($Dex, 64)
+    $typeOffset = [int][BitConverter]::ToUInt32($Dex, 68)
+    $types = [Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt $typeCount; $index++) {
+        $types.Add($strings[[int][BitConverter]::ToUInt32($Dex, $typeOffset + 4 * $index)])
+    }
+    if ([BitConverter]::ToUInt32($Dex, 96) -ne 1) { throw 'The owned peer DEX must define one class.' }
+    $classOffset = [int][BitConverter]::ToUInt32($Dex, 100)
+    if ($types[[int][BitConverter]::ToUInt32($Dex, $classOffset)] -cne $ExpectedDescriptor -or
+        $types[[int][BitConverter]::ToUInt32($Dex, $classOffset + 8)] -cne 'Landroid/app/NativeActivity;' -or
+        [BitConverter]::ToUInt32($Dex, $classOffset + 12) -ne 0) { throw 'Incorrect owned NativeActivity class shape.' }
+    $cursor = [int][BitConverter]::ToUInt32($Dex, $classOffset + 24)
+    $counts = @(for ($index = 0; $index -lt 4; $index++) { & $readUleb ([ref]$cursor) })
+    if (($counts -join ',') -cne '0,0,4,2') { throw 'The owned peer must have no fields, four direct methods and two virtual methods.' }
+    $methodOffset = [int][BitConverter]::ToUInt32($Dex, 92)
+    $readMethods = [ordered]@{}
+    foreach ($count in $counts[2..3]) {
+        $methodIndex = 0
+        for ($index = 0; $index -lt $count; $index++) {
+            $methodIndex += & $readUleb ([ref]$cursor)
+            $flags = & $readUleb ([ref]$cursor)
+            $codeOffset = & $readUleb ([ref]$cursor)
+            $methodName = $strings[[int][BitConverter]::ToUInt32($Dex, $methodOffset + 8 * $methodIndex + 4)]
+            $native = ($flags -band 0x100) -ne 0
+            if ($native -ne ($codeOffset -eq 0)) { throw "Invalid native/code pairing for $methodName." }
+            if ($codeOffset -ne 0 -and ($codeOffset % 4) -ne 0) { throw 'Misaligned DEX code item.' }
+            $readMethods[$methodName] = [pscustomobject]@{ Flags = $flags; CodeOffset = $codeOffset }
+        }
+    }
+    foreach ($name in @('<init>', '<clinit>', 'onActivityResult', 'n_onActivityResult', 'onRequestPermissionsResult', 'n_onRequestPermissionsResult')) {
+        if (-not $readMethods.Contains($name)) { throw "The owned peer lacks $name." }
+    }
+    [pscustomobject]@{ FileSize = $Dex.Length; Descriptor = $ExpectedDescriptor; Methods = $readMethods; Strings = $strings.ToArray() }
+}
+
+function Invoke-DexStep {
+    $descriptor = 'L' + $script:PackageName.Replace('.', '/') + '/' + $script:ActivityClassName + ';'
+    $plan = New-JavaPeerDex -ClassDescriptor $descriptor
+    $bytes = [byte[]](ConvertTo-DexImage -Plan $plan)
+    $report = Test-JavaPeerDex -Dex $bytes -ExpectedDescriptor $descriptor
+    $damaged = [byte[]]$bytes.Clone()
+    $damaged[120] = $damaged[120] -bxor 1
+    $rejected = $false
+    try { $null = Test-JavaPeerDex -Dex $damaged -ExpectedDescriptor $descriptor }
+    catch { if ($_.Exception.Message -cne 'Invalid DEX SHA-1.') { throw }; $rejected = $true }
+    if (-not $rejected) { throw 'DEX corruption control was accepted.' }
+    $script:BuildContext.PeerDex = [pscustomobject]@{ Bytes = $bytes; Descriptor = $descriptor }
+    Write-Host ('[PASS] Owned Java peer: {0} bytes; {1} methods; NativeActivity base; SHA-1, Adler-32, ordering, native bodies and corruption control checked; no Xamarin references.' -f
+        $bytes.Length, $report.Methods.Count) -ForegroundColor Green
 }
 
 function Get-NativePayload {
@@ -6542,6 +7293,7 @@ function Get-StartupScriptAssets {
 }
 
 function Invoke-AssembleStep {
+    Invoke-DexStep
 
     $abi = $script:Target.Abi
     $runtimePack = "Microsoft.NETCore.App.Runtime.$($script:Target.Rid)"
@@ -6567,6 +7319,8 @@ function Invoke-AssembleStep {
     & $add 'res/mipmap-anydpi-v26/ic_launcher.xml' $adaptiveIcon $false 0
     & $add 'res/mipmap-anydpi-v26/ic_tv_banner.xml' $tvBanner $false 0
     & $add 'res/mipmap-nodpi-v4/ic_launcher_foreground.png' (Import-LibSourceBytes -Path 'ic_launcher.png') $true 4
+    & $add 'classes.dex' ([byte[]]$script:BuildContext.PeerDex.Bytes) $false 0
+    & $add 'classes2.dex' (Get-NativePayload -PackageId $runtimePack -EntryPath "runtimes/$($script:Target.Rid)/native/libSystem.Security.Cryptography.Native.Android.dex") $false 0
     & $add "lib/$abi/libpwsh-host.so" ([byte[]]$script:BuildContext.NativeHost.Bytes) $false 0
     & $add "lib/$abi/libassembly-store.so" ([byte[]]$script:BuildContext.StoreLibrary.Bytes) $false 0
     & $add "lib/$abi/libpsl-native.so" ([byte[]]$script:BuildContext.PslNative.Bytes) $false 0
@@ -7277,8 +8031,7 @@ function New-BinaryAxmlManifest {
         $resIds += 0x0101000F
     }
     $otherStrings = @($otherStrings | Where-Object { $_ -notin 'mono.MonoRuntimeProvider', $providerAuthority, 'provider' })
-    $otherStrings += @('android.app.NativeActivity', 'android.app.lib_name', $NativeLibraryName)
-    $activityFullName = 'android.app.NativeActivity'
+    $otherStrings += @('android.app.lib_name', $NativeLibraryName)
 
     $allStrings = $attrNames + $otherStrings
     $strMap = @{}
@@ -7485,7 +8238,7 @@ function New-BinaryAxmlManifest {
     # Attributes are written in resource-id order; hasCode (0x0101000C)
     # follows name (0x01010003).
     # debuggable (0x0101000F) follows hasCode.
-    $flags = @((Attr-Bool 'hasCode' $false)) + @(if ($Debuggable) { (Attr-Bool 'debuggable' $true) })
+    $flags = @((Attr-Bool 'hasCode' $true)) + @(if ($Debuggable) { (Attr-Bool 'debuggable' $true) })
     $appAttrs = @($appAttrs[0..2]) + $flags + @($appAttrs[3..5])
     Write-StartElem 'application' $appAttrs 12
 
@@ -7874,7 +8627,7 @@ function Invoke-ManifestStep {
         $report.FileSize,
         $report.ElementCount,
         $script:PackageName,
-        'android.app.NativeActivity',
+        "$($script:PackageName).$($script:ActivityClassName)",
         $manifestHash,
         $checkedIds) -ForegroundColor Green
 }
