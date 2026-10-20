@@ -1245,8 +1245,8 @@ function Select-UsbAdbDevice {
         substring of its friendly name or instance ID.
     #>
     [CmdletBinding()]
-    param([string] $Selector)
-    $devices = @(Get-UsbAdbDevices)
+    param([string] $Selector, [object[]] $Devices)
+    $devices = if ($PSBoundParameters.ContainsKey('Devices')) { @($Devices) } else { @(Get-UsbAdbDevices) }
     if ($devices.Count -eq 0) { throw 'No connected Android ADB USB interfaces detected.' }
     if ([string]::IsNullOrWhiteSpace($Selector)) {
         if ($devices.Count -eq 1) { return $devices[0] }
@@ -1336,6 +1336,9 @@ function Start-AdbServer {
     $security.AddAccessRule([System.IO.Pipes.PipeAccessRule]::new($user, [System.IO.Pipes.PipeAccessRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow))
     $clients = @{}
     $streams = @{}
+    # The device list from the last enumeration. Enumeration (Get-PnpDevice) costs about a second, so requests reuse
+    # it; the devices request refreshes it, and any connection or operation failure discards it.
+    $known = $null
     $running = $true
     while ($running) {
         $pipe = [System.IO.Pipes.NamedPipeServerStreamAcl]::Create($script:AdbPipeName, [System.IO.Pipes.PipeDirection]::InOut, 1,
@@ -1352,7 +1355,8 @@ function Start-AdbServer {
                 switch ($request.Op) {
                     'kill' { $running = $false; $response = @{ ExitCode = 0 } }
                     'devices' {
-                        $response = @{ ExitCode = 0; Devices = @(Get-UsbAdbDevices | ForEach-Object {
+                        $known = @(Get-UsbAdbDevices)
+                        $response = @{ ExitCode = 0; Devices = @($known | ForEach-Object {
                             @{ Index = $_.Index; FriendlyName = $_.FriendlyName; RedactedInstanceId = $_.RedactedInstanceId
                                IsAccessible = $_.IsAccessible; AccessError = $_.AccessError; Connected = $clients.ContainsKey($_.InstanceId) } }) }
                     }
@@ -1381,18 +1385,20 @@ function Start-AdbServer {
                         }
                     }
                     default {
-                        $device = Select-UsbAdbDevice -Selector ([string]$request.Device)
+                        if ($null -eq $known -or $known.Count -eq 0) { $known = @(Get-UsbAdbDevices) }
+                        try { $device = Select-UsbAdbDevice -Selector ([string]$request.Device) -Devices $known }
+                        catch { $known = @(Get-UsbAdbDevices); $device = Select-UsbAdbDevice -Selector ([string]$request.Device) -Devices $known }
                         $client = $clients[$device.InstanceId]
                         if ($null -eq $client) {
                             $client = [UsbAdbClient]::new($device)
-                            try { $client.Connect() } catch { $client.Dispose(); throw }
+                            try { $client.Connect() } catch { $client.Dispose(); $known = $null; throw }
                             $clients[$device.InstanceId] = $client
                         }
                         try { $response = Invoke-AdbClientOperation -Client $client -Request $request -Streams $streams }
                         catch {
-                            # The connection's state is unknown after a failure: drop it, so
-                            # the next request reconnects (after a replug, if the device needs one).
-                            $client.Dispose(); $clients.Remove($device.InstanceId); throw
+                            # The connection's state is unknown after a failure: drop it and the device list, so
+                            # the next request enumerates and reconnects (after a replug, if the device needs one).
+                            $client.Dispose(); $clients.Remove($device.InstanceId); $known = $null; throw
                         }
                     }
                 }
