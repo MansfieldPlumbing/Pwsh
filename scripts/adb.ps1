@@ -302,7 +302,7 @@ function Get-UsbAdbDevices {
         return @()
     }
 
-    $pnp = @(Get-PnpDevice -Class 'AndroidUsbDeviceClass' -PresentOnly -ErrorAction SilentlyContinue)
+    $pnp = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue)
     $devices = [System.Collections.Generic.List[UsbAdbDeviceInfo]]::new()
     $idx = 0
 
