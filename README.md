@@ -151,6 +151,7 @@ the established facts in [AGENTS.md](AGENTS.md).
 | Commands as scripts on `PATH` | [docs/work-optional-scripts.md](docs/work-optional-scripts.md) |
 | Processes, native bundles, the broker, updates outside a store | [docs/native-extensions.md](docs/native-extensions.md) |
 | Lowering PowerShell to IL, the IL stack check | [docs/lowering.md](docs/lowering.md) |
+| `[Math]` on the UCRT against bionic, judged exactly; a correctly rounded `Sin` | [docs/libm-lineup.md](docs/libm-lineup.md) |
 | Payload reduction and compatibility stand-ins | [docs/implementation-plan.md](docs/implementation-plan.md) |
 | Working practices | [docs/practices.md](docs/practices.md) |
 | What is published where, and what is never published | [docs/publishing.md](docs/publishing.md) |
