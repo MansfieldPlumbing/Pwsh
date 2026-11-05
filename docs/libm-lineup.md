@@ -1,8 +1,9 @@
 # Math library lineup: CoreCLR on the UCRT and on bionic
 
-Status: measured 2026-11-05 on one build of the runtime on both sides; a
-correctly rounded replacement is planned, starting with `Sin`, and is not
-built. The direction this serves is removing the C runtime underneath
+Status: measured 2026-11-05 on one build of the runtime on both sides. A
+correctly rounded `Sin` is written, is correct on every input of the lineup,
+and gives identical bits on the PC and the phone; it has not yet been
+lowered by PSC. The direction this serves is removing the C runtime underneath
 PowerShell: CoreCLR's `[Math]` calls end in the platform's libm, so a
 replacement has to exist before the C runtime can go.
 
@@ -13,9 +14,10 @@ named with it. Hypotheses are labelled as such and decide nothing.
 
 Neither platform's libm is correctly rounded everywhere. Where the PC and
 the phone give different finite results, the exact answer is with Windows in
-203 cases and with Android in 134. In 5 further cases they agree and both are
-wrong. A single correctly rounded implementation would beat both platforms
-and give the same last bit on each of them.
+203 cases and with Android in 134. In 7 further `Sin` cases they agree and
+both are wrong. A single correctly rounded implementation would beat both
+platforms and give the same last bit on each of them. The first one, `Sin`,
+is correctly rounded on all 415 finite inputs (below).
 
 ## What ran
 
@@ -83,10 +85,12 @@ Three bearings, each independent of the platforms being judged:
    Windows 16, and agrees with the reference in all 134 cases.
 3. **Self-check on agreement.** On 394 cases where both platforms agree, the
    reference put the shared result within half an ulp in 382. A recheck of the
-   12 others at 300 and 500 bits found 5 genuine (below). The remaining 7 have
-   outputs too small for 300-bit fixed point to resolve, and the checker
+   12 others at 300 and 500 bits found 5 genuine `Sin` misses. The remaining 7
+   have outputs too small for 300-bit fixed point to resolve, and the checker
    could not judge them: a limit of the instrument, not a verdict. A
-   relative-precision reference would close that gap.
+   relative-precision reference would close that gap. That sample did not
+   cover every `Sin` input: the full `Sin` recheck below finds 7 shared
+   misses, not 5.
 
 ## Rare percepts
 
@@ -113,11 +117,14 @@ These are not:
   using exp(x)/2 near overflow, where e^−x no longer matters. Hypothesis.
 - **The only 2-ulp case** is `tanh(0.46885322087761505)`. The same input is
   also a `Sinh` dispute, and Windows is right on both.
-- **Both wrong together, all in `Sin`.** The five agreed misses are
-  sin(−50249637.23855045), sin(58.80164503177653),
-  sin(−50.939600584947634), sin(−3420438.16424402) and
-  sin(−91.81087528895593). Each is 0.526 to 0.567 ulp off, and the results
-  were the same at 300 and 500 bits.
+- **Both wrong together, in `Sin`.** On every finite `Sin` input there are
+  seven agreed misses: sin(−50249637.23855045), sin(58.80164503177653),
+  sin(−50.939600584947634), sin(−3420438.16424402),
+  sin(−91.81087528895593), sin(−0.7930799883685934) and
+  sin(484161.1221709688). The first five are 0.526 to 0.567 ulp off, with the
+  same results at 300 and 500 bits. sin(−0.7930799883685934) is barely past
+  π/4, so the argument reduction there is trivial: not every shared error
+  comes from reducing large arguments.
 - **musl is not an independent bearing against bionic.** Bionic's libm is
   FreeBSD's msun. Its `k_sin.c`, `k_cos.c`, `s_cbrt.c` and `k_tan.c` share
   every floating-point constant with musl 1.2.5's `__sin.c`, `__cos.c`,
@@ -141,8 +148,68 @@ a bearing, not taken as a dependency.
    decide, a slower exact path (the `BigInteger` reference) decides.
 4. Judged by the same exact reference, as a third participant in the same
    lineup on the PC and on the phone. Success is: the replacement is
-   correctly rounded in every case, including the five agreed misses and the
+   correctly rounded in every case, including the seven agreed misses and the
    ten disputes, and its bits are identical on both platforms.
+
+## First result: `Sin`
+
+`Get-LibmSin` lives in the lineup instrument
+(`C:\dev\student\experiments\smb-bearings\Invoke-Lineup.ps1`, SHA-256
+`8D8518B2…467B0`), next to its judge, and runs as
+`Invoke-Lineup.ps1 -Libm Sin -LibmLineup <lineup files>`. It calls no
+`[Math]` function. Every constant (π/2 as three doubles, 2/π, the
+coefficients 1/n! as double-double pairs) is derived when it first runs
+from π computed in `BigInteger`; none is typed in.
+
+- |x| < 2^−26 returns x (x²/6 is under half an ulp). |x| ≤ 0.78125 needs no
+  reduction. Below 2^27, Cody–Waite reduction against π/2 in three parts is
+  done in double-double. Above that, the reduction is exact in `BigInteger`,
+  standing in for a Payne–Hanek table that is not written yet.
+- sin or cos of the reduced argument is a Taylor polynomial evaluated in
+  double-double. A rounding test with an explicit error bound either returns
+  the result or falls back to the exact `BigInteger` path.
+
+Measured on the PC (pwsh 7.7.0-rc.1), interpreted, not yet lowered by PSC:
+
+| | correctly rounded |
+| --- | ---: |
+| `Get-LibmSin` | 415 / 415 |
+| Windows (UCRT) | 401 / 415 |
+| Android (bionic) | 405 / 415 |
+
+The fast path decided every input (Direct 156, Cody–Waite 185, exact
+reduction 36, tiny 38), so the exact fallback was never taken. Three
+judges agree on all 415: exact reduction by 2π over Störmer's π at 256 bits,
+exact reduction by π/2 over Machin's π at 512 bits, and the double-double
+candidate itself. The two π formulas agree to the last bit at 4096 bits. For
+∞ the candidate returns `[double]::NaN` (`FFF8000000000000`) and passes a NaN
+input through unchanged.
+
+### Same bits on the phone
+
+A payload built from the instrument's own function text (Profile.ps1,
+SHA-256 `279B7B14…11FC89`) ran through `tools/Invoke-DeviceScript.ps1` on the
+same phone (.NET 11 RC 1, arm64, SMA 7.7.0-preview.4). The same payload ran on
+the PC under the RC 1 sidecar and under pwsh 7.7.0-rc.1 (.NET 11 RC 3).
+On all 418 inputs, including the three that give NaN:
+
+- the candidate's bits are identical on the phone and on both PC runtimes;
+- the exact judge's bits are identical on the phone and the PC, and equal
+  the candidate's;
+- every path took the same branch on each platform (Direct 156, Cody–Waite
+  185, exact reduction 36, tiny 38), with no fallback;
+- the phone's own `[Math]::Sin` agrees with the candidate on 406 of the 418.
+
+Every output line matches, NaN included: the candidate returns
+`FFF8000000000000` for ±∞ on both platforms, where the platform libraries
+split between `FFF8…` and `7FF8…`. On these inputs the replacement removes
+both the accuracy differences and the NaN-encoding difference between the
+two platforms.
+
+Not done yet: lowering it through PSC, inputs beyond these 418 (a large
+random run, and the hard cases published for correctly rounded sin), a real
+Payne–Hanek reduction, and speed: interpreted, it takes about 2.2 s for 418
+inputs on the phone and 2.8 s on the PC.
 
 ## Limits
 
@@ -151,5 +218,6 @@ a bearing, not taken as a dependency.
 - 418 inputs per function find disagreements; they do not prove agreement
   anywhere else.
 - The comparison and the reference ran as session commands, so the data
-  files are not in this repository. The inputs above regenerate exactly; the
-  instrument that compares and judges belongs in one script, not yet written.
+  files are not in this repository. The inputs above regenerate exactly. For
+  `Sin`, comparing and judging now live in the lineup instrument (`-Libm`);
+  the other functions are still judged only by those session commands.
