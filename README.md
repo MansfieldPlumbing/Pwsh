@@ -156,6 +156,16 @@ the established facts in [AGENTS.md](AGENTS.md).
 | Working practices | [docs/practices.md](docs/practices.md) |
 | What is published where, and what is never published | [docs/publishing.md](docs/publishing.md) |
 
+## Upstream PSC integration
+
+The [PSC integration roadmap](https://github.com/MansfieldPlumbing/PSC#integration-roadmap) tracks reusable SDK mechanisms independently of the Android application.
+
+- **H1/F6:** [Console.psm1](modules/Console.psm1) contains the terminal model, VT parser, Unicode cell representation, SGR, editing and frame publication. [Console host contracts](docs/console-host.md) distinguish a host session from its presentation. Preserve split-sequence behavior, session identity and Unicode semantics; verify the frame ring's memory ordering before using it across concurrent readers and writers.
+- **D1/N2:** [setup.ps1](setup.ps1) implements native instruction encoding and ABI checks, ELF, assembly stores, CoreCLR hosting, DEX, binary XML and APK packaging. Reuse PSC's existing native encoding and ELF facilities instead of maintaining another generic emitter.
+- **D3/H3:** USB/ADB transport and acquisition are candidates for shared verified transport and artifact identity. Android-specific JNI, activity and deployment behavior remain this project's responsibility.
+
+These are planned acquisitions; the device and release gates above still apply. PSC's generic facilities must be verified against the original Android artifacts and device receipts before Pwsh replaces its existing mechanisms.
+
 ## What this actually is
 
 It is not a terminal emulator, and it is not a shell that shells out to a
